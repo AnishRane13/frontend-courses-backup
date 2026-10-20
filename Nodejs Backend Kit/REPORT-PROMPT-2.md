@@ -26,10 +26,10 @@
 | 01-what-nodejs-is.md | new (Topic 1 of 74) | Purpose and origin; runtime vs language vs engine vs framework; the four layers; one JS thread plus the pool (real `/proc` thread counts); I/O-bound vs CPU-bound demo; browser vs Node; release lines with a `schedule.json` reader; the 9-step lifecycle (fenced diagram) with `beforeExit`/`exit` order; edge cases: `process.exit()` and SIGTERM skipping events | assets/i04_01_4d0a93cc.svg | All scripts run as saved (lifecycle 3×); `process.versions`/`release`; v24 API docs History; previous-releases page; Learn More URLs → 200 | 2: Node 27 LTS date not on an official page; macOS/Windows thread names |
 | 02-v8-the-javascript-engine.md | new (Topic 2 of 74) | Tiers Ignition → Sparkplug → Maglev → TurboFan/Turboshaft (from `--v8-options` and a real `--trace-opt` trace); hidden classes (`%HaveSameMap`); IC states; deopt trace; GC with a `--trace-gc` excerpt; heap limits under 7 flag variants; `v8.getHeapStatistics()`; all 5 `process.memoryUsage()` fields; startup snapshot built and run; shape benchmark (cliff at 4→5 shapes, variance reported); edge cases: OOM exit 134, `Buffer.alloc` and rss | none (no V8 diagram exists) | All blocks run as saved; benchmark 10 runs × 4 sessions; snapshot blob also tried on Node 22 (exit 14, documented as "Snapshot Failure") | 2: macOS/Windows rss behaviour; why the snapshot builder runs slower |
 | 03-installing-and-managing-node.md | new (Topic 3 of 74) | Installer vs OS package vs version manager; nvm/fnm/Volta table (Volta README: unmaintained); `.nvmrc`, `.node-version`, `"volta"`; Corepack (bundled 0.35.0; not distributed from v25); LTS vs Current; real checksum + GPG verification; EACCES reproduced and fixed with throwaway prefixes; PATH on Linux; upgrading safely; Docker tags; edge case: the shell's command hash | none (i02_02 has a known issue) | nvm/fnm/Volta run under a throwaway HOME; gpgv "Good signature"; `sha256sum -c` OK and a tampered copy FAILED; real `~/.npmrc` and prefix untouched | 5: Windows fnm/Volta rows; macOS `shasum`; macOS PATH; Windows PATH; `docker run` (no Docker) |
-| 71-typescript-with-node.md | new (Topic 71 of 74) | Options table; how stripping works and what it rejects (enum, namespace, parameter properties), with version history up to Stable in v24.12.0; `--experimental-transform-types`; tsconfig (`nodenext`, `strict`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, `rewriteRelativeImportExtensions`, `types:["node"]`); `@types/node` pinning; import extensions; ESM/CJS pitfalls; `tsc --noEmit`; source maps; typed `process.env`; typed Express 5 handlers, type-checked and run | none | tsc 7.0.2 errors pasted verbatim; Express server run and hit with curl (200/404/201/400/500); tsx, ts-node and esbuild runs | none |
-| 72-modern-node-features-tour.md | new (Topic 72 of 74) | `node --run`, `node --test`, `--watch`/`--watch-path`, `--env-file`/`loadEnvFile`, permission model (real `ERR_ACCESS_DENIED`), `node:sqlite`, `require(esm)`, JSON import attributes, `URLPattern`, a real SEA binary, `util.parseArgs`, `fetch`/`WebSocket` against a local server; every entry has its "Added in" version and an edge case | none | All 17 examples run as saved; permission-flag spelling checked across Node 20/22.12/22.13/24; watch driver script; SEA built and executed on Linux | 1: macOS/Windows SEA signing steps |
-| 73-abortcontroller-and-abortsignal.md | new (Topic 73 of 74) | `abort(reason)`, `aborted`, `reason`, `throwIfAborted`, `'abort'`; `AbortSignal.timeout`/`any`/`abort`; signals with fetch, http, timers/promises, fs/promises, events.once, pipeline, child_process; a hand-written abortable function; `addAbortListener`; cancelling `Promise.race` losers; Express disconnect detection (`res.on('close')` + `!res.writableEnded`; `req.on('close')` fires at about 0 ms for POST bodies); error shapes per API | none (fenced text diagram) | 12 lesson scripts plus probes on Node 24 / Express 5.2.1, all against local servers | none |
-| 74-monorepos-and-workspaces.md | new (Topic 74 of 74) | npm workspaces (`-w`, `--workspaces`, hoisting with a real layout); pnpm 10 and Yarn 4 PnP layouts; `workspace:*` rewritten on `pnpm pack`; shared tsconfig and ESLint config; root scripts; Turborepo caching (miss/hit/restore); Changesets init/version with real diffs; a real phantom dependency (works in npm, fails in pnpm/PnP); duplicate `http-errors` breaking `instanceof` | assets/i10_01_27074a5e.svg | All 11 generator scripts re-run from scratch and diffed against the lesson (only `pnpm pack` key order varies, noted in the lesson) | 2: Nx not run; `changeset publish` not run |
+| 95-typescript-with-node.md | new (Topic 71 of 74) | Options table; how stripping works and what it rejects (enum, namespace, parameter properties), with version history up to Stable in v24.12.0; `--experimental-transform-types`; tsconfig (`nodenext`, `strict`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, `rewriteRelativeImportExtensions`, `types:["node"]`); `@types/node` pinning; import extensions; ESM/CJS pitfalls; `tsc --noEmit`; source maps; typed `process.env`; typed Express 5 handlers, type-checked and run | none | tsc 7.0.2 errors pasted verbatim; Express server run and hit with curl (200/404/201/400/500); tsx, ts-node and esbuild runs | none |
+| 96-modern-node-features-tour.md | new (Topic 72 of 74) | `node --run`, `node --test`, `--watch`/`--watch-path`, `--env-file`/`loadEnvFile`, permission model (real `ERR_ACCESS_DENIED`), `node:sqlite`, `require(esm)`, JSON import attributes, `URLPattern`, a real SEA binary, `util.parseArgs`, `fetch`/`WebSocket` against a local server; every entry has its "Added in" version and an edge case | none | All 17 examples run as saved; permission-flag spelling checked across Node 20/22.12/22.13/24; watch driver script; SEA built and executed on Linux | 1: macOS/Windows SEA signing steps |
+| 22-abortcontroller-and-abortsignal.md | new (Topic 73 of 74) | `abort(reason)`, `aborted`, `reason`, `throwIfAborted`, `'abort'`; `AbortSignal.timeout`/`any`/`abort`; signals with fetch, http, timers/promises, fs/promises, events.once, pipeline, child_process; a hand-written abortable function; `addAbortListener`; cancelling `Promise.race` losers; Express disconnect detection (`res.on('close')` + `!res.writableEnded`; `req.on('close')` fires at about 0 ms for POST bodies); error shapes per API | none (fenced text diagram) | 12 lesson scripts plus probes on Node 24 / Express 5.2.1, all against local servers | none |
+| 16-monorepos-and-workspaces.md | new (Topic 74 of 74) | npm workspaces (`-w`, `--workspaces`, hoisting with a real layout); pnpm 10 and Yarn 4 PnP layouts; `workspace:*` rewritten on `pnpm pack`; shared tsconfig and ESLint config; root scripts; Turborepo caching (miss/hit/restore); Changesets init/version with real diffs; a real phantom dependency (works in npm, fails in pnpm/PnP); duplicate `http-errors` breaking `instanceof` | assets/i10_01_27074a5e.svg | All 11 generator scripts re-run from scratch and diffed against the lesson (only `pnpm pack` key order varies, noted in the lesson) | 2: Nx not run; `changeset publish` not run |
 | 04-the-global-object-process-and-environment.md | appended (+8 Cheat-card bullets) | dotenv vs `--env-file` vs `loadEnvFile` precedence; zod startup config (exit 78); `util.parseArgs`; stdin/stdout/stderr (TTY captured with `script`); `hrtime`/`hrtime.bigint`; `beforeExit`; a complete SIGTERM handler tested with a real signal mid-request; exit codes 0/1/3/9/13/137/143; edge case: `process.exit()` truncating a pipe write at 65,536 bytes | none | All blocks as saved; SIGTERM run with and without a handler | none |
 | 05-running-node-scripts-the-repl-the-cli-and-nvm.md | appended (+6) | `node --run` vs `npm run` timing; `node --test` reporters and filters; type stripping (links to 71); `NODE_OPTIONS` allow-list (exit 9 for disallowed flags); `--max-old-space-size` (limit = value + 192 MiB here; OOM exit 134); Corepack; edge case: `NODE_OPTIONS` is inherited by children | none | All blocks as saved | none |
 | 06-the-event-loop-phases.md | appended (+3) | `performance.eventLoopUtilization()` (idle vs busy, delta forms, vs delay); ordering when the entry is ESM (nextTick vs promise flips only at top level; the timeout vs immediate race stays racy, counts reported); edge case: syntax detection flipping a `.js` file | none | Runs ×50 / ×200 in batches, plus 16 runs in parallel | none |
@@ -41,11 +41,11 @@
 | 13-module-resolution.md | appended (+2) | Subpath patterns (`*` across `/`, longest prefix, `null` targets, the `.js.js` trap) with real errors; symlinks and the pnpm layout (fenced diagram), realpath vs `--preserve-symlinks`; edge case: `--preserve-symlinks` breaks pnpm | none | Real pnpm 10 installs | none |
 | 14-packagejson-semantic-versioning.md | appended (+5) | `overrides` (global, scoped, `EOVERRIDE` and the `$` fix); `workspaces`; `packageManager` with Corepack; `private` (`--dry-run` does **not** refuse; the real `EPRIVATE` captured against a local stand-in registry); `sideEffects` proved with esbuild. The `engines` correction is untouched. | none | All runs real | none |
 | 15-npm-scripts.md | appended (+4) | Workspaces (links to 74); `npm link` with a throwaway prefix only; cross-env vs `--env-file`; provenance (real `EUSAGE` "not supported for provider: null") and trusted publishing; edge case: `npm install` silently removing a link | none | All runs real; nothing published | 2: Windows `cmd.exe`; CI provenance and OIDC flow |
-| 16-callbacks.md | appended (+2) | `util.callbackify` (falsy rejection → `ERR_FALSY_VALUE_REJECTION`); AbortSignal with `fs.readFile`/`exec` (gotcha: passing a bare signal is silently ignored) | none | All blocks as saved | none |
-| 17-promises.md | appended (+3) | `Promise.withResolvers` (present from Node 22.0.0), `Promise.try` (from 23.0.0, measured); cancellation (links to 73); edge case: lesson 17's `withTimeout` keeps the process alive | none | Tested across 8 Node versions | none |
-| 18-async-await.md | appended (+3) | `for await`, async generators, `Symbol.asyncIterator`, Readable iteration, `break` → `return()`; timeouts with AbortSignal; edge case: `for await` over pre-started promises crashing | none | All blocks as saved | none |
-| 19-error-handling-in-async-code.md | appended (+3) | `Error` `{ cause }` (non-enumerable); all 5 `--unhandled-rejections` modes in a 12-run matrix; system error codes (ENOENT/EACCES/ECONNREFUSED, `getSystemErrorName`/`Message`); edge case: `ERR_*` errors have no errno | none | All blocks as saved | none |
-| 20-eventemitter.md | appended (+4) | `events.on` async iterator (`close`, error, abort); `captureRejections`; `errorMonitor`; `EventTarget` vs `EventEmitter`; edge case: an endless `events.on` loop → exit 13 | none | All blocks as saved | none |
+| 17-callbacks.md | appended (+2) | `util.callbackify` (falsy rejection → `ERR_FALSY_VALUE_REJECTION`); AbortSignal with `fs.readFile`/`exec` (gotcha: passing a bare signal is silently ignored) | none | All blocks as saved | none |
+| 18-promises.md | appended (+3) | `Promise.withResolvers` (present from Node 22.0.0), `Promise.try` (from 23.0.0, measured); cancellation (links to 73); edge case: lesson 17's `withTimeout` keeps the process alive | none | Tested across 8 Node versions | none |
+| 19-async-await.md | appended (+3) | `for await`, async generators, `Symbol.asyncIterator`, Readable iteration, `break` → `return()`; timeouts with AbortSignal; edge case: `for await` over pre-started promises crashing | none | All blocks as saved | none |
+| 20-error-handling-in-async-code.md | appended (+3) | `Error` `{ cause }` (non-enumerable); all 5 `--unhandled-rejections` modes in a 12-run matrix; system error codes (ENOENT/EACCES/ECONNREFUSED, `getSystemErrorName`/`Message`); edge case: `ERR_*` errors have no errno | none | All blocks as saved | none |
+| 21-eventemitter.md | appended (+4) | `events.on` async iterator (`close`, error, abort); `captureRejections`; `errorMonitor`; `EventTarget` vs `EventEmitter`; edge case: an endless `events.on` loop → exit 13 | none | All blocks as saved | none |
 | 25-timers-…-the-event-loop.md | appended (+3) | `refresh()` (re-arms a timer that already fired), `hasRef()`, `scheduler.wait`/`scheduler.yield` (Experimental) | none (i22_01 untouched) | All blocks as saved; scheduler order identical over 8 runs | none |
 | README.md | new | Index of all 74 lessons in 16 groups, marking new and appended lessons; links the reports | — | — | — |
 
@@ -123,10 +123,10 @@ The writers found these in existing text. This prompt only allowed appending, so
 PASS  01-what-nodejs-is.md  (1 image link(s))
 PASS  02-v8-the-javascript-engine.md  (0 image link(s))
 PASS  03-installing-and-managing-node.md  (0 image link(s))
-PASS  71-typescript-with-node.md  (0 image link(s))
-PASS  72-modern-node-features-tour.md  (0 image link(s))
-PASS  73-abortcontroller-and-abortsignal.md  (0 image link(s))
-PASS  74-monorepos-and-workspaces.md  (1 image link(s))
+PASS  95-typescript-with-node.md  (0 image link(s))
+PASS  96-modern-node-features-tour.md  (0 image link(s))
+PASS  22-abortcontroller-and-abortsignal.md  (0 image link(s))
+PASS  16-monorepos-and-workspaces.md  (1 image link(s))
 PASS  REPORT-PROMPT-2.md  (0 image link(s))
 PASS  04-the-global-object-process-and-environment.md  (1 image link(s))
 PASS  05-running-node-scripts-the-repl-the-cli-and-nvm.md  (2 image link(s))
@@ -139,12 +139,12 @@ PASS  12-es-modules.md  (1 image link(s))
 PASS  13-module-resolution.md  (2 image link(s))
 PASS  14-packagejson-semantic-versioning.md  (1 image link(s))
 PASS  15-npm-scripts.md  (1 image link(s))
-PASS  16-callbacks.md  (2 image link(s))
-PASS  17-promises.md  (3 image link(s))
-PASS  18-async-await.md  (3 image link(s))
-PASS  19-error-handling-in-async-code.md  (1 image link(s))
-PASS  20-eventemitter.md  (1 image link(s))
-PASS  25-timers-settimeout-setinterval-setimmediate-the-event-loop.md  (1 image link(s))
+PASS  17-callbacks.md  (2 image link(s))
+PASS  18-promises.md  (3 image link(s))
+PASS  19-async-await.md  (3 image link(s))
+PASS  20-error-handling-in-async-code.md  (1 image link(s))
+PASS  21-eventemitter.md  (1 image link(s))
+PASS  29-timers-settimeout-setinterval-setimmediate-the-event-loop.md  (1 image link(s))
 PASS  README.md  (0 image link(s))
 PASS  ASSET_MAP.md  (0 image link(s))
 PASS  ASSET_ISSUES.md  (0 image link(s))
@@ -152,10 +152,10 @@ PASS  MISSING_DIAGRAMS.md  (0 image link(s))
 PASS  index links 01-what-nodejs-is.md
 PASS  index links 02-v8-the-javascript-engine.md
 PASS  index links 03-installing-and-managing-node.md
-PASS  index links 71-typescript-with-node.md
-PASS  index links 72-modern-node-features-tour.md
-PASS  index links 73-abortcontroller-and-abortsignal.md
-PASS  index links 74-monorepos-and-workspaces.md
+PASS  index links 95-typescript-with-node.md
+PASS  index links 96-modern-node-features-tour.md
+PASS  index links 22-abortcontroller-and-abortsignal.md
+PASS  index links 16-monorepos-and-workspaces.md
 PASS  index links REPORT-PROMPT-2.md
 
 31 image links checked in 29 files; 8 new files index-checked: 0 failure(s)

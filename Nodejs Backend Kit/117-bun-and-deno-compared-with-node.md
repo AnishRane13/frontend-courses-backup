@@ -50,8 +50,8 @@ The rows come from each binary's `--help`, `process.versions` and the projects' 
 2. **The runtime layer provides I/O.** Node's is C++ plus JavaScript on top of libuv ([lesson 07](07-libuv-the-thread-pool.md)). The Deno README says Deno is "built on V8, Rust, and Tokio" (Tokio is Rust's async I/O library). Bun was written in Zig until the pull request "Rewrite Bun in Rust" (#30412) was merged on 2026-05-14. The last release before it was v1.3.14 (2026-05-13); v1.4.0 (2026-08-20) was the first release after it. The Bun README now says "It's written in Rust and powered by JavaScriptCore". Bun 1.4.3 still lists a `zig` entry in `process.versions` (Example 2).
 3. **Each runtime provides its own version of Node's APIs.** Bun implements each module and publishes a per-module status page that "reflects the latest version of Bun's compatibility with Node.js v26". It marks `node:fs` and `node:http` 🟢 "Fully implemented", and `node:worker_threads`, `node:crypto`, `node:v8` and `node:inspector` 🟡 partial, with the gaps listed. Deno "provides Node's built-in APIs through a compatibility layer" that you import with the `node:` prefix. Both runtimes report a Node version in `process.version` (`v26.3.0`, `v26.5.1`), not their own version.
 4. **npm packages come from the npm registry either way.** Bun reads `package.json`, installs into `node_modules` and writes `bun.lock`. Deno resolves `npm:express@5.3.0` specifiers (directly in an import, or through an `imports` map in `deno.json`) into its own cache (`DENO_DIR`), or from `package.json` dependencies (the Deno docs list npm packages as "Supported, via npm: specifiers or package.json").
-5. **TypeScript is handled at load time.** Node v24.19.0 strips type annotations and rejects syntax that needs code generation, such as `enum` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; [lesson 71](71-typescript-with-node.md)). Bun and Deno transpile TypeScript fully. None of the three type-checks when it *runs* a file: a type error still runs. Type checking is a separate command (`tsc`, `bun check`, `deno check`), although `deno test` type-checks local modules before running them (Example 7).
-6. **Permissions differ by default.** A Node or Bun process can read any file, open any socket and read every environment variable that the OS user can. Node can be restricted with `--permission` ([lesson 72](72-modern-node-features-tour.md)). Deno starts with no access: the security docs say "you must explicitly grant access to these resources with command line flags or with a runtime permission prompt", and a refused operation throws `NotCapable` (Examples 4 and 10).
+5. **TypeScript is handled at load time.** Node v24.19.0 strips type annotations and rejects syntax that needs code generation, such as `enum` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; [lesson 95](95-typescript-with-node.md)). Bun and Deno transpile TypeScript fully. None of the three type-checks when it *runs* a file: a type error still runs. Type checking is a separate command (`tsc`, `bun check`, `deno check`), although `deno test` type-checks local modules before running them (Example 7).
+6. **Permissions differ by default.** A Node or Bun process can read any file, open any socket and read every environment variable that the OS user can. Node can be restricted with `--permission` ([lesson 96](96-modern-node-features-tour.md)). Deno starts with no access: the security docs say "you must explicitly grant access to these resources with command line flags or with a runtime permission prompt", and a refused operation throws `NotCapable` (Examples 4 and 10).
 
 **Event loops: only what is documented.** Node's event loop is libuv's ([lesson 06](06-the-event-loop-phases.md)). Deno's I/O is built on Tokio. The Bun pages checked for this lesson do not describe Bun's event-loop design. They do list behaviour that differs from Node, for example: "`backup()` runs synchronously and blocks the event loop for the duration of the copy (Node runs it on a worker thread)" (`node:sqlite`). Microtask and timer ordering in [lessons 08–09](08-processnexttick-vs-setimmediate.md) was verified on Node only; do not assume it carries over.
 
@@ -72,7 +72,7 @@ The rows come from each binary's `--help`, `process.versions` and the projects' 
 | Package manager | npm, pnpm, Yarn (separate tools) | `bun install`, `bun add`, `bun remove`, `bun audit` | `deno install`, `deno add`, `deno remove`, `deno audit` |
 | Bundler | none (esbuild, Rollup…) | `bun build` | `deno bundle` |
 | Formatter / linter | none (Prettier, ESLint…) | none in `bun --help` | `deno fmt`, `deno lint` |
-| Single executable | SEA ([lesson 72](72-modern-node-features-tour.md)) | `bun build --compile` | `deno compile` |
+| Single executable | SEA ([lesson 96](96-modern-node-features-tour.md)) | `bun build --compile` | `deno compile` |
 | Watch mode | `node --watch` | `bun --watch`, `bun --hot` | `deno run --watch`, `deno watch` |
 
 **When switching is and is not worth it.** A decision guide, with the reasons taken from the runs in this lesson:
@@ -150,7 +150,7 @@ deno  {"process.version":"v26.5.1","v8":"15.0.245.2-rusty","uv":"1.52.1","typesc
 - Bun 1.4.3 still lists a `zig` entry after the Rust rewrite; the binary's own metadata is not documentation.
 - Deno's `v8` entry is its real engine (`15.0.245.2-rusty`, the same string `deno --version` prints, next to `typescript 6.0.3`). Bun lists `typescript 7.0.2`. Deno and Node both list `uv 1.52.1`, and Bun `uv 1.48.0`; these entries alone do not tell you how either runtime does its I/O.
 
-**Example 3 — the same Express 5 app on node, bun and deno.** One `server.mjs`, unchanged. It uses `express.json()`, `node:fs/promises`, `node:crypto` and an async route that throws (Express 5 forwards the rejection to the error handler, [lesson 37](37-error-handling-the-4-arg-handler-and-async-errors.md)).
+**Example 3 — the same Express 5 app on node, bun and deno.** One `server.mjs`, unchanged. It uses `express.json()`, `node:fs/promises`, `node:crypto` and an async route that throws (Express 5 forwards the rejection to the error handler, [lesson 50](50-error-handling-the-4-arg-handler-and-async-errors.md)).
 
 javascript
 
@@ -680,7 +680,7 @@ allowed env HOME -> 55 chars
 
 - Deno with no flags denied all three, with the exact flag to add. Standard input was not a terminal, so Deno did not show its interactive prompt (`Allow? [y/n/A]`, per the security docs).
 - `--deny-read=/etc` overrides a broad `--allow-read` ("`--deny-*` flags override their `--allow-*` counterparts").
-- Node's `--permission` blocked the file read with `ERR_ACCESS_DENIED` but did not restrict environment variables, which Node's permission model does not cover. Lesson 72 shows its other flags (`--allow-fs-write`, `--allow-child-process`, `--allow-worker`).
+- Node's `--permission` blocked the file read with `ERR_ACCESS_DENIED` but did not restrict environment variables, which Node's permission model does not cover. Lesson 96 shows its other flags (`--allow-fs-write`, `--allow-child-process`, `--allow-worker`).
 - Bun has no permission flags in `bun --help` (1.4.3), so everything was allowed.
 - Neither model is a sandbox for hostile code. Deno's docs ask you to read their security notes "before using Deno to run completely untrusted code", warn that `--allow-run` and `--allow-ffi` are "effectively granting full access" (a subprocess or native library is not bound by Deno's checks), and `-A` turns the checks off.
 
@@ -778,9 +778,9 @@ What it shows: the same runtime varied between rounds by a factor of about 2.4 (
 - **Run CI on every runtime you claim to support,** with the exact versions you deploy (record them: Node v24.19.0, Bun 1.4.3, Deno 2.9.7 here).
 - **Pin and verify binaries.** Download a fixed release and check its SHA-256 (Example 1) instead of piping an install script to a shell.
 - **In Deno, grant the narrowest flags that pass your tests** (`--allow-read=./data`, `--allow-net=[::]:8080`, `--deny-*` for carve-outs) and keep them in a `deno task` or in `deno.json` permissions so they are reviewed like code.
-- **In Node, consider `--permission`** for processes that do not need the whole filesystem ([lesson 72](72-modern-node-features-tour.md)).
+- **In Node, consider `--permission`** for processes that do not need the whole filesystem ([lesson 96](96-modern-node-features-tour.md)).
 - **Keep runtime-specific code behind a small adapter** (`Bun.serve`, `Deno.serve`, `bun:sqlite`) so the rest of the app stays portable.
-- **Benchmark your own app** on idle, dedicated machines, several runs, interleaved, with the load generator elsewhere ([lesson 114](114-load-testing-and-profiling.md)).
+- **Benchmark your own app** on idle, dedicated machines, several runs, interleaved, with the load generator elsewhere ([lesson 109](109-load-testing-and-profiling.md)).
 
 ## ⭐ Interview lens
 

@@ -37,25 +37,25 @@ The ORM and query-builder lessons (101–106) all use one shared domain, so the 
 
 | File | New or appended | Topics | SVGs embedded | Verification run | Unverified items |
 |---|---|---|---|---|---|
-| 97-mongodb-aggregation-pipeline.md | new (Topic 97 of 106) | Every listed stage, including both `$lookup` forms, `$facet`, `$bucket`, `$merge`/`$out`; stage order and index use with optimizer rewrites shown in `explain()`; reading pipeline explain output (top-level vs `$cursor` planner); the 100 MB limit, `allowDiskUseByDefault` and real spills for `$sort` and `$group`; three reports on a seeded shop dataset; edge case: `$unwind` and unmatched `$lookup` silently drop documents | none (fenced diagram) | 8 blocks re-run on a fresh mongod | none |
-| 98-mongodb-schema-patterns.md | new (Topic 98) | Bucket, subset, computed, extended reference, outlier, polymorphic; trees with parent references (`$graphLookup`), ancestor arrays and materialized paths; costs measured: bucket turned 100,000 documents into 1,670 and the index from 2,072 KB to 68 KB; an anchored path regex examines 5 keys vs 20,006 for an unanchored one | assets/i41_01_7b178f88.svg | 8 blocks re-run (index size within page jitter, as stated) | none |
-| 99-mongodb-indexes-in-depth.md | new (Topic 99) | TTL (a real document expiry), partial unique "unique among active", sparse, compound and the prefix rule, text, wildcard, hashed, 8.0 `EXPRESS_IXSCAN`; ESR measured on 200k documents (21 keys and no SORT stage, vs 36,000 keys and an in-memory SORT); build time with concurrent inserts | assets/i41_02_00012497.svg | 6 blocks re-run (only timings vary) | none |
-| 100-mongodb-sharding.md | new (Topic 100) | A real cluster: shard keys, chunks and the balancer, hashed vs ranged keys, a hot shard (ranged monotonic key: 0 / 4,000 new inserts per shard; hashed: 2,005 / 1,995), targeted (`SINGLE_SHARD`) vs scatter-gather (`SHARD_MERGE`), unique indexes needing the shard-key prefix; edge case: orphaned documents after a migration inflate a direct shard count | none (fenced diagrams) | Download, cluster and all examples re-run on a fresh cluster | none |
-| 101-prisma-orm.md | new (Topic 101) | Prisma 7 setup (`prisma-client` generator + output, adapter-pg, `prisma.config.ts`); `@@map`/`@map` onto the shared tables; migrate dev/deploy/status with the real SQL; seeding; CRUD with P2002/P2025; include/select with logged SQL; the canonical query; batch and interactive transactions; edge cases: using `prisma` instead of `tx`, P2028 timeout, `$queryRaw` vs `$queryRawUnsafe`, BigInt counts; N+1 (9 → 3 → 1 with relationJoins) | none | Fresh database: migration SQL byte-identical, strict tsc, all 10 scripts matched | 1 (quoted below) |
-| 102-drizzle-orm.md | new (Topic 102) | `pgTable` schema and relations; drizzle-kit generate/migrate/push and what each one records; the canonical query through the builder and through RQB v1 (plus v2 on the RC); join fan-out inflating counts; transactions with savepoints and `TransactionRollbackError`; `$inferSelect`/`$inferInsert` with real tsc errors that type stripping still runs; N+1 (9 → 1) | none | Fresh database; all outputs matched | none |
-| 103-sequelize-and-typeorm.md | new (Topic 103) | Both ORMs on the shared domain: models and entities, associations, migrations with real generated files, transactions, the canonical query with logged SQL, N+1. Pitfalls actually run: timestamps/paranoid (paranoid without timestamps silently hard-deletes), `include` + `limit` subquery, `sync({alter})` dropping an undeclared foreign key, `eager`, TypeORM `synchronize` rename behaviour (a single rename is detected; rename plus another change loses data), `undefined` in where (throws on 1.x) | none | Fresh databases; generated migration reproduced | none |
-| 104-knex-query-builder.md | new (Topic 104) | Builder with toSQL/toNative/toString; migrations and seeds with the real knex_migrations batches (one migration opts out of the transaction for CONCURRENTLY); transactions with savepoints; the canonical query (and the wrong count from a double join); a dynamic filter builder; a CTE plus window functions; N+1 (9 → 3); edge cases: `whereIn([])` → `1 = 0`, `.first()`, count returned as a string | none | Fresh database | none |
-| 105-database-migrations-and-seeding.md | new (Topic 105) | node-pg-migrate up/down and the out-of-order edge case; idempotent seeds vs fixtures; on a 2,000,004-row table with lock evidence from `pg_locks`: one-shot NOT NULL blocked an INSERT for 19.8 s vs the safe sequence (nullable → batched backfill → `CHECK NOT VALID` → VALIDATE → SET NOT NULL) never blocking it; PG 18 `NOT NULL NOT VALID`; constant vs volatile DEFAULT; CREATE INDEX vs CONCURRENTLY (including the real 25001 error and an INVALID index left behind); `lock_timeout` with retry; expand-and-contract with v1 and v2 apps running together; a 7-tool comparison table | none (fenced diagrams) | Two full runs on fresh databases; timings vary and are given | 1 (quoted below) |
-| 106-choosing-raw-sql-query-builder-or-orm.md | new (Topic 106) | Decision table (raw pg, Knex, Drizzle, Prisma, Sequelize, TypeORM) covering type safety, SQL visibility, migrations, learning and escape hatches; the canonical query in raw pg; N+1 counted with a wrapper; the shared domain in `node:sqlite`; edge cases: `enableForeignKeyConstraints` is on by default in node:sqlite (unlike SQLite itself), type affinity vs STRICT tables, boolean binding (throws on v24.19.0, added in v24.21.0) | none | Byte-identical re-run | none |
-| 39-rest-principles-constraints-resources-statelessness.md | appended (+3 Cheat-card bullets) | Express's built-in weak ETag and how it is computed; `req.fresh` rules; a real 304 with no body; gotcha: Node `fetch` with a hand-set If-None-Match adds `no-cache`, which gives a 200 | none | curl transcript and scripts matched | none |
-| 40-crud-http-verbs-status-codes-idempotency.md | appended (+3) | Automatic HEAD and OPTIONS; the default 404 for a wrong method, then 405 + Allow; 415; 428 (RFC 6585); 412 with strong-only `If-Match`; a two-client race (the winner varies, as stated) | none | Transcript and race script matched | none |
-| 41-validation-pagination-filtering-sorting.md | appended (+3) | Joi and express-validator versions of the Zod endpoint, all storing results in `res.locals.validated` (the correction is kept); 7 identical inputs through all three; `matchedData()`. Finding: `.toInt()` silently does not change `req.query` on Express 5 (re-parsed on every read) but does on Express 4. | none | All scripts matched; Express 4 comparison run | none |
-| 42-api-versioning-error-shape-rate-limiting-docs.md | appended (+3) | Full RFC 9457 Problem Details handler (`application/problem+json`, about:blank, extensions, negotiation); a real local reverse proxy in front of rate limiting: without trust proxy everyone shares one key, `1` gives per-client limits, `true` lets a forged X-Forwarded-For bypass the limit; a custom keyGenerator disables express-rate-limit's safety checks. The `limit` + `ipKeyGenerator` correction is kept. | none | All scripts matched | none |
-| 43-mongodb-amp-mongoose.md | appended (+6) | `timestamps`; virtuals (getter/setter/populate/toJSON vs toObject/lean); discriminators; one error mapper (CastError → 400, ValidationError → 422, 11000 → 409, 404 via orFail); `sanitizeFilter` blocking a real `{"$ne":null}` login bypass | none | 6 blocks re-run | none |
-| 44-schema-design-amp-data-modeling.md | appended (+2) | Pointers to 97–100; an example where an index turns "paid, newest 20" from SORT on a COLLSCAN into 20 keys examined | none | Exact match | none |
-| 45-sql-basics-from-node.md | appended (+2) | Pointers to 101–106; the corrected `INSERT … RETURNING id, name, email` run through pg; edge case: `ON CONFLICT DO NOTHING RETURNING` returns no rows | none | Matched | none |
-| 46-connection-pooling.md | appended (+4) | `pool.on('error')`: real crash without it (57P01, exit 1) vs survival with it; pool statistics sampled under load; `pool.end()` (queued queries stay pending, end after end throws); SIGTERM integration; edge case: a checked-out client needs its own `client.on('error')` | none | All blocks re-run | none |
-| 47-transactions-amp-acid.md | appended (+5) | Mongo `withTransaction()` retrying a real WriteConflict; Mongoose `__v` vs `optimisticConcurrency`; a real PostgreSQL deadlock (40P01) with lock ordering and bounded retry; savepoints vs 25P02; a SKIP LOCKED queue with 3 workers (claim → work → done with a lease, consistent with lesson 70) | none (fenced diagrams) | All blocks re-run; a 2,000-job stress run gave no double claims | none |
+| 71-mongodb-aggregation-pipeline.md | new (Topic 97 of 106) | Every listed stage, including both `$lookup` forms, `$facet`, `$bucket`, `$merge`/`$out`; stage order and index use with optimizer rewrites shown in `explain()`; reading pipeline explain output (top-level vs `$cursor` planner); the 100 MB limit, `allowDiskUseByDefault` and real spills for `$sort` and `$group`; three reports on a seeded shop dataset; edge case: `$unwind` and unmatched `$lookup` silently drop documents | none (fenced diagram) | 8 blocks re-run on a fresh mongod | none |
+| 69-mongodb-schema-patterns.md | new (Topic 98) | Bucket, subset, computed, extended reference, outlier, polymorphic; trees with parent references (`$graphLookup`), ancestor arrays and materialized paths; costs measured: bucket turned 100,000 documents into 1,670 and the index from 2,072 KB to 68 KB; an anchored path regex examines 5 keys vs 20,006 for an unanchored one | assets/i41_01_7b178f88.svg | 8 blocks re-run (index size within page jitter, as stated) | none |
+| 70-mongodb-indexes-in-depth.md | new (Topic 99) | TTL (a real document expiry), partial unique "unique among active", sparse, compound and the prefix rule, text, wildcard, hashed, 8.0 `EXPRESS_IXSCAN`; ESR measured on 200k documents (21 keys and no SORT stage, vs 36,000 keys and an in-memory SORT); build time with concurrent inserts | assets/i41_02_00012497.svg | 6 blocks re-run (only timings vary) | none |
+| 72-mongodb-sharding.md | new (Topic 100) | A real cluster: shard keys, chunks and the balancer, hashed vs ranged keys, a hot shard (ranged monotonic key: 0 / 4,000 new inserts per shard; hashed: 2,005 / 1,995), targeted (`SINGLE_SHARD`) vs scatter-gather (`SHARD_MERGE`), unique indexes needing the shard-key prefix; edge case: orphaned documents after a migration inflate a direct shard count | none (fenced diagrams) | Download, cluster and all examples re-run on a fresh cluster | none |
+| 77-prisma-orm.md | new (Topic 101) | Prisma 7 setup (`prisma-client` generator + output, adapter-pg, `prisma.config.ts`); `@@map`/`@map` onto the shared tables; migrate dev/deploy/status with the real SQL; seeding; CRUD with P2002/P2025; include/select with logged SQL; the canonical query; batch and interactive transactions; edge cases: using `prisma` instead of `tx`, P2028 timeout, `$queryRaw` vs `$queryRawUnsafe`, BigInt counts; N+1 (9 → 3 → 1 with relationJoins) | none | Fresh database: migration SQL byte-identical, strict tsc, all 10 scripts matched | 1 (quoted below) |
+| 78-drizzle-orm.md | new (Topic 102) | `pgTable` schema and relations; drizzle-kit generate/migrate/push and what each one records; the canonical query through the builder and through RQB v1 (plus v2 on the RC); join fan-out inflating counts; transactions with savepoints and `TransactionRollbackError`; `$inferSelect`/`$inferInsert` with real tsc errors that type stripping still runs; N+1 (9 → 1) | none | Fresh database; all outputs matched | none |
+| 79-sequelize-and-typeorm.md | new (Topic 103) | Both ORMs on the shared domain: models and entities, associations, migrations with real generated files, transactions, the canonical query with logged SQL, N+1. Pitfalls actually run: timestamps/paranoid (paranoid without timestamps silently hard-deletes), `include` + `limit` subquery, `sync({alter})` dropping an undeclared foreign key, `eager`, TypeORM `synchronize` rename behaviour (a single rename is detected; rename plus another change loses data), `undefined` in where (throws on 1.x) | none | Fresh databases; generated migration reproduced | none |
+| 76-knex-query-builder.md | new (Topic 104) | Builder with toSQL/toNative/toString; migrations and seeds with the real knex_migrations batches (one migration opts out of the transaction for CONCURRENTLY); transactions with savepoints; the canonical query (and the wrong count from a double join); a dynamic filter builder; a CTE plus window functions; N+1 (9 → 3); edge cases: `whereIn([])` → `1 = 0`, `.first()`, count returned as a string | none | Fresh database | none |
+| 80-database-migrations-and-seeding.md | new (Topic 105) | node-pg-migrate up/down and the out-of-order edge case; idempotent seeds vs fixtures; on a 2,000,004-row table with lock evidence from `pg_locks`: one-shot NOT NULL blocked an INSERT for 19.8 s vs the safe sequence (nullable → batched backfill → `CHECK NOT VALID` → VALIDATE → SET NOT NULL) never blocking it; PG 18 `NOT NULL NOT VALID`; constant vs volatile DEFAULT; CREATE INDEX vs CONCURRENTLY (including the real 25001 error and an INVALID index left behind); `lock_timeout` with retry; expand-and-contract with v1 and v2 apps running together; a 7-tool comparison table | none (fenced diagrams) | Two full runs on fresh databases; timings vary and are given | 1 (quoted below) |
+| 81-choosing-raw-sql-query-builder-or-orm.md | new (Topic 106) | Decision table (raw pg, Knex, Drizzle, Prisma, Sequelize, TypeORM) covering type safety, SQL visibility, migrations, learning and escape hatches; the canonical query in raw pg; N+1 counted with a wrapper; the shared domain in `node:sqlite`; edge cases: `enableForeignKeyConstraints` is on by default in node:sqlite (unlike SQLite itself), type affinity vs STRICT tables, boolean binding (throws on v24.19.0, added in v24.21.0) | none | Byte-identical re-run | none |
+| 63-rest-principles-constraints-resources-statelessness.md | appended (+3 Cheat-card bullets) | Express's built-in weak ETag and how it is computed; `req.fresh` rules; a real 304 with no body; gotcha: Node `fetch` with a hand-set If-None-Match adds `no-cache`, which gives a 200 | none | curl transcript and scripts matched | none |
+| 64-crud-http-verbs-status-codes-idempotency.md | appended (+3) | Automatic HEAD and OPTIONS; the default 404 for a wrong method, then 405 + Allow; 415; 428 (RFC 6585); 412 with strong-only `If-Match`; a two-client race (the winner varies, as stated) | none | Transcript and race script matched | none |
+| 65-validation-pagination-filtering-sorting.md | appended (+3) | Joi and express-validator versions of the Zod endpoint, all storing results in `res.locals.validated` (the correction is kept); 7 identical inputs through all three; `matchedData()`. Finding: `.toInt()` silently does not change `req.query` on Express 5 (re-parsed on every read) but does on Express 4. | none | All scripts matched; Express 4 comparison run | none |
+| 66-api-versioning-error-shape-rate-limiting-docs.md | appended (+3) | Full RFC 9457 Problem Details handler (`application/problem+json`, about:blank, extensions, negotiation); a real local reverse proxy in front of rate limiting: without trust proxy everyone shares one key, `1` gives per-client limits, `true` lets a forged X-Forwarded-For bypass the limit; a custom keyGenerator disables express-rate-limit's safety checks. The `limit` + `ipKeyGenerator` correction is kept. | none | All scripts matched | none |
+| 67-mongodb-amp-mongoose.md | appended (+6) | `timestamps`; virtuals (getter/setter/populate/toJSON vs toObject/lean); discriminators; one error mapper (CastError → 400, ValidationError → 422, 11000 → 409, 404 via orFail); `sanitizeFilter` blocking a real `{"$ne":null}` login bypass | none | 6 blocks re-run | none |
+| 68-schema-design-amp-data-modeling.md | appended (+2) | Pointers to 97–100; an example where an index turns "paid, newest 20" from SORT on a COLLSCAN into 20 keys examined | none | Exact match | none |
+| 73-sql-basics-from-node.md | appended (+2) | Pointers to 101–106; the corrected `INSERT … RETURNING id, name, email` run through pg; edge case: `ON CONFLICT DO NOTHING RETURNING` returns no rows | none | Matched | none |
+| 74-connection-pooling.md | appended (+4) | `pool.on('error')`: real crash without it (57P01, exit 1) vs survival with it; pool statistics sampled under load; `pool.end()` (queued queries stay pending, end after end throws); SIGTERM integration; edge case: a checked-out client needs its own `client.on('error')` | none | All blocks re-run | none |
+| 75-transactions-amp-acid.md | appended (+5) | Mongo `withTransaction()` retrying a real WriteConflict; Mongoose `__v` vs `optimisticConcurrency`; a real PostgreSQL deadlock (40P01) with lock ordering and bounded retry; savepoints vs 25P02; a SKIP LOCKED queue with 3 workers (claim → work → done with a lease, consistent with lesson 70) | none (fenced diagrams) | All blocks re-run; a 2,000-job stress run gave no double claims | none |
 | README.md | updated | New "Databases in depth" group (97–106); 39–47 marked; numeric ordering for 3-digit lesson numbers; REPORT-PROMPT-5 linked | — | Diffed against the previous version: additions only | — |
 
 **Unverified items (2, exact text in the lessons):**
@@ -147,40 +147,40 @@ All Learn More URLs returned 200 and landed on the intended page.
 ## Step 6 verification output
 
 ```
-PASS  97-mongodb-aggregation-pipeline.md  (0 image link(s))
-PASS  98-mongodb-schema-patterns.md  (1 image link(s))
-PASS  99-mongodb-indexes-in-depth.md  (1 image link(s))
-PASS  100-mongodb-sharding.md  (0 image link(s))
-PASS  101-prisma-orm.md  (0 image link(s))
-PASS  102-drizzle-orm.md  (0 image link(s))
-PASS  103-sequelize-and-typeorm.md  (0 image link(s))
-PASS  104-knex-query-builder.md  (0 image link(s))
-PASS  105-database-migrations-and-seeding.md  (0 image link(s))
-PASS  106-choosing-raw-sql-query-builder-or-orm.md  (0 image link(s))
-PASS  39-rest-principles-constraints-resources-statelessness.md  (2 image link(s))
-PASS  40-crud-http-verbs-status-codes-idempotency.md  (2 image link(s))
-PASS  41-validation-pagination-filtering-sorting.md  (2 image link(s))
-PASS  42-api-versioning-error-shape-rate-limiting-docs.md  (2 image link(s))
-PASS  43-mongodb-amp-mongoose.md  (1 image link(s))
-PASS  44-schema-design-amp-data-modeling.md  (2 image link(s))
-PASS  45-sql-basics-from-node.md  (1 image link(s))
-PASS  46-connection-pooling.md  (1 image link(s))
-PASS  47-transactions-amp-acid.md  (2 image link(s))
+PASS  71-mongodb-aggregation-pipeline.md  (0 image link(s))
+PASS  69-mongodb-schema-patterns.md  (1 image link(s))
+PASS  70-mongodb-indexes-in-depth.md  (1 image link(s))
+PASS  72-mongodb-sharding.md  (0 image link(s))
+PASS  77-prisma-orm.md  (0 image link(s))
+PASS  78-drizzle-orm.md  (0 image link(s))
+PASS  79-sequelize-and-typeorm.md  (0 image link(s))
+PASS  76-knex-query-builder.md  (0 image link(s))
+PASS  80-database-migrations-and-seeding.md  (0 image link(s))
+PASS  81-choosing-raw-sql-query-builder-or-orm.md  (0 image link(s))
+PASS  63-rest-principles-constraints-resources-statelessness.md  (2 image link(s))
+PASS  64-crud-http-verbs-status-codes-idempotency.md  (2 image link(s))
+PASS  65-validation-pagination-filtering-sorting.md  (2 image link(s))
+PASS  66-api-versioning-error-shape-rate-limiting-docs.md  (2 image link(s))
+PASS  67-mongodb-amp-mongoose.md  (1 image link(s))
+PASS  68-schema-design-amp-data-modeling.md  (2 image link(s))
+PASS  73-sql-basics-from-node.md  (1 image link(s))
+PASS  74-connection-pooling.md  (1 image link(s))
+PASS  75-transactions-amp-acid.md  (2 image link(s))
 PASS  README.md  (0 image link(s))
 PASS  ASSET_MAP.md  (0 image link(s))
 PASS  ASSET_ISSUES.md  (0 image link(s))
 PASS  MISSING_DIAGRAMS.md  (0 image link(s))
 PASS  REPORT-PROMPT-5.md  (0 image link(s))
-PASS  index links 97-mongodb-aggregation-pipeline.md
-PASS  index links 98-mongodb-schema-patterns.md
-PASS  index links 99-mongodb-indexes-in-depth.md
-PASS  index links 100-mongodb-sharding.md
-PASS  index links 101-prisma-orm.md
-PASS  index links 102-drizzle-orm.md
-PASS  index links 103-sequelize-and-typeorm.md
-PASS  index links 104-knex-query-builder.md
-PASS  index links 105-database-migrations-and-seeding.md
-PASS  index links 106-choosing-raw-sql-query-builder-or-orm.md
+PASS  index links 71-mongodb-aggregation-pipeline.md
+PASS  index links 69-mongodb-schema-patterns.md
+PASS  index links 70-mongodb-indexes-in-depth.md
+PASS  index links 72-mongodb-sharding.md
+PASS  index links 77-prisma-orm.md
+PASS  index links 78-drizzle-orm.md
+PASS  index links 79-sequelize-and-typeorm.md
+PASS  index links 76-knex-query-builder.md
+PASS  index links 80-database-migrations-and-seeding.md
+PASS  index links 81-choosing-raw-sql-query-builder-or-orm.md
 PASS  index links REPORT-PROMPT-5.md
 
 17 image links checked in 24 files; 11 new files index-checked: 0 failure(s)

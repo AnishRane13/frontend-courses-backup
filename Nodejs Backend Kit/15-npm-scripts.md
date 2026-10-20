@@ -152,7 +152,7 @@ javascript
 - **pnpm** = shared store + strict layout; **yarn** = workspaces/PnP; one client per repo.
 - **Publish:** `npm version` → `files` allowlist → `npm pack --dry-run` → `npm publish [--access public]`.
 - **Security:** `npm audit` / `audit fix`; `--ignore-scripts` for untrusted installs.
-- **Workspaces:** `-w <name>` one, `--workspaces` all (glob order), `--if-present`; see lesson 74.
+- **Workspaces:** `-w <name>` one, `--workspaces` all (glob order), `--if-present`; see lesson 16.
 - **`npm link`:** global symlink + `bin`, then `npm link <name>` in the app; extraneous unless `--save`; try it with `npm_config_prefix=<scratch>`.
 - **Portable env:** `cross-env NAME=v cmd`, or `node --env-file=.env` (environment wins over the file).
 - **Provenance:** `npm publish --provenance` from GitHub Actions/GitLab with `id-token: write`; trusted publishing = OIDC, no npm token; local run → `EUSAGE`.
@@ -175,7 +175,7 @@ javascript
 
 ### Scripts in workspaces and monorepos
 
-In a repository with a `workspaces` field, every npm script command accepts a workspace selector: `-w <name>` (or `--workspace`) runs the command in one workspace, `--workspaces` in all of them, and `--if-present` skips workspaces that do not define the script. This exists so a root script can drive many packages without `cd packages/x && npm run build` chains, which break as soon as a folder moves. The layouts, pnpm/Yarn differences, build caching and publishing are covered in [Monorepos and Workspaces](74-monorepos-and-workspaces.md).
+In a repository with a `workspaces` field, every npm script command accepts a workspace selector: `-w <name>` (or `--workspace`) runs the command in one workspace, `--workspaces` in all of them, and `--if-present` skips workspaces that do not define the script. This exists so a root script can drive many packages without `cd packages/x && npm run build` chains, which break as soon as a folder moves. The layouts, pnpm/Yarn differences, build caching and publishing are covered in [Monorepos and Workspaces](16-monorepos-and-workspaces.md).
 
 How it works:
 
@@ -184,7 +184,7 @@ How it works:
 3. With `--workspaces`, it repeats step 2 for every workspace in the order the globs list them, which is not dependency order.
 4. `npm exec -w <name> -- <cmd>` runs an arbitrary command inside that workspace the same way.
 
-**Example — one workspace, from the repository root.** (The Example 1 repository from lesson 74.)
+**Example — one workspace, from the repository root.** (The Example 1 repository from lesson 16.)
 
 bash
 

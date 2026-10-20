@@ -277,7 +277,7 @@ console.log('shell PORT=1 + --env-file=.env        :',
 //   shell PORT=1 + --env-file=.env        : 1
 ```
 
-With `--env-file`, the **last** file wins. With `loadEnvFile` called twice, or a dotenv path array, the **first** file wins, because each later load skips keys that are already set. In all three, a variable set by the real environment (shell, Docker, CI) beats every file. Lesson 72 covers the flag's parser, `--env-file-if-exists` and `util.parseEnv()`: [Modern Node Features: A Guided Tour](72-modern-node-features-tour.md).
+With `--env-file`, the **last** file wins. With `loadEnvFile` called twice, or a dotenv path array, the **first** file wins, because each later load skips keys that are already set. In all three, a variable set by the real environment (shell, Docker, CI) beats every file. Lesson 96 covers the flag's parser, `--env-file-if-exists` and `util.parseEnv()`: [Modern Node Features: A Guided Tour](96-modern-node-features-tour.md).
 
 ### Validating config with a schema at startup
 
@@ -405,7 +405,7 @@ $ echo $?
 1
 ```
 
-Lesson 72 shows `allowPositionals`, `multiple` and `allowNegative` (`--no-color`).
+Lesson 96 shows `allowPositionals`, `multiple` and `allowNegative` (`--no-color`).
 
 ### `process.stdin`, `process.stdout`, `process.stderr`
 

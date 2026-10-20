@@ -46,7 +46,7 @@ text
 1. **ICU does the formatting.** V8 implements the `Intl` APIs on top of ICU (International Components for Unicode) and its locale data from CLDR (the Unicode Common Locale Data Repository). The Node docs say "The full ICU data set is provided by Node.js by default" (`--with-intl=full-icu (default)`). Builds with `small-icu` (English-only data) or `none` exist, so check `process.versions.icu` and `process.config.variables.icu_small` if you run someone else's binary (Example 1).
 2. **A formatter is built once and reused.** `new Intl.NumberFormat(locale, options)` resolves the locale (falling back to a less specific one, then to the default locale) and loads the patterns. `format()` only applies them. `resolvedOptions()` tells you what was actually picked.
 3. **The server's own locale and zone are defaults, not user settings.** Without an explicit locale, `Intl` uses the process default (on this machine `en-US`; `LANG=de_DE.UTF-8` changed it to `de-DE`). Without an explicit `timeZone`, it uses the `TZ` environment variable or the OS zone (Example 12).
-4. **The request picks the locale.** `Accept-Language: fr-FR,fr;q=0.9,pl;q=0.8` is a list of language ranges with weights from 0 to 1 (1 if omitted). Express's `req.acceptsLanguages(list)` sorts them by weight and returns the best item from *your* list, or `false` (Example 6; full API in [lesson 92](92-express-request-response-api-reference.md)).
+4. **The request picks the locale.** `Accept-Language: fr-FR,fr;q=0.9,pl;q=0.8` is a list of language ranges with weights from 0 to 1 (1 if omitted). Express's `req.acceptsLanguages(list)` sorts them by weight and returns the best item from *your* list, or `false` (Example 6; full API in [lesson 54](54-express-request-response-api-reference.md)).
 5. **A message library maps keys to sentences.** i18next looks up `namespace:key` in the resources for the request's language, walks a fallback chain (`de-AT` → `de` → `en`), interpolates values, and chooses a plural form with `Intl.PluralRules` (Example 7). With `i18next-icu`, messages use ICU MessageFormat syntax instead (`{count, plural, one {…} other {…}}`, Example 8).
 6. **The response says what it did.** Set `Content-Language` to the language you served and `Vary: Accept-Language` so a shared cache does not serve the Polish page to a German user.
 
@@ -576,7 +576,7 @@ console.log(msg.format({ amount: 1234.5, when: new Date('2026-10-12T12:00:00Z'),
 
 The last line shows `number` with a skeleton (`::currency/EUR`), `date, long` and `selectordinal`, all formatted through `Intl`.
 
-**Example 10 — store UTC: `toISOString()` and PostgreSQL `timestamptz`.** Same stored row, three session time zones. PostgreSQL 18.4 runs locally on port 7510 (started with the embedded-postgres package, as in [lesson 105](105-database-migrations-and-seeding.md)); `npm install pg@8.23.1`.
+**Example 10 — store UTC: `toISOString()` and PostgreSQL `timestamptz`.** Same stored row, three session time zones. PostgreSQL 18.4 runs locally on port 7510 (started with the embedded-postgres package, as in [lesson 80](80-database-migrations-and-seeding.md)); `npm install pg@8.23.1`.
 
 javascript
 

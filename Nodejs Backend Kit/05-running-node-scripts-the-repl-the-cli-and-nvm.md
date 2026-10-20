@@ -276,7 +276,7 @@ node --run hello: 8 ms
 npm run hello   : 144 ms
 ```
 
-Under `npm run`, the name came from `$npm_lifecycle_event`; under `node --run`, it came from `$NODE_RUN_SCRIPT_NAME`. The start-up times differ between runs and machines; the roughly tenfold gap is the cost of loading npm. Lesson 72 shows the skipped `pre` hook and the "Missing script" listing: [Modern Node Features: A Guided Tour](72-modern-node-features-tour.md).
+Under `npm run`, the name came from `$npm_lifecycle_event`; under `node --run`, it came from `$NODE_RUN_SCRIPT_NAME`. The start-up times differ between runs and machines; the roughly tenfold gap is the cost of loading npm. Lesson 96 shows the skipped `pre` hook and the "Missing script" listing: [Modern Node Features: A Guided Tour](96-modern-node-features-tour.md).
 
 ### `node --test`
 
@@ -340,7 +340,7 @@ $ node --test --test-name-pattern="punctuation"
 ℹ duration_ms 78.292709
 ```
 
-The `dot` reporter printed four dots: three tests plus the `describe` suite. Lessons 57–60 cover testing itself; lesson 72 shows why `*.spec.js` files are skipped by default.
+The `dot` reporter printed four dots: three tests plus the `describe` suite. Lessons 91–94 cover testing itself; lesson 96 shows why `*.spec.js` files are skipped by default.
 
 ### Built-in TypeScript type stripping
 
@@ -396,7 +396,7 @@ SyntaxError: Unexpected identifier 'User'
     …
 ```
 
-`<cwd>` stands for the working directory. The full story (`tsconfig` settings, `import type`, `.ts` extensions in imports) is in [TypeScript with Node](71-typescript-with-node.md).
+`<cwd>` stands for the working directory. The full story (`tsconfig` settings, `import type`, `.ts` extensions in imports) is in [TypeScript with Node](95-typescript-with-node.md).
 
 ### `NODE_OPTIONS`
 

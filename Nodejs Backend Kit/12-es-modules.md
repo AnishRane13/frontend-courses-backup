@@ -193,7 +193,7 @@ main();
 - **`await import(expr)`** = dynamic/conditional loading, works in both systems.
 - **JSON:** `import x from './x.json' with { type: 'json' }`, default export only. `assert { … }` was removed in v22.0.0.
 - **Hooks:** `module.registerHooks({ resolve, load })` (sync, in-thread, RC since v24.13.1), loaded via `--import`. `module.register()` is deprecated (DEP0205, v24.15.0).
-- **TypeScript:** `node file.ts` strips types, and imports use `.ts` extensions. See [TypeScript with Node](71-typescript-with-node.md).
+- **TypeScript:** `node file.ts` strips types, and imports use `.ts` extensions. See [TypeScript with Node](95-typescript-with-node.md).
 - **For `require()` callers:** no top-level `await`. Export `"module.exports"` to choose what `require()` returns. `"module-sync"` serves one ESM file to `require` and `import`.
 
 ---
@@ -203,7 +203,7 @@ main();
 - [Modules: ECMAScript modules nodejs.org](https://nodejs.org/api/esm.html)
 - [JavaScript modules (import / export) developer.mozilla.org](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Guide/Modules)
 - [ESM vs CommonJS in your Node Projects Covalence](https://www.youtube.com/watch?v=I3DrifH-rJE)
-- [Outbound HTTP: fetch, undici and http.request (this kit)](75-outbound-http-fetch-undici-and-http-request.md)
+- [Outbound HTTP: fetch, undici and http.request (this kit)](44-outbound-http-fetch-undici-and-http-request.md)
 
 ---
 
@@ -346,7 +346,7 @@ The same synchronous hook served both `import` and `require()`. The `require()` 
 
 ### TypeScript files
 
-On v24.19.0, Node runs `.ts`, `.mts` and `.cts` files directly by stripping type annotations (stable since v24.12.0). This follows the same ESM rules as this lesson. `.mts` is always ESM, `.ts` follows `"type"`, and relative imports need the real extension (`import './env.ts'`). Type-only imports must be marked `import type`, because Node keeps every other import as a runtime import. Nothing is type-checked. The full setup (`tsconfig.json` with `nodenext`, `erasableSyntaxOnly`, `verbatimModuleSyntax`, `tsc --noEmit`, typed Express handlers) is in [TypeScript with Node](71-typescript-with-node.md).
+On v24.19.0, Node runs `.ts`, `.mts` and `.cts` files directly by stripping type annotations (stable since v24.12.0). This follows the same ESM rules as this lesson. `.mts` is always ESM, `.ts` follows `"type"`, and relative imports need the real extension (`import './env.ts'`). Type-only imports must be marked `import type`, because Node keeps every other import as a runtime import. Nothing is type-checked. The full setup (`tsconfig.json` with `nodenext`, `erasableSyntaxOnly`, `verbatimModuleSyntax`, `tsc --noEmit`, typed Express handlers) is in [TypeScript with Node](95-typescript-with-node.md).
 
 ### `require(esm)` from the ES module author's side
 

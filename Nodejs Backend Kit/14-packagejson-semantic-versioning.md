@@ -207,7 +207,7 @@ javascript
 - **Lockfile** pins exact tree + hashes — commit it.
 - **`npm ci`** = deterministic lockfile install for CI/prod (`--omit=dev`).
 - **`overrides`** (root only) pins any package in the tree; scope with `{ "parent": { "child": "x" } }`; conflict with a direct dep → `EOVERRIDE`, fix with `"$name"`.
-- **`workspaces`** = globs of local packages, symlinked into root `node_modules`, one lockfile (see lesson 74).
+- **`workspaces`** = globs of local packages, symlinked into root `node_modules`, one lockfile (see lesson 16).
 - **`packageManager`** = `"pnpm@x.y.z+sha…"`; enforced by Corepack shims, ignored by npm.
 - **`private: true`** → real `npm publish` fails with `EPRIVATE`; single-package `--dry-run` does not check it (npm 11.17.0).
 - **`sideEffects`** = bundler hint for dropping unused modules; Node ignores it.
@@ -279,7 +279,7 @@ The first tree is the normal resolution; the second shows `ms@2.1.2 overridden`,
 
 ### `workspaces`
 
-`workspaces` is an array of folder paths or globs in the root `package.json`. Each matching folder that has its own `package.json` becomes a workspace: npm resolves all workspaces' dependencies together, writes one lockfile, and creates a symlink in the root `node_modules` under the workspace's `name`. It exists so several packages in one repository can depend on each other's current source without publishing. Without it you would publish after every change or wire things up with `npm link` by hand. The full treatment (layouts, pnpm and Yarn, orchestration, publishing) is in [Monorepos and Workspaces](74-monorepos-and-workspaces.md).
+`workspaces` is an array of folder paths or globs in the root `package.json`. Each matching folder that has its own `package.json` becomes a workspace: npm resolves all workspaces' dependencies together, writes one lockfile, and creates a symlink in the root `node_modules` under the workspace's `name`. It exists so several packages in one repository can depend on each other's current source without publishing. Without it you would publish after every change or wire things up with `npm link` by hand. The full treatment (layouts, pnpm and Yarn, orchestration, publishing) is in [Monorepos and Workspaces](16-monorepos-and-workspaces.md).
 
 How it works:
 
@@ -409,7 +409,7 @@ $ npm publish --dry-run --workspaces 2>&1 | grep -E '^\+|Skipping'
 npm warn publish Skipping workspace @acme/api, marked as private
 ```
 
-The dry run printed `+ internal-app@1.0.0` as if the publish would succeed. The real publish stopped with `EPRIVATE` after only two `GET` requests; no upload (`PUT`) reached the registry. The workspace dry run (the repository from lesson 74, whose `@acme/api` is private) skipped the private workspace.
+The dry run printed `+ internal-app@1.0.0` as if the publish would succeed. The real publish stopped with `EPRIVATE` after only two `GET` requests; no upload (`PUT`) reached the registry. The workspace dry run (the repository from lesson 16, whose `@acme/api` is private) skipped the private workspace.
 
 ### `sideEffects`
 
