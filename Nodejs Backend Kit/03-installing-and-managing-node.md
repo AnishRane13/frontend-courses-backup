@@ -13,47 +13,46 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A Node install is a directory that contains the `node` binary, plus an entry on `PATH` so the shell can find it. The shell walks `PATH` left to right and runs the first `node` it finds. A version manager keeps several of those directories and points `PATH` at the one a project asks for.
+
+That exists so two projects can need two Node majors on one machine, and so `npm install -g` does not need root. The trade-off is that each managed version has its own global packages. Switch versions and a CLI you installed can disappear until you install it again.
+
+`PATH` is the list of directories the shell searches for commands. The prefix is the directory npm uses for global packages.
+
 ## Why it matters
 
-Before you write a line of server code, something has to put a `node` binary on your machine and make your shell find it. How you do that decides several things you will hit later: whether you can run two projects that need different Node majors, whether `npm install -g` works without `sudo`, whether your laptop, CI and production run the same version, and how painful the next upgrade is.
-
-Most "Node is broken" tickets on a new machine come from this layer, not from JavaScript. Typical ones are `EACCES: permission denied` on a global install, `node -v` printing an old version after you "upgraded", a CLI that "disappeared" after switching versions, or a CI job that passes on Node 24 while a teammate on Node 22 gets `ReferenceError`. Each has a mechanical cause (a directory you cannot write to, an earlier `PATH` entry, a shell cache, a per-version global folder). Once you know the parts, each is a two-minute fix.
+Before any server code runs, something has to put `node` on the machine and make the shell find it. That choice decides whether two projects can use two majors, whether a global install works without `sudo`, whether your laptop, CI, and production run the same version, and how painful the next upgrade is. Most "Node is broken" tickets on a new machine are this layer. `EACCES` on a global install, `node -v` still old after an upgrade, a CLI that vanished after a version switch, or CI green on 24 while a teammate on 22 gets `ReferenceError`. Each one is a directory you cannot write, an earlier `PATH` entry, a shell cache, or a per-version global folder.
 
 ## The concept, simply
 
-A Node installation is a **directory** plus a **`PATH` entry** that points into it. The official Linux tarball for v24.21.0 contains, among the docs and headers:
+The official Linux tarball for v24.21.0 contains, among the docs and headers, `bin/node` (one executable, about 120 MB), `bin/npm` and `bin/npx` (launchers for the bundled npm), `bin/corepack` (Node 24 still ships it; Node 25 and later do not), and `include/node/` (C headers for native addons).
 
-- `bin/node`: the runtime, one executable file of about 120 MB.
-- `bin/npm`, `bin/npx`: small launchers for `lib/node_modules/npm`, the bundled npm package.
-- `bin/corepack`: the package-manager shim tool. Node 24 still ships it; Node 25 and later do not (shown below).
-- `include/node/`: C headers used when native addons are compiled.
+Three families put that directory on the machine.
 
-Everything else is about **who creates that directory, where it lives, and how your shell is told about it**. There are three families:
+1. **Official installer or tarball.** One version, in a location the installer chooses, or wherever you unpack it.
+2. **OS package** (`apt`, `dnf`, Homebrew, winget). One version, chosen by the distro, updated with the rest of the system.
+3. **Version manager** (nvm, fnm, Volta, and others). Many versions side by side under your home directory. The manager changes `PATH`, or routes through a shim, so `node` means the version the project asks for.
 
-1. **Official installer or tarball** from nodejs.org. One version, installed to a fixed system location chosen by the installer, or wherever you unpack the tarball (for example `/usr/local`).
-2. **OS package manager** (`apt`, `dnf`, Homebrew, winget, …). One version, chosen and patched by the distribution, updated with the rest of the system.
-3. **Version manager** (nvm, fnm, Volta, …). Many versions side by side under your home directory. The manager changes `PATH` (or routes through a shim) so that `node` means the version a project asks for.
-
-On top of that sits npm's **global prefix**: the directory where `npm install -g` puts packages (`<prefix>/lib/node_modules`) and their command links (`<prefix>/bin` on Linux and macOS). If you cannot write to the prefix, you get `EACCES`.
+On top of that is npm's prefix. `npm install -g` writes packages under `<prefix>/lib/node_modules` and links commands into `<prefix>/bin`. If you cannot write the prefix, you get `EACCES`.
 
 ## How it works
 
-What happens when you type `node app.js` in a terminal:
+When you type `node app.js`:
 
-1. **The shell looks up `node`.** It walks the directories in `$PATH` from left to right and runs the first executable named `node` it finds. Bash also remembers the result in a hash table, so later lookups skip the walk until the table is cleared (`hash -r`) or `PATH` is reassigned.
-2. **A version manager may have rewritten `PATH`.** `nvm use 22` prepends `~/.nvm/versions/node/v22.x.y/bin`. fnm prepends a per-shell symlink directory that it repoints on `fnm use`. Volta puts `~/.volta/bin` first once, and `node` there is a shim that reads the nearest `package.json` on every call.
-3. **The runtime starts.** `process.execPath` holds the absolute path of the binary that actually ran. When `node -v` surprises you, check this value.
-4. **npm reads its prefix.** npm takes its config from (among others) `npm_config_*` environment variables, `~/.npmrc` and the built-in default. The default prefix is the directory the running Node was installed into. With a system install that is a root-owned directory such as `/usr` or `/usr/local`. With a version manager it is the version's own folder under your home.
-
-**Choosing an install method.** The trade-offs follow from the three families:
+1. The shell walks `$PATH` left to right and runs the first `node`. Bash remembers the result. Later lookups skip the walk until `hash -r`, or until `PATH` is reassigned.
+2. A version manager may have rewritten `PATH`. `nvm use 22` prepends `~/.nvm/versions/node/v22.x.y/bin`. fnm prepends a per-shell symlink directory and repoints it. Volta puts `~/.volta/bin` first once, and `node` there is a shim that reads the nearest `package.json` on every call.
+3. `process.execPath` is the absolute path of the binary that actually ran. When `node -v` surprises you, print this.
+4. npm reads its prefix from `npm_config_*` variables, `~/.npmrc`, and the built-in default. The default is the directory the running Node was installed into. A system install is often root-owned, `/usr` or `/usr/local`. A version manager uses the version's own folder under your home.
 
 | Method | Versions at once | Who updates it | Global installs need root? | Typical use |
 | --- | --- | --- | --- | --- |
-| nodejs.org installer / tarball | one | you, by re-running the installer | yes for system locations (`/usr/local`) | a single-purpose machine, a quick start |
-| OS package manager | one | the distro, on its own schedule | yes (`/usr`) | servers managed with the rest of the OS packages |
-| Version manager | many | you, per project | no (everything is under `$HOME`) | development machines with several projects |
+| nodejs.org installer or tarball | one | you | yes, for `/usr/local` | one machine, a quick start |
+| OS package | one | the distro, on its schedule | yes, for `/usr` | servers managed with the OS |
+| Version manager | many | you, per project | no, everything is under `$HOME` | a laptop with several projects |
 
-Distribution packages often trail the upstream release line. On this machine (Ubuntu 26.04 LTS), the archive offers a Node 22 build that is older than the newest 22.x on nodejs.org (v22.23.3):
+Distro packages often trail upstream. On this machine, Ubuntu 26.04 LTS, the archive's Node 22 is older than the newest 22.x on nodejs.org, v22.23.3:
 
 bash
 
@@ -64,53 +63,36 @@ nodejs:
   Candidate: 22.22.1+dfsg+~cs22.19.15-1ubuntu1
 ```
 
-**Version managers compared.** These three were installed into a throwaway `HOME` for this lesson and exercised (outputs in the examples below):
 
 | | nvm | fnm | Volta |
 | --- | --- | --- | --- |
 | Version tested | 0.40.8 | 1.39.0 | 2.0.2 |
-| What it is | a POSIX shell script you `source`; `nvm` is a shell function | a single Rust binary; `eval "$(fnm env)"` sets up the shell | Rust binaries plus a `volta-shim` executable |
-| How `node` is switched | rewrites `PATH` in the current shell on `nvm use` | repoints a per-shell symlink dir that is on `PATH` | `~/.volta/bin/node` is a link to the shim, which picks a version on each run |
-| Reads | `.nvmrc` only (a lone `.node-version` gave `No version provided and no .nvmrc file found`) | `.node-version`, `.nvmrc`, and `engines.node` in `package.json` when neither file exists (`--resolve-engines`, on by default) | the `"volta"` key in `package.json` |
-| Auto-switch on `cd` | not by default (the nvm README has a shell hook you can add) | `fnm env --use-on-cd` | always, because the shim resolves per directory |
-| Windows | no (nvm-windows is a separate project) | yes (per its README) | yes (per its README) |
-| Maintenance status | active (v0.40.8, Sep 2026) | active (v1.39.0, Mar 2026) | **unmaintained**: the README says "Volta is unmaintained" and recommends migrating to `mise` |
+| What it is | a shell script you `source`. `nvm` is a shell function | one Rust binary. `eval "$(fnm env)"` sets up the shell | Rust binaries plus a `volta-shim` |
+| How `node` switches | rewrites `PATH` in this shell | repoints a per-shell symlink dir on `PATH` | `~/.volta/bin/node` is the shim, and it picks a version on each run |
+| Reads | `.nvmrc` only | `.node-version`, then `.nvmrc`, then `engines.node` when neither file exists | the `"volta"` key in `package.json` |
+| Auto-switch on `cd` | not by default | `fnm env --use-on-cd` | always, because the shim resolves per directory |
+| Windows | no. nvm-windows is a separate project | yes, per its README | yes, per its README |
+| Status | active, v0.40.8, Sep 2026 | active, v1.39.0, Mar 2026 | unmaintained. The README says so and points at `mise` |
 
-> ⚠️ Unverified: the Windows rows for fnm and Volta come from their READMEs; no Windows machine was available to run them.
+> ⚠️ Unverified: the Windows rows for fnm and Volta come from their READMEs. No Windows machine was available to run them.
 
-**Pinning a version per project.** Each manager reads a different file, so pick the file your team's tool understands, or commit more than one:
+**Pin files.** `.nvmrc`, one line such as `22` or `v24.21.0`, is read by nvm and fnm. `.node-version` is the same shape, read by fnm, ignored by nvm. `"volta": { "node": "22.23.3" }` is written by `volta pin node@22`, which resolves `22` to an exact version. `"engines": { "node": ">=22" }` states compatibility. It does not select a version and it does not run at runtime. npm only warns unless `engine-strict=true`. Lesson 14.
 
-- `.nvmrc`: one line, for example `22` or `v24.21.0`. Read by nvm and fnm.
-- `.node-version`: one line, same format. Read by fnm (and other tools); **ignored by nvm**.
-- `"volta": { "node": "22.23.3" }` in `package.json`. Written by `volta pin node@22`, which resolves `22` to an exact version. Read by Volta.
-- `"engines": { "node": ">=22" }` in `package.json` states compatibility, but it does not select a version and does not run at runtime. npm only warns on a mismatch unless `engine-strict=true` (see topic 14).
+**LTS and Current.** Every major starts as Current for about six months. Through Node 26, odd majors then reach end of life and even majors become Active LTS for about a year, then Maintenance, about 30 months in all. From Node 27, nodejs.org says one major per year, each with six months of Alpha and six of Current, and every major moves to LTS. Production should run Active or Maintenance LTS only. The line-by-line dates for 7 Oct 2026 are in Good to know. In three weeks from that reading, v24 drops to Maintenance and v26 becomes Active LTS. A floating alias such as nvm's `lts/*` or the Docker tag `node:lts-slim` moves on that day without a change on your side.
 
-**LTS vs Current.** Every Node major starts as **Current** for about six months. Until Node 26, odd majors then went end-of-life and even majors became **Active LTS** (about one year), then **Maintenance LTS** (critical and security fixes only), for about 30 months of support in total. The nodejs.org releases page says the cycle changes from Node 27: one major per year, each with six months of Alpha and six months of Current, and every major moves to LTS. Production should run Active LTS or Maintenance LTS only. The schedule in `nodejs/Release/schedule.json`, read on 7 Oct 2026:
+**Corepack** reads `"packageManager"` in `package.json`, for example `"pnpm@10.34.6"`, downloads that exact pnpm or Yarn, and runs it through shims. The Node 24 docs mark it experimental and say it will not be distributed starting with Node 25. The tarballs match: v24.21.0 contains `bin/corepack`. The v25.0.0 and v26.10.0 tarballs contain no file with "corepack" in the path. On 25 and later, install the `corepack` package from npm, or install pnpm or Yarn directly.
 
-| Line | Released | Active LTS from | Maintenance from | End of life | Status on 2026-10-07 |
-| --- | --- | --- | --- | --- | --- |
-| v20 (Iron) | 2023-04-18 | 2023-10-24 | 2024-10-22 | 2026-04-30 | EOL |
-| v22 (Jod) | 2024-04-24 | 2024-10-29 | 2025-10-21 | 2027-04-30 | Maintenance LTS |
-| v24 (Krypton) | 2025-05-06 | 2025-10-28 | 2026-10-20 | 2028-04-30 | Active LTS (latest v24.21.0) |
-| v25 | 2025-10-15 | — | 2026-04-01 | 2026-06-01 | EOL |
-| v26 | 2026-05-05 | 2026-10-28 | 2027-10-20 | 2029-04-30 | Current (latest v26.10.0) |
-| v27 | alpha 2026-10-28, release 2027-04-22 | not yet listed | 2027-10-20 | 2030-04-30 | not released |
+**Checksums.** Each release directory has `SHASUMS256.txt`, a detached `SHASUMS256.txt.sig`, and a clearsigned `SHASUMS256.txt.asc`. A checksum only proves the file matches the list. The signature, checked against the keys in `nodejs/release-keys`, proves a Node releaser produced the list. nvm printed `Checksums matched!` on every install in this lesson.
 
-So in three weeks, v24 drops to Maintenance and v26 becomes the Active LTS. Floating aliases such as nvm's `lts/*` or the Docker tag `node:lts-slim` will move to 26 on that day without any change on your side.
+**`EACCES`.** `npm install -g` writes the prefix. If that directory is root-owned, `mkdir` fails with errno -13. `sudo npm` hides the error, runs install scripts as root, and leaves root-owned files in your cache. Point the prefix at a directory you own and add its `bin` to `PATH`, or use a version manager so the prefix is under `$HOME`.
 
-**Corepack.** Corepack is a small tool that reads the `"packageManager"` field of `package.json` (for example `"pnpm@10.34.6"`), downloads exactly that pnpm or Yarn version into a cache, and runs it through shims. The Node v24 docs mark it Stability 1 (Experimental) and say: "Corepack will no longer be distributed starting with Node.js v25. Users currently depending on the bundled corepack executable from Node.js can switch to using the userland-provided corepack module." The tarballs confirm it: v24.21.0 contains `bin/corepack`, and the v25.0.0 and v26.10.0 tarballs contain no file with "corepack" in its path. On Node 25 and later, install it from npm (`corepack` 0.36.0 at the time of writing) or install pnpm or Yarn directly.
+**Upgrading.** A patch or minor inside one LTS line keeps the native-addon ABI. `process.versions.modules` stays `137` from 24.19.0 to 24.21.0. A major changes it, `127` on v22 and `137` on v24, so compiled addons need `npm rebuild`, and global CLIs must be installed again for the new version. Install the new version beside the old one, run the tests, update every pin together, then remove the old version.
 
-**Checksums and signatures.** Every release directory on `nodejs.org/dist/vX.Y.Z/` has `SHASUMS256.txt` (one SHA-256 line per file), `SHASUMS256.txt.sig` (a detached signature) and `SHASUMS256.txt.asc` (the same list, clearsigned). A checksum match only proves the file equals what the list says. The signature, checked against the release keys in `nodejs/release-keys`, proves a Node releaser produced the list. Version managers do part of this for you: nvm printed `Checksums matched!` during every install in this lesson.
-
-**Global installs and `EACCES`.** `npm install -g` writes to `<prefix>/lib/node_modules` and links commands into `<prefix>/bin`. If the prefix is a root-owned system directory, the `mkdir` fails with `EACCES` (errno -13). Running npm with `sudo` makes that error go away, but it runs package install scripts as root and leaves root-owned files in your cache. The fixes that npm's docs recommend are either a version manager (the prefix moves under `$HOME`) or pointing the prefix at a directory you own and adding its `bin` to `PATH`.
-
-**Upgrading safely.** A patch or minor upgrade within one LTS line (24.19.0 → 24.21.0) keeps the native-addon ABI (`process.versions.modules` stays `137`). A major upgrade changes it (`127` on v22, `137` on v24), so compiled addons must be rebuilt (`npm rebuild`) and anything installed globally has to be installed again for the new version. The safe order: install the new version next to the old one, run the test suite on it, update every place that pins the version together (`.nvmrc` / `.node-version` / `"volta"`, `engines`, CI matrix, Docker `FROM`), then remove the old version.
-
-**Docker as an alternative.** The official `node` images bundle a Node version with a Linux userland, so the version is pinned by the image tag (`node:24.21.0-slim`) instead of by a tool on the host. Tags are moving pointers. `node:24-slim` follows the latest v24, and `node:lts-slim` currently has the same digest as `node:24-slim` but will follow 26 after 2026-10-28. Pin a full version, or a digest, for reproducible builds.
+**Docker.** The official `node` image pins a version by tag. `node:24-slim` follows the latest v24. `node:lts-slim` currently matches that digest and follows 26 after 2026-10-28. Pin a full version, or a digest, when the build must be repeatable.
 
 ## Code examples
 
-**Example 1 — verify a Node download before you trust it.** This follows the commands in the nodejs/node README ("Verifying binaries"), run in an empty directory with a throwaway `GNUPGHOME`.
+**Example 1. Verify a download before you trust it.** The commands are the ones in the nodejs/node README, run in an empty directory with a throwaway `GNUPGHOME`.
 
 bash
 
@@ -140,11 +122,11 @@ $ echo $?
 1
 ```
 
-The `grep` keeps only the one line you need. Without it, `sha256sum -c SHASUMS256.txt` complains about every other file in the list, unless you add `--ignore-missing`. On macOS the equivalent tool is `shasum -a 256 -c`.
+The `grep` keeps the one line you need. Without it, `sha256sum -c` complains about every other file unless you add `--ignore-missing`. On macOS the equivalent is `shasum -a 256 -c`.
 
-> ⚠️ Unverified: `shasum -a 256 -c` on macOS was not run (no macOS machine available).
+> ⚠️ Unverified: `shasum -a 256 -c` on macOS was not run. No macOS machine was available.
 
-**Example 2 — nvm with `.nvmrc`.** nvm was installed with `HOME` set to a throwaway directory and `PROFILE=/dev/null`, so no real shell files were edited. The shell was started with `env -i` so the machine's own Node was not on `PATH` (paths trimmed with `…`).
+**Example 2. nvm and `.nvmrc`.** nvm was installed with `HOME` set to a throwaway directory and `PROFILE=/dev/null`. The shell was started with `env -i` so the machine's own Node was not on `PATH`.
 
 bash
 
@@ -174,9 +156,9 @@ $ nvm which 24
 …/nvmhome/.nvm/versions/node/v24.21.0/bin/node
 ```
 
-`nvm use` changes only the current shell. A new terminal gets the `default` alias (`nvm alias default 24`).
+`nvm use` changes only the current shell. A new terminal gets the `default` alias, `nvm alias default 24`.
 
-**Example 3 — fnm reads `.node-version`, `.nvmrc` and `engines`.** Same throwaway-`HOME` setup; the fnm binary lives outside `/tmp`.
+**Example 3. fnm reads `.node-version`, `.nvmrc`, and `engines`.**
 
 bash
 
@@ -205,7 +187,8 @@ $ fnm list
 * system
 ```
 
-**Example 4 — Volta pins inside `package.json`.** `VOLTA_HOME` was a throwaway directory; `volta install` printed nothing in this non-interactive shell.
+
+**Example 4. Volta pins inside `package.json`.**
 
 bash
 
@@ -233,9 +216,9 @@ $ cd .. && node -v
 v24.21.0
 ```
 
-The same `node` path gives a different version depending on the directory, because the shim makes the choice on each run, not the shell.
+The same `node` path gives a different version depending on the directory, because the shim chooses on each run, not the shell.
 
-**Example 5 — corepack on Node 24, and its absence on 25+.**
+**Example 5. Corepack on Node 24, and its absence from 25 on.**
 
 bash
 
@@ -263,7 +246,7 @@ $ curl -sSf https://nodejs.org/dist/v26.10.0/node-v26.10.0-linux-x64.tar.xz | ta
 
 `corepack enable` writes shims into the bin directory of the Node that runs it. That is why it was run only inside the throwaway install.
 
-**Example 6 — reproduce `EACCES` and fix it with the npm prefix.** The "system" prefix here is a throwaway directory with mode `555` (read-only), so nothing real is touched. `HOME` is also a throwaway, so `npm config set` writes a throwaway `.npmrc`.
+**Example 6. Reproduce `EACCES`, then fix the prefix.** The "system" prefix here is a throwaway directory with mode `555`. `HOME` is also a throwaway, so `npm config set` writes a throwaway `.npmrc`.
 
 bash
 
@@ -301,7 +284,7 @@ $ npm prefix -g
 …/npmdemo/home/.npm-global
 ```
 
-In real use you would then add `export PATH="$HOME/.npm-global/bin:$PATH"` to your shell startup file. Do not combine this with nvm. A `prefix` in `~/.npmrc` would stop global packages from following the active version, so nvm refuses to switch:
+In real use, add `export PATH="$HOME/.npm-global/bin:$PATH"` to your shell startup file. Do not combine that prefix with nvm. A `prefix` in `~/.npmrc` stops global packages from following the active version, so nvm refuses to switch:
 
 bash
 
@@ -315,7 +298,8 @@ $ echo $?
 11
 ```
 
-**Example 7 — edge case: you installed a newer Node and `node -v` still prints the old one.** Bash caches where it found `node`. Putting a new `node` into a directory that comes earlier on `PATH` does not reset that cache. (Reassigning `PATH` does.) Run in a clean shell whose `PATH` starts with an empty `early-bin` directory, followed by the nvm v22 bin:
+
+**Example 7. You installed a newer Node and `node -v` is still old.** Bash caches where it found `node`. A new binary earlier on `PATH` does not reset that cache. Reassigning `PATH` does.
 
 bash
 
@@ -336,9 +320,9 @@ node is …/pathdemo/early-bin/node
 node is …/nvmhome/.nvm/versions/node/v22.23.3/bin/node
 ```
 
-`type -a` lists every `node` on `PATH` in order, so it is the first command to run when the version is wrong. `hash -r` (bash) or `rehash` (zsh) clears the cache, and so does opening a new terminal.
+`type -a` lists every `node` on `PATH` in order. `hash -r` in bash, or `rehash` in zsh, clears the cache. So does a new terminal.
 
-**PATH troubleshooting by OS.** The Linux commands below were run on this machine; the others were not.
+**PATH by operating system.** The Linux commands were run here. The others were not.
 
 bash
 
@@ -356,6 +340,7 @@ $ echo "$PATH" | tr ':' '\n'
 …
 ```
 
+
 bash
 
 ```
@@ -367,7 +352,8 @@ rehash
 cat /etc/paths
 ```
 
-> ⚠️ Unverified: the macOS commands were not run (no macOS machine available).
+
+> ⚠️ Unverified: the macOS commands were not run. No macOS machine was available.
 
 text
 
@@ -379,9 +365,10 @@ $env:Path -split ';'           # PATH entries in order
 npm prefix -g                  # global packages live directly in this folder on Windows
 ```
 
-> ⚠️ Unverified: the Windows commands were not run (no Windows machine available). After changing PATH in System Settings, already-open terminals keep the old value; open a new one.
 
-**Example 8 — upgrading across a major: run the tests on the new version first.** A project pinned to 22 (`.nvmrc`) uses `URLPattern`, which is a global only since v24.0.0. `nvm exec` runs one command on another version without switching the shell:
+> ⚠️ Unverified: the Windows commands were not run. No Windows machine was available. After you change PATH in System Settings, already-open terminals keep the old value. Open a new one.
+
+**Example 8. A major upgrade: run the tests on the new version first.** A project pinned to 22 uses `URLPattern`, which is a global only since v24.0.0. `nvm exec` runs one command on another version without switching the shell.
 
 bash
 
@@ -422,9 +409,9 @@ $ npm ls -g --depth=0
 `-- semver@7.7.2
 ```
 
-The same test also tells you what the test does not cover: once the project uses a v24-only global, `.nvmrc`, `engines`, the CI matrix and the Docker `FROM` line must all say 24 in the same commit.
+Once the project uses a v24-only global, `.nvmrc`, `engines`, the CI matrix, and the Docker `FROM` line all have to say 24 in the same commit.
 
-**Example 9 — Docker instead of a host install.** Docker was not available on this machine, so only the tag lookups were run.
+**Example 9. Docker instead of a host install.** Docker was not installed here, so only the tag lookups were run.
 
 bash
 
@@ -437,6 +424,7 @@ lts-slim sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
 26-slim sha256:930557a230abacbc3f4fd9b8648abf8f4bee1e17cb72195dcdfb2f709bc85b33
 ```
 
+
 bash
 
 ```
@@ -447,60 +435,64 @@ docker run --rm node:24.21.0-slim node -v
 docker run --rm -v "$PWD":/app -w /app node:24.21.0-slim npm test
 ```
 
-> ⚠️ Unverified: the two `docker run` commands were not executed (docker was not installed), so their output is not shown.
+
+> ⚠️ Unverified: the two `docker run` commands were not executed, so their output is not shown.
 
 ## Common mistakes & gotchas
 
-- **Fixing `EACCES` with `sudo npm install -g`.** It hides the cause (a root-owned prefix), runs package scripts as root, and leaves root-owned files in `~/.npm` that break later non-root installs. Move the prefix or use a version manager.
-- **Committing `.node-version` for a team that uses nvm.** nvm reads only `.nvmrc` and ignores `.node-version` (Example 2). If the team mixes tools, commit both with the same content.
-- **Thinking `engines` selects the Node version.** It does not. npm only warns unless `engine-strict=true`, and nothing checks it at runtime. fnm is the exception that reads it, and only when no version file exists.
-- **Expecting global CLIs to survive a version switch.** With nvm and fnm, each version has its own `lib/node_modules`. After `nvm use 24`, CLIs installed under 22 are gone until you reinstall them (`nvm reinstall-packages 22`).
-- **"I upgraded but `node -v` is old."** Usually an earlier `PATH` entry (a distro or installer Node in `/usr/bin` or `/usr/local/bin`) or the shell's command cache. Run `type -a node`, then `hash -r`.
-- **Depending on bundled corepack.** It is gone from Node 25 onward. A CI step that runs `corepack enable` breaks when the runner moves to 26 unless corepack is installed from npm first.
-- **Treating a checksum as proof of origin.** If an attacker can replace the tarball, they can replace `SHASUMS256.txt` too. Verify the signature on the list, then the checksum.
-- **Using floating tags or aliases where you need repeatability.** `lts/*`, `node:lts-slim` and `node:24-slim` move. `lts-slim` becomes 26 on 2026-10-28.
-- **Starting a new project on Volta.** It still works, but its README says it is unmaintained and will not track new OS releases.
+- **`sudo npm install -g`.** It hides a root-owned prefix, runs package scripts as root, and leaves root-owned files in `~/.npm`. Move the prefix, or use a version manager.
+- **Committing `.node-version` for a team on nvm.** nvm reads only `.nvmrc`. If the team mixes tools, commit both with the same content.
+- **Thinking `engines` selects the version.** It does not. npm only warns unless `engine-strict=true`. fnm reads it only when no version file exists.
+- **Expecting global CLIs to survive a version switch.** With nvm and fnm, each version has its own `lib/node_modules`. After `nvm use 24`, CLIs installed under 22 are gone until `nvm reinstall-packages 22`.
+- **"`node -v` is old after I upgraded."** An earlier `PATH` entry, or the shell's command hash. Run `type -a node`, then `hash -r`.
+- **Depending on bundled corepack.** It is gone from Node 25 on. `corepack enable` breaks when the runner moves to 26 unless corepack is installed from npm first.
+- **Treating a checksum as proof of origin.** If someone can replace the tarball, they can replace `SHASUMS256.txt` too. Verify the signature, then the checksum.
+- **Floating tags where you need the same bytes.** `lts/*`, `node:lts-slim`, and `node:24-slim` move. `lts-slim` becomes 26 on 2026-10-28.
+- **Starting a new project on Volta.** It still runs. Its README says it is unmaintained and will not track new OS releases.
 
 ## Best practices
 
-- **Use a version manager on development machines.** It keeps everything under `$HOME` (no `sudo`), allows several versions at once, and makes per-project pinning automatic.
-- **Pin the version in one committed file and derive the rest from it.** For example `.nvmrc` with a major (`24`), plus `engines.node`, a CI matrix and a Docker `FROM` that agree with it, all changed in the same commit.
-- **Run production on Active or Maintenance LTS.** On 7 Oct 2026 that means 24 (or 22 until April 2027). Plan the move to 26 after it becomes LTS on 28 Oct 2026.
-- **Verify manual downloads.** Run `gpgv` on `SHASUMS256.txt.asc` with the nodejs/release-keys keyring, then `sha256sum -c` on the file's line.
-- **Never `sudo` npm.** Fix the prefix instead (Example 6), or let a version manager own it.
-- **Upgrade side by side.** Install the new version, run `nvm exec <new> npm test` (or the CI matrix), `npm rebuild` native addons, reinstall globals, then switch the pin and remove the old version.
-- **In containers, pin a full version tag or a digest.** Use `node:24.21.0-slim` or `node:24-slim@sha256:…`, not `node:latest`.
+- Use a version manager on development machines. Everything stays under `$HOME`, several versions can coexist, and a pin file can switch them.
+- Pin one committed file and make `engines`, CI, and the Docker `FROM` agree with it, changed in the same commit.
+- Run production on Active or Maintenance LTS. On 7 Oct 2026 that is 24, or 22 until April 2027. Plan the move to 26 after it becomes LTS on 28 Oct 2026.
+- For a manual download, run `gpgv` on `SHASUMS256.txt.asc` with the release-keys keyring, then `sha256sum -c` on that file's line.
+- Never `sudo` npm. Fix the prefix, or let a version manager own it.
+- Upgrade side by side. Install, test with `nvm exec`, `npm rebuild` native addons, reinstall globals, then move the pin and remove the old version.
+- In containers, pin `node:24.21.0-slim` or a digest, not `node:latest`.
 
 ## ⭐ Interview lens
 
 > **Q: “Why does `npm install -g` fail with EACCES, and what is the right fix?”**  
-> A: npm writes global packages to `<prefix>/lib/node_modules` and links binaries into `<prefix>/bin`. With a system install the prefix is root-owned (`/usr` or `/usr/local`), so the `mkdir` fails with errno -13. Fix it by pointing the prefix at a directory you own (`npm config set prefix ~/.npm-global` and add its `bin` to `PATH`), or use a version manager, whose prefix is the version folder under `$HOME`. *Trap:* answering "use sudo". That runs install scripts as root and leaves root-owned files in the cache.
+> npm writes global packages to `<prefix>/lib/node_modules` and links binaries into `<prefix>/bin`. With a system install that prefix is root-owned, `/usr` or `/usr/local`, so `mkdir` fails with errno -13. Point the prefix at a directory you own, `npm config set prefix ~/.npm-global`, and put its `bin` on `PATH`. Or use a version manager, whose prefix is the version folder under your home directory. The limit of "just use sudo" is that install scripts then run as root, and root-owned files in the npm cache break later installs that are not root.
 
 > **Q: “How do nvm, fnm and Volta switch Node versions, mechanically?”**  
-> A: nvm is a sourced shell function that rewrites `PATH` in the current shell to point at `~/.nvm/versions/node/vX/bin`. fnm puts a per-shell symlink directory on `PATH` and repoints it on `fnm use` (or on `cd` with `--use-on-cd`). Volta puts a shim named `node` on `PATH`, and on each run the shim reads the nearest `package.json` `"volta"` key and executes that version. nvm reads `.nvmrc`; fnm reads `.node-version`, `.nvmrc` or `engines.node`; Volta reads only its `package.json` key.
+> nvm is a shell function you source. `nvm use` rewrites `PATH` in the current shell so it points at `~/.nvm/versions/node/vX/bin`. fnm puts a per-shell symlink directory on `PATH` and repoints that directory. Volta puts one shim named `node` on `PATH`, and on every run the shim reads the nearest `package.json` `"volta"` key and executes that version. nvm reads `.nvmrc` only. fnm reads `.node-version`, then `.nvmrc`, then `engines.node`. Volta reads only its own key. The limit is Volta for a new project. Its README says it is unmaintained.
 
 > **Q: “What is the difference between LTS and Current, and what would you run in production today?”**  
-> A: A new major is Current for about six months. Up to Node 26, even majors then become Active LTS and later Maintenance LTS (about 30 months in all), and odd majors reach end of life. From Node 27, every annual major becomes LTS. In production use Active or Maintenance LTS only. On 7 Oct 2026 that is v24 (Active until 20 Oct, then Maintenance), and v26 becomes Active LTS on 28 Oct.
+> A new major is Current for about six months. Through Node 26, even majors then become Active LTS and later Maintenance, about 30 months in all, and odd majors reach end of life. From Node 27, every annual major is planned to become LTS. Production should run Active or Maintenance only. On 7 Oct 2026 that is v24, Active until 20 Oct, then Maintenance until 2028-04-30. v26 becomes Active LTS on 28 Oct. The limit of a floating `lts` tag is that it moves on that day by itself. Pin the full version when the build must stay put.
 
 > **Q: “A colleague says they upgraded Node but `node -v` still shows the old version. How do you debug it?”**  
-> A: Run `type -a node` (or `which -a`, or `Get-Command node -All` on Windows) to see every `node` on `PATH` in order. Compare with `node -p process.execPath`. Common causes are an older system install earlier on `PATH`, a version manager's `default` alias, and the shell's command hash. `hash -r` or `rehash` clears the hash, as does a new terminal.
-
-> **Q: “How do you verify a Node binary you downloaded?”**  
-> A: Download `SHASUMS256.txt.asc`, verify it with `gpgv` against the nodejs/release-keys keyring, then check the file with `sha256sum -c` against its line in the verified list. The checksum alone only proves the file matches a list that may itself have been replaced.
+> Run `type -a node`, or `which -a`, or `Get-Command node -All` on Windows, and read every `node` on `PATH` in order. Compare that with `node -p process.execPath`, the binary that actually started. The usual causes are an older system install earlier on `PATH`, a version manager's default alias, and the shell's command hash. `hash -r` or `rehash` clears the hash. A new terminal does too. The limit is fixing it once in one shell. Bash will cache the old path again until `PATH` is reassigned or the hash is cleared.
 
 ## Cheat-card
 
-- **An install is:** a directory (`bin/node`, `bin/npm`, `bin/npx`, `lib/node_modules/npm`) plus a `PATH` entry.
-- **Three ways to install:** nodejs.org installer or tarball (one version, often root-owned), OS package (distro version, often behind upstream), version manager (many versions, all under `$HOME`).
-- **Pin files:** `.nvmrc` (nvm, fnm), `.node-version` (fnm; nvm ignores it), `"volta"` in `package.json` (Volta). `engines` does not pick a version.
-- **Volta:** unmaintained per its README; the README points to `mise`.
-- **Release lines on 2026-10-07:** 24 Active LTS → Maintenance 2026-10-20; 26 Current → LTS 2026-10-28; 22 Maintenance until 2027-04-30; 20 and 25 EOL.
-- **Corepack:** bundled through Node 24 (`corepack --version` → 0.35.0 on v24.19.0); not shipped from v25; install from npm if needed.
-- **Verify:** `gpgv --keyring=… --output SHASUMS256.txt < SHASUMS256.txt.asc`, then `grep <file> SHASUMS256.txt | sha256sum -c -`.
-- **EACCES:** unwritable npm prefix → `npm config set prefix ~/.npm-global` + `PATH`, or a version manager. Never `sudo`.
-- **Wrong version:** `type -a node`, `node -p process.execPath`, `hash -r`.
-- **Major upgrade:** ABI changes (127 → 137), so `npm rebuild`, reinstall globals, test with `nvm exec`, and move every pin together.
-- **Docker:** pin `node:24.21.0-slim` or a digest; `lts`/`24` tags move.
+- An install is a directory (`bin/node`, `bin/npm`, `bin/npx`, `lib/node_modules/npm`) plus a `PATH` entry.
+- Three sources: nodejs.org, the OS package, or a version manager under `$HOME`.
+- Pin files: `.nvmrc` for nvm and fnm, `.node-version` for fnm (nvm ignores it), `"volta"` in `package.json`. `engines` does not pick a version.
+- Volta's README says it is unmaintained and points at `mise`.
+- Corepack is bundled through Node 24 and is not shipped from v25. Install it from npm if you still need it.
+- Verify with `gpgv` on `SHASUMS256.txt.asc`, then `sha256sum -c` on that file's line.
+- `EACCES` means the prefix is not writable. Change the prefix or use a version manager. Do not use `sudo`.
+- Wrong version: `type -a node`, `process.execPath`, `hash -r`.
+- A major upgrade changes the ABI, 127 to 137. `npm rebuild`, reinstall globals, and move every pin together.
+- In Docker, pin `node:24.21.0-slim` or a digest.
+
+## Good to know
+
+- Q: How do you verify a Node binary you downloaded? Download `SHASUMS256.txt.asc`, verify it with `gpgv` against the nodejs/release-keys keyring, then check the tarball with `sha256sum -c` against its line in that list. The checksum alone only proves the file matches a list that might itself have been replaced.
+- Release lines read on 2026-10-07: v20 Iron, released 2023-04-18, Active LTS 2023-10-24, Maintenance 2024-10-22, end of life 2026-04-30. v22 Jod, released 2024-04-24, LTS 2024-10-29, Maintenance 2025-10-21, end 2027-04-30. v24 Krypton, released 2025-05-06, LTS 2025-10-28, Maintenance 2026-10-20, end 2028-04-30, latest in the lesson v24.21.0, Active on that date. v25 released 2025-10-15, never LTS, Maintenance 2026-04-01, end 2026-06-01. v26 released 2026-05-05, LTS 2026-10-28, Maintenance 2027-10-20, end 2029-04-30, Current on that date, latest v26.10.0. v27 alpha 2026-10-28, release 2027-04-22, Maintenance listed 2027-10-20, end 2030-04-30, LTS date not listed.
+- Corepack on the v24.19.0 in this kit reports 0.35.0. The userland package mentioned for Node 25 and later was corepack 0.36.0 at the time of writing.
+- nvm tested 0.40.8 (Sep 2026), fnm 1.39.0 (Mar 2026), Volta 2.0.2. A lone `.node-version` made nvm say no version was provided and no `.nvmrc` was found.
 
 ---
 
@@ -516,3 +508,4 @@ docker run --rm -v "$PWD":/app -w /app node:24.21.0-slim npm test
 - [Corepack (v24 docs) nodejs.org](https://nodejs.org/docs/latest-v24.x/api/corepack.html)
 - [Resolving EACCES permissions errors when installing packages globally docs.npmjs.com](https://docs.npmjs.com/resolving-eacces-permissions-errors-when-installing-packages-globally)
 - [node official image hub.docker.com](https://hub.docker.com/_/node)
+

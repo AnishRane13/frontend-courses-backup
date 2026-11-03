@@ -13,35 +13,37 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Async error handling is the set of places an error actually shows up: as the first callback argument, as a promise rejection that walks down to catch, or as a throw at an await that try/catch can see. It exists because a throw that happens after the original stack has gone cannot be caught the way a synchronous throw can. The trade-off is that each style lands the error in a different place, and if nobody handles it Node treats that as fatal and can exit the process.
+
 ## Why it matters
 
-Synchronous error handling is a solved problem: `throw` unwinds the stack, `try/catch` catches it, done. Asynchronous errors are where real Node applications fall over — because an error that fires *after* the stack that scheduled it has unwound cannot be caught the same way, and the three async styles (callbacks, promises, `async/await`) each surface errors in a different place. Get this wrong and errors vanish silently, a single unhandled rejection crashes the whole process, or a failed request hangs forever with no response.
-
-This topic is disproportionately represented in interviews and code reviews because it separates people who can write a happy path from people who can ship a service that stays up. Knowing exactly *where* an error appears in each style, how it propagates, and what happens when nobody handles it is core backend competence.
+Synchronous errors are straightforward. throw unwinds the stack, and try/catch catches it. Async errors are where Node services fall over. An error that fires after the stack that scheduled it has already returned cannot be caught the same way, and callbacks, promises, and async/await each surface it in a different place. Get this wrong and the error vanishes, one unhandled rejection crashes the process, or a failed request hangs with no response.
 
 ## The concept, simply
 
-The single most important idea: **an async error surfaces at a different place depending on the style**. In a callback, the error is the first argument — `throw` is useless and `try/catch` won't help. In a promise, the error is a *rejection* that travels down the chain to the nearest `.catch`. In `async/await`, the rejection is re-thrown at the `await` point, so ordinary `try/catch` catches it again. Three styles, three landing spots.
+An async error shows up in a different place depending on the style. In a callback, the error is the first argument. throw is useless there, and try/catch around the call will not help. In a promise, the error is a rejection that travels down the chain to the nearest catch. In async/await, that rejection is thrown again at the await, so ordinary try/catch catches it.
 
 ![Three boxes showing a callback error arriving as the first argument, a promise rejection travelling to .catch, and an async/await rejection caught by try/catch, all feeding into an unhandled path that warns or crashes the process](assets/i16_01_5be5f216.svg)
 
-Each async style surfaces errors in its own place; anything left unhandled becomes a process-level rejection that can crash Node.
+Anything none of those handlers catch becomes a process-level event that can crash Node.
 
-And the safety net matters: if none of those handlers fire, the error becomes a global event — an `uncaughtException` for a thrown sync error, or an `unhandledRejection` for a promise nobody caught. In current Node these are treated as fatal by default and terminate the process.
+If no handler runs, the error becomes a global event. uncaughtException is for a synchronous throw nobody caught. unhandledRejection is for a promise nobody handled. In current Node both are fatal by default and end the process.
 
 ## How it works
 
-**Callbacks.** Because the callback runs on a fresh stack, the function that scheduled it has already returned. A `throw` inside the callback can't reach that caller — it escapes as an `uncaughtException`. So the convention is to pass the error as the first argument, and every layer must check it and forward it (`if (err) return cb(err)`). Miss one check and the error is silently swallowed.
+Callbacks. The callback runs on a fresh stack, so the function that scheduled it has already returned. A throw inside the callback cannot reach that caller. It escapes as an uncaughtException. The convention is to pass the error as the first argument, and every layer checks it and forwards it with if (err) return cb(err). Miss one check and the error is swallowed.
 
-**Promises.** Throwing inside a `.then` handler, or returning a rejected promise, rejects the promise that handler returned. That rejection then *skips every subsequent `.then`* and looks downward for a `.catch` (or the rejection handler of a later `.then`). This mirrors how synchronous exceptions skip code and unwind to a `catch` — except it travels *down* the chain rather than *up* the stack. A `.catch` that handles the error and returns a value puts the chain back on the fulfilled track.
+Promises. A throw inside a then, or a returned rejection, rejects the promise that handler returned. That rejection skips every later then and looks down the chain for a catch, or for the rejection handler that is the second argument of then. A catch that handles the error and returns a value puts the chain back on the fulfilled path.
 
-**async/await.** When you `await` a promise that rejects, the engine re-throws the rejection reason as a synchronous exception at that line inside your function. That's the whole trick: it re-enters the normal exception machinery, so `try/catch/finally` behaves exactly as it does for sync code. An uncaught throw in an `async` function simply rejects the promise that function returned — pushing the problem to *its* caller.
+async/await. When you await a promise that rejects, the engine throws that reason at that line inside your function. try/catch/finally then behave as they do for synchronous code. A throw you do not catch rejects the promise your async function returned, and the problem moves to its caller.
 
-**The unhandled path.** A promise that rejects with no handler attached (by the time the microtask queue drains) emits `process.on('unhandledRejection')`. A synchronous throw that nothing catches emits `process.on('uncaughtException')`. Both default to crashing. The correct response to `uncaughtException` is to *log and exit*, not to resume — the process is in an unknown state.
+The unhandled path. A promise that rejects with no handler attached by the time the microtask queue drains emits unhandledRejection on the process. A microtask is a small job, such as a promise callback, that runs before the next timer. A synchronous throw that nothing catches emits uncaughtException. Both default to crashing. The right response to uncaughtException is to log and exit, not to keep serving. The process is in an unknown state.
 
-**Custom Error subclasses.** Branching on `err.message.includes('not found')` is fragile — messages get reworded, localised, or wrapped. The robust pattern is to subclass `Error` so callers branch on a *type* or a stable `code` instead of prose. Extend `Error`, call `super(message)`, and set `this.name = this.constructor.name` so the stack header reads correctly. Because a rejection reason travels through the chain by *reference* (it is never copied), `instanceof` keeps working across every `await` and `.catch` between the throw site and the boundary. Give each subclass a machine-readable `code` and an HTTP `status`, and the boundary handler becomes a lookup rather than a pile of string matches.
+Custom error subclasses. Branching on err.message.includes('not found') is fragile, because messages get reworded, translated, or wrapped. Subclass Error so callers branch on a type or a stable code. Extend Error, call super with the message, and set this.name to this.constructor.name so the stack header reads correctly. A rejection reason travels by reference. It is not copied. So instanceof still works across every await and catch between the throw and the boundary. Give each subclass a machine-readable code and an HTTP status, and the boundary handler becomes a lookup.
 
-A small hierarchy of typed errors makes the boundary handler declarative:
+A small hierarchy of typed errors makes that boundary declarative:
 
 javascript
 
@@ -69,7 +71,7 @@ async function handler(req, res) {
 }
 ```
 
-One built-in subclass is specific to async code: `AggregateError`, the reason `Promise.any` rejects with when *every* input fails. It carries an `.errors` array holding each individual rejection, so you inspect the collection rather than a single reason — the one common case where a rejection reason is naturally a bundle of errors instead of one.
+One built-in subclass is specific to async code. AggregateError is the reason Promise.any rejects with when every input fails. It carries an errors array of each individual rejection, so you inspect a bundle instead of a single reason.
 
 ## Code examples
 
@@ -162,57 +164,59 @@ async function a() {
 
 ## Common mistakes & gotchas
 
-- **Wrapping async callbacks in `try/catch`.** It catches nothing — the callback runs on a new stack. Check the `err` argument instead.
-- **The missing `.catch` / unhandled rejection.** A rejected promise with no handler warns and, by default, crashes current Node. Every chain needs a terminal handler.
-- **Swallowing errors.** `catch (e) {}` or a `.catch` that only logs and returns hides real failures and leaves callers thinking things succeeded.
-- **Catching too early.** Handling an error deep in a helper and returning `null` forces every caller to guess whether `null` means "empty" or "failed". Prefer to propagate and handle once at the boundary.
-- **Rejecting/throwing non-Errors.** `throw 'oops'` or `reject('bad')` loses the stack trace and breaks `err.message`. Always use `Error` objects.
-- **`return` vs `return await` in a `try`.** Without `await`, the promise escapes the `try` before it can reject, so the local `catch` never runs.
-- **Trying to resume after `uncaughtException`.** The process state is corrupt; log and exit (let a supervisor restart), don't continue serving.
-- **Sibling rejections in `Promise.all`.** After `all` rejects, other promises keep running; if one later rejects unhandled, you get a separate unhandled rejection.
-- **Losing the subclass by cloning the error.** Serialising an error to JSON and rethrowing the plain object strips its prototype, so `instanceof` and `code` checks fail downstream. Pass the original `Error` by reference through the chain, and only serialise it at the very edge (the log line or HTTP body).
+- try/catch around an async callback catches nothing. The callback runs on a new stack. Check the err argument.
+- A rejected promise with no handler warns and, by default, crashes current Node. Every chain needs a terminal handler.
+- An empty catch, or a catch that only logs and returns, hides the failure and makes callers think it succeeded.
+- Catching deep in a helper and returning null forces every caller to guess whether null means empty or failed. Propagate, and handle once at the boundary.
+- throw 'oops' or reject('bad') drops the stack trace and breaks err.message. Throw Error objects.
+- Inside try, return without await lets the promise leave the try before it rejects, so the local catch never runs.
+- Do not keep serving after uncaughtException. Log and exit, and let a supervisor restart the process.
+- After Promise.all rejects, the other promises keep running. A later unhandled rejection is a separate event.
+- Cloning an error through JSON and rethrowing the plain object strips the prototype, so instanceof and code checks fail. Pass the original Error by reference, and serialise it only at the log line or the HTTP body.
 
 ## Best practices
 
-- Always terminate promise chains with `.catch`, or `await` them inside `try/catch`.
-- Propagate errors to a single boundary (route handler, job runner) and translate them to responses/retries there — handle once.
-- Throw and reject with `Error` subclasses so you keep stacks and can branch on `error.code` or `instanceof`.
-- Register `unhandledRejection` and `uncaughtException` handlers that log and **exit**; rely on a process manager to restart.
-- Use `allSettled` when partial success is acceptable, so one failure doesn't discard every good result.
-- Add cleanup in `finally` (release connections, clear timers) so it runs on both success and failure.
-- Enable a linter rule for floating promises and unhandled rejections — catch the bug before production does.
+- End promise chains with catch, or await them inside try/catch.
+- Propagate to one boundary, such as the route handler or the job runner, and translate to a response or a retry there.
+- Throw Error subclasses so you keep stacks and can branch on error.code or instanceof.
+- Register unhandledRejection and uncaughtException handlers that log and exit. Let a process manager restart you.
+- Use allSettled when a partial success is acceptable.
+- Put cleanup in finally so it runs on both success and failure.
+- Turn on a linter rule for floating promises.
 
 ## ⭐ Interview lens
 
 > **Q: Why can't `try/catch` catch an error from an async callback?**  
-> The callback runs on a fresh stack after the `try` block has already returned. The throw escapes as an `uncaughtException`. That's why the error is passed as the callback's first argument instead.
+> The callback runs later, on a fresh stack, after the try block has already returned. A throw inside the callback never crosses back to that try. It becomes an uncaughtException, which by default can take down the process. That is why the error is passed as the first argument, and every layer does if (err) return cb(err). For example, wrapping fs.readFile in try/catch does not catch a missing file. The err argument does. The limit is the synchronous part of the same function: a throw that happens before readFile returns, still on this stack, can be caught. The async callback itself cannot.
 
 > **Q: How does an error propagate through a promise chain?**  
-> A throw or rejection skips every subsequent `.then` and travels down to the nearest rejection handler (`.catch` or a `.then`'s second argument), much like an exception unwinding to a `catch`.
+> A throw inside a then, or a returned rejected promise, rejects the promise that then returned. That rejection skips every later then and walks down the chain to the nearest catch, or to the second function of a later then. It is the same idea as an exception skipping lines until a catch, except it travels down the chain rather than up the stack. If the catch returns a normal value, the chain is fulfilled again from there. For example, a parse step that throws is caught by one catch at the bottom, not by the then handlers in between. The limit is a catch that forgets to rethrow: the chain looks successful to everything below it.
 
 > **Q: What happens on an unhandled promise rejection in current Node?**  
-> It emits `process.on('unhandledRejection')` and, by default, terminates the process with a non-zero exit code. You should attach handlers and, for uncaught cases, log and exit rather than resume.
+> When a promise rejects and no handler is attached by the time the microtask queue drains, Node emits unhandledRejection on the process. A microtask is the queue that promise callbacks run on, before the next timer. With the default mode, throw, if nobody is listening for that event, Node raises the rejection as an uncaught exception and the process exits with a non-zero code. You should attach handlers so expected failures are caught at a boundary. For a rejection that still reaches this last-resort event, log and exit rather than keep serving. The limit of "it crashes" is that a listener for unhandledRejection replaces the default crash in throw mode, so a listener that only logs will leave the process running unless it exits itself.
 
 > **Q: `unhandledRejection` vs `uncaughtException` — difference?**  
-> `uncaughtException` is a synchronous throw nothing caught; `unhandledRejection` is a rejected promise with no handler when the microtask queue drains. Both are last-resort signals; the safe action for both is log and exit.
-
-> **Q: Should you keep serving after an `uncaughtException`? (trap)**  
-> No. The process may be in a corrupt, unknown state. Log, run fast cleanup, and exit; let a supervisor (pm2, systemd, Kubernetes) restart a clean process.
-
-> **Q: Why prefer propagating an error over catching it deep inside a helper?**  
-> Local catches that return `null` force every caller to disambiguate "no data" from "failure" and scatter handling everywhere. Propagating to one boundary centralises the policy (status code, retry, log) and keeps helpers honest.
+> uncaughtException is a synchronous throw that no try/catch caught. It is emitted on the process when that exception escapes the current stack. unhandledRejection is a promise that rejected and still had no handler when the microtask queue drained. A microtask is the queue that promise callbacks run on, before the next timer. Both are last-resort signals. They tell you something escaped, and they are not a place to recover and keep serving. For example, JSON.parse throwing inside a request handler with no try is an uncaught exception, while a fetch you started and never awaited is an unhandled rejection. The limit is the default mode. Under throw, a listener for unhandledRejection replaces the crash, so that listener has to exit itself if you want the process to stop. A listener for uncaughtException does not make the process safe to keep using.
 
 ## Cheat-card
 
-- **Callback:** error is arg #1; `try/catch` can't catch it — check & forward.
-- **Promise:** rejection flows down to `.catch`, skipping `.then`s.
-- **await:** rejection re-throws at the await → normal `try/catch`.
-- **Unhandled:** `unhandledRejection` / `uncaughtException` → default crash.
-- **Rule:** throw `Error`s, propagate to one boundary, handle once.
-- **Safety net:** global handlers should log & `process.exit(1)`, not resume.
-- **Wrap with cause:** `new Error('msg', { cause: err })` keeps the original error; `cause` is non-enumerable, so `JSON.stringify` drops it.
-- **`--unhandled-rejections`:** `throw` (default since v15), `strict`, `warn`, `warn-with-error-code`, `none`; under `throw` an `unhandledRejection` listener replaces the crash.
-- **System errors:** branch on `err.code` (`ENOENT`, `EACCES`, `ECONNREFUSED`); `errno` is a platform-specific negative number; `util.getSystemErrorName(errno)` maps it back.
+- Callback: the error is argument one. try/catch cannot see it. Check it and forward it.
+- Promise: the rejection walks down to catch and skips later then handlers.
+- await: the rejection is thrown at that line, so try/catch works.
+- Nobody handled it: unhandledRejection or uncaughtException, and the default is to crash.
+- Throw Error objects. Propagate to one boundary. Handle once.
+- Global handlers should log and exit, not keep serving.
+
+## Good to know
+
+- Should you keep serving after an `uncaughtException`? (trap) No. The process may be corrupt. Log, do fast cleanup, and exit so a supervisor such as pm2, systemd, or Kubernetes can start a clean process.
+
+- Why prefer propagating an error over catching it deep inside a helper? A local catch that returns null forces every caller to tell "no data" apart from "failure". Propagating to one boundary keeps the status code, the retry, and the log in one place.
+- Additional examples: 7 Oct 2026, examples verified on Node v24.19.0.
+- `--unhandled-rejections=mode`: added in v12.0.0 and v10.17.0.
+- `util.getSystemErrorName(errno)`: added in v9.7.0.
+- `util.getSystemErrorMessage(errno)`: added in v23.1.0 and v22.12.0.
+- util.getSystemErrorMap() was added in v16.0.0 and v14.17.0.
 
 ---
 
@@ -226,8 +230,6 @@ async function a() {
 ---
 
 ## Additional topics
-
-*Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### `Error` with `{ cause }`
 
@@ -313,7 +315,7 @@ console.log(causeChain(top));
 
 ### The `--unhandled-rejections` modes
 
-`--unhandled-rejections=mode` (added in v12.0.0 and v10.17.0) is the switch that decides what Node does when a promise rejects and no handler is attached by the time the microtask queue drains. The "Unhandled" bullet in the Cheat-card says the default is a crash. This flag is where that default comes from, and it is how a service can end up silently ignoring rejections. The Node CLI docs list five modes:
+`--unhandled-rejections=mode` is the switch that decides what Node does when a promise rejects and no handler is attached by the time the microtask queue drains. The "Unhandled" bullet in the Cheat-card says the default is a crash. This flag is where that default comes from, and it is how a service can end up silently ignoring rejections. The Node CLI docs list five modes:
 
 | Mode | Behaviour (from the CLI docs) |
 | --- | --- |
@@ -393,7 +395,7 @@ How it works:
 
 1. A call such as `open('./x')` fails in the kernel, and libuv maps the result to a negative number (on Linux, `ENOENT` is -2).
 2. Node creates the error and sets `code` (the string name, for example `'ENOENT'`), `errno` (that negative number), `syscall` (`'open'`, `'connect'`, …), and, when they apply, `path`, `dest`, `address` and `port`.
-3. `util.getSystemErrorName(errno)` (added in v9.7.0) maps the number back to the name. `util.getSystemErrorMessage(errno)` (added in v23.1.0 and v22.12.0) gives the short text. `util.getSystemErrorMap()` (added in v16.0.0 and v14.17.0) returns all pairs for the current platform.
+3. `util.getSystemErrorName(errno)` maps the number back to the name. `util.getSystemErrorMessage(errno)` gives the short text. `util.getSystemErrorMap()` returns all pairs for the current platform.
 4. Common codes from the errors docs: `ENOENT` (no such file or directory), `EACCES` (permission denied), `EADDRINUSE` (port already bound), `ECONNREFUSED` (nothing listening at the target), `ECONNRESET` (peer closed the connection), `EEXIST`, `EISDIR`, `EMFILE` (too many open files), `ENOTDIR`, `ENOTEMPTY`, `EPERM`, `EPIPE`, `ETIMEDOUT`.
 
 **Example — three real system errors and their fields.**

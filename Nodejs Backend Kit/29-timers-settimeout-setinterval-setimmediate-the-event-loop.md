@@ -13,33 +13,39 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+setTimeout, setInterval, and setImmediate schedule a function for a later turn of the event loop: a timeout runs once after at least the delay you asked for, an interval repeats, and setImmediate runs in the check phase on the next loop iteration. They exist so retries, deadlines, and polling can wait without blocking the thread. The trade-off is that the delay is a minimum, not a promise of an exact time, and an interval you never clear keeps the process alive and can leak memory.
+
 ## Why it matters
 
-Timers look like the simplest API in Node — "run this later" — yet they are where the event loop's behaviour becomes visible, and where subtle ordering bugs and memory leaks hide. You use timers constantly: retry backoffs, request timeouts, polling, debouncing, rate limiting, scheduled cleanup. Understanding *when* a timer callback actually runs, and how that interacts with promises and I/O, is what lets you reason about ordering instead of guessing.
+Timers look like the simplest API in Node, "run this later", and they are where the event loop becomes visible. You use them for retry backoffs, request deadlines, polling, debouncing, rate limiting, and scheduled cleanup. Knowing when a callback actually runs, and how that lines up with promises and I/O, is what lets you reason about order instead of guessing. I/O means input and output.
 
-Interviewers love timers because a single question — "what order do these logs print?" — instantly reveals whether you understand the event loop, microtasks versus macrotasks, and the fact that `setTimeout(fn, 0)` does not mean "now." These are not trivia; timeout handling and leaked intervals are real production concerns. This topic ties the whole chapter's async foundation together.
+A single question, what order do these logs print, shows whether you understand the event loop, microtasks versus macrotasks, and that setTimeout of 0 does not mean now. A microtask is a small job such as a promise callback. A macrotask is a timer or an I/O callback. Leaked intervals and late timeouts are real production bugs.
 
 ## The concept, simply
 
-Node gives you three scheduling primitives. **`setTimeout(fn, ms)`** runs `fn` once after *at least* `ms` milliseconds. **`setInterval(fn, ms)`** runs `fn` repeatedly every `ms` until you stop it. **`setImmediate(fn)`** runs `fn` on the very next loop iteration, after the current I/O phase. Each returns a handle you cancel with `clearTimeout`, `clearInterval`, or `clearImmediate`. Two more sit alongside them at higher priority: **`process.nextTick(fn)`** and **Promise microtasks**, which drain *before* the loop moves on. The single most important truth: timers specify a *minimum* delay, not an exact one — the callback runs when the event loop reaches the timers phase and the thread is free, never sooner.
+Node gives you three scheduling primitives. setTimeout(fn, ms) runs fn once after at least ms milliseconds. setInterval(fn, ms) runs fn repeatedly every ms until you stop it. setImmediate(fn) runs fn on the next loop iteration, after the current I/O phase. Each returns a handle you cancel with clearTimeout, clearInterval, or clearImmediate.
+
+Two more sit ahead of them. process.nextTick, and promise microtasks, drain before the loop moves on. The important truth: a timer specifies a minimum delay, not an exact one. The callback runs when the event loop reaches the timers phase and the thread is free, never sooner.
 
 ![Event loop phases showing timers, poll, and check, with nextTick and microtasks draining between phases](assets/i22_01_094ff453.svg)
 
-setTimeout fires in the timers phase, setImmediate in check. process.nextTick and Promise microtasks drain between every phase, ahead of both.
+setTimeout fires in the timers phase. setImmediate fires in the check phase. process.nextTick and promise microtasks drain between phases, ahead of both.
 
 ## How it works (deep)
 
-The event loop runs in **phases**, cycling continuously. The three that matter for timers are: the **timers** phase, where expired `setTimeout`/`setInterval` callbacks run; the **poll** phase, where I/O callbacks (completed file reads, incoming sockets) run and where the loop will wait for new I/O; and the **check** phase, where `setImmediate` callbacks run. Between *every* phase transition, Node drains two higher-priority queues first: the `process.nextTick` queue, then the Promise microtask queue. This is why an `await` continuation or a `.then` callback always runs before the next `setTimeout`, even a zero-delay one.
+The event loop runs in phases and repeats. The three that matter here are the timers phase, where expired setTimeout and setInterval callbacks run, the poll phase, where I/O callbacks run and where the loop waits for new I/O, and the check phase, where setImmediate callbacks run. Between every phase, Node drains two higher-priority queues first: the process.nextTick queue, then the promise microtask queue. That is why an await continuation or a then callback always runs before the next setTimeout, even one with delay 0.
 
-That ordering explains the classic puzzle. `setTimeout(fn, 0)` does not run immediately: the callback is registered, the current synchronous code finishes, then microtasks drain, and only when the loop reaches the timers phase does `fn` run. Meanwhile a `Promise.resolve().then(...)` queued in the same tick runs first because microtasks jump ahead of the next macrotask. And a `process.nextTick` beats even that, because its queue drains before microtasks. The hierarchy per turn is: current synchronous code → `process.nextTick` queue → Promise microtasks → next event-loop phase (timers/poll/check).
+setTimeout(fn, 0) does not run immediately. The callback is registered, the current synchronous code finishes, microtasks drain, and only when the loop reaches the timers phase does fn run. A Promise.resolve().then queued in the same turn runs first, because microtasks jump ahead of the next macrotask. process.nextTick beats even that, because its queue drains before microtasks. Per turn the order is: current synchronous code, then the nextTick queue, then promise microtasks, then the next event-loop phase, timers or poll or check.
 
-The relationship between `setTimeout(fn, 0)` and `setImmediate(fn)` is famously order-dependent at the top level. Called from the main module, their order is non-deterministic because it depends on how much time the loop has already consumed before reaching the timers phase. But called from *inside an I/O callback* (the poll phase), `setImmediate` *always* fires first, because `check` is the very next phase after `poll`, whereas `timers` is a full loop away. That deterministic difference is a common interview follow-up.
+setTimeout of 0 versus setImmediate is order-dependent at the top level. Called from the main module, which one runs first depends on how much time the loop has already used before the timers phase. Called from inside an I/O callback, which runs in the poll phase, setImmediate always fires first, because check is the very next phase after poll, while timers is a full loop away.
 
-Timers also carry practical weight. A `setInterval` that is never cleared runs forever and, if its callback closes over large objects, leaks memory — a frequent cause of slowly growing servers. Timers also keep the process alive: by default a pending timer prevents Node from exiting. If you have a background poller that should not block shutdown, call `.unref()` on the handle so the loop can exit while it is the only thing left. Finally, `setInterval` does not guarantee even spacing: if the callback (or a blocked loop) takes longer than the interval, executions bunch up or drift, which is why a self-scheduling `setTimeout` is often better for reliable spacing.
+A setInterval that is never cleared runs forever. If its callback closes over large objects, those objects stay in memory. Timers also keep the process alive. By default a pending timer stops Node from exiting. If a background poller should not block shutdown, call unref on the handle so the loop can exit while that timer is the only thing left. setInterval does not guarantee even spacing. If the callback, or a blocked loop, takes longer than the interval, runs bunch up or drift. A self-scheduling setTimeout, one that schedules the next call only after the previous one finishes, keeps a real gap.
 
-A detail that bites people building long schedulers: Node stores a timer's delay as a **signed 32-bit integer**, so the maximum is `2147483647` ms (about 24.8 days). Pass anything larger — or `NaN`, `Infinity`, or a negative — and Node clamps the delay to `1` ms and emits a `TimeoutOverflowWarning`. So a naive `setTimeout(fn, days * 86400000)` for a 30-day reminder fires almost immediately instead of a month later. Long delays must be chunked (re-arm the timer in bounded steps) or driven by a real scheduler that compares wall-clock time. On the input side, a non-integer delay is truncated and a delay below `1` is treated as `1`.
+Node stores a timer's delay as a signed 32-bit integer, so the maximum is 2147483647 milliseconds, about 24.8 days. Anything larger, or NaN, Infinity, or a negative number, is clamped to 1 millisecond and Node emits a TimeoutOverflowWarning. A naive timeout of 30 days therefore fires almost immediately. Long delays must be chunked, re-armed in bounded steps, or driven by a scheduler that compares wall-clock time. A non-integer delay is truncated. A delay below 1 is treated as 1.
 
-The modern `node:timers/promises` module is worth reaching for by default in async code. `setTimeout(ms, value, { signal, ref })` returns a promise that resolves to `value` after the delay, so `await setTimeout(200)` replaces the hand-rolled `new Promise(r => setTimeout(r, 200))` wrapper. It accepts an `AbortSignal` so a pending delay can be cancelled (rejecting with an `AbortError`), and a `{ ref: false }` option that mirrors `.unref()`. There is also a `setInterval` async-generator form — `for await (const _ of setInterval(1000, null, { signal }))` — that yields on each tick and, because your loop body is awaited before the next yield, sidesteps the bunching problem that the callback-based `setInterval` suffers from. It is the cleanest way to write a cancellable, non-overlapping poller.
+node:timers/promises is the form to reach for in async code. setTimeout(ms, value, { signal, ref }) returns a promise that resolves to value after the delay, so await setTimeout(200) replaces a hand-rolled promise wrapper. An AbortSignal cancels a pending delay, and the promise rejects with an AbortError. ref false mirrors unref. There is also a setInterval async-generator form. for await of setInterval yields on each tick, and because your loop body is awaited before the next yield, it avoids the bunching the callback form suffers. It is the clean way to write a cancellable poller that does not overlap itself.
 
 ## Code examples
 
@@ -117,53 +123,62 @@ async function poll(task, gapMs) {
 
 ## Common mistakes & gotchas
 
-- **Believing `setTimeout(fn, 0)` runs "immediately."** It runs after the current sync code, the `nextTick` queue, and all microtasks — and only when the timers phase is reached. Zero is a minimum, not an exact delay.
-- **Never clearing a `setInterval`.** It runs forever and, if it captures large state, leaks memory. Always keep the handle and `clearInterval` when done.
-- **Expecting `setInterval` to space runs evenly.** If the callback or a blocked event loop overruns the interval, executions drift or pile up. Self-schedule with `setTimeout` for guaranteed gaps.
-- **Blocking the event loop and blaming the timer.** A long synchronous computation delays *all* timers, because callbacks only run when the loop is free. The timer is fine; the blocking code is the problem.
-- **Assuming `setTimeout(0)` vs `setImmediate` ordering at the top level.** It is non-deterministic in the main module; it is only guaranteed (`setImmediate` first) inside an I/O callback.
-- **Forgetting timers keep the process alive.** A pending timer blocks a clean exit. Use `.unref()` for background timers that should not.
-- **Starving the loop with recursive `process.nextTick`.** Because `nextTick` drains fully before the loop advances, an ever-growing `nextTick` chain can starve I/O and timers entirely.
-- **Scheduling a delay longer than ~24.8 days.** The delay is a signed 32-bit int; anything over `2147483647` ms (or `NaN`/`Infinity`/negative) is clamped to `1` ms with a `TimeoutOverflowWarning`, so a "fire in 30 days" timer fires now. Chunk long waits or use a wall-clock scheduler.
-- **Leaking a promise-based timer's `AbortSignal` listener.** When you race `timers/promises` `setTimeout` against other work, pass an `AbortController` and abort the loser; otherwise the pending timer (and its signal listener) lingers until it fires, quietly retaining whatever the callback closed over.
+- setTimeout(fn, 0) does not run immediately. It runs after the current synchronous code, the nextTick queue, and all microtasks, and only when the timers phase is reached. Zero is a minimum.
+- An uncleared setInterval runs forever and, if it captures large state, leaks memory. Keep the handle and clearInterval when you are done.
+- setInterval does not space runs evenly. If the callback or a blocked loop overruns the interval, runs drift or pile up. Self-schedule with setTimeout when you need a real gap.
+- A long synchronous computation delays every timer, because callbacks run only when the loop is free. The timer is fine. The blocking code is the problem.
+- setTimeout of 0 versus setImmediate is not deterministic in the main module. Inside an I/O callback, setImmediate is first.
+- A pending timer keeps the process alive. unref a background timer that should not block exit.
+- Recursive process.nextTick drains fully before the loop advances, so it can starve I/O and timers.
+- A delay longer than 2147483647 milliseconds, about 24.8 days, or NaN, Infinity, or a negative number, is clamped to 1 millisecond with a TimeoutOverflowWarning. Chunk long waits, or compare wall-clock time.
+- Racing timers/promises setTimeout against other work without aborting the loser leaves the timer, and its signal listener, alive until it fires.
 
 ## Best practices
 
-- **Always store and clear timer handles;** treat an uncleared `setInterval` as a leak.
-- **Prefer self-scheduling `setTimeout` over `setInterval`** when even spacing or waiting for async work matters.
-- **Use `node:timers/promises`** (`setTimeout`/`setInterval` promise forms) for clean `await`-based delays.
-- **Implement deadlines with `AbortSignal.timeout`,** which cancels the underlying work rather than just ignoring a late result.
-- **Call `.unref()` on background timers** that should not keep the process alive.
-- **Keep event-loop turns short;** offload heavy CPU work to worker threads so timers and I/O stay responsive.
-- **Reason about ordering explicitly:** sync → `nextTick` → microtasks → timers/check, every turn.
+- Store timer handles and clear them. An uncleared setInterval is a leak.
+- Prefer a self-scheduling setTimeout over setInterval when even spacing, or waiting for async work, matters.
+- Use node:timers/promises for await-based delays.
+- Put deadlines on AbortSignal.timeout, which cancels the underlying work instead of only ignoring a late result.
+- Call unref on background timers that should not keep the process alive.
+- Keep each turn of the loop short. Move heavy CPU work to worker threads so timers and I/O stay responsive.
+- Order on every turn: synchronous code, then nextTick, then microtasks, then timers, poll, and check.
 
 ## ⭐ Interview lens
 
 > **Q: Does `setTimeout(fn, 0)` run `fn` immediately?** No. It schedules `fn` to run in the timers phase after the current synchronous code completes and after the `nextTick` and microtask queues drain. Zero is a minimum delay; the actual delay depends on when the loop reaches the timers phase and whether the thread is free.
+> No. setTimeout(fn, 0) registers fn to run in the timers phase after the current synchronous code finishes and after the nextTick queue and the promise microtask queue have drained. Zero is a minimum delay, not "now". The callback runs when the loop actually reaches the timers phase and the thread is free. For example, a log on the line after setTimeout(fn, 0) prints before fn, and a Promise.then queued beside it also prints before fn. The limit is a busy loop. If the thread is stuck in synchronous work, even a timeout of 1000 milliseconds waits until that work finishes. The timer is late because the loop was blocked, not because the clock was wrong.
 
 > **Q: In what order do `setTimeout(0)`, `Promise.then`, and `process.nextTick` run?** `process.nextTick` first (its queue drains before everything), then Promise microtasks, then the `setTimeout` callback in the timers phase. Microtasks always beat macrotasks; `nextTick` beats even microtasks.
+> process.nextTick runs first. Its queue drains before anything else, including promise microtasks. Then the promise then callbacks run, because they are microtasks and they drain before the next macrotask. Then the setTimeout callback runs, in the timers phase. So the order is nextTick, then the promise, then the timeout. For example, if you schedule all three and then log "sync", the sync log is first, because it is still on the current stack, and the three callbacks come after in that order. The limit of this order is setImmediate. At the top level, setTimeout of 0 and setImmediate can go either way. The nextTick-then-microtask-then-timer order does not tell you which of those two wins.
 
 > **Q: `setTimeout(fn,0)` vs `setImmediate(fn)` — which runs first?** At the top level it is non-deterministic and depends on loop timing. But *inside an I/O callback*, `setImmediate` always runs first, because `check` is the phase immediately after `poll`, whereas the timers phase is a full loop iteration away.
+> At the top level of the main module it is non-deterministic. It depends on how far the loop has already gotten before the timers phase. Inside an I/O callback, setImmediate always runs first. I/O callbacks run in the poll phase, check is the very next phase, and the timers phase is a full lap away. So a setImmediate scheduled from a file or network callback runs before a setTimeout of 0 scheduled in that same callback. The limit is "inside I/O". The guarantee does not apply to code at the top of the file, and it does not apply to a timer scheduled from a promise. Use the rule only where you are actually in a poll-phase callback.
 
 > **Q: Why did my `setTimeout(fn, 1000)` fire much later than 1 second?** Because a timer's delay is a minimum. If the event loop was busy — a long synchronous task or a backlog of callbacks — `fn` waits until the loop is free and reaches the timers phase. The timer was not late; the loop was blocked.
-
-> **Q: How can a `setInterval` cause a memory leak?** If it is never cleared and its callback closes over objects, those objects are retained for the life of the process, and the interval itself keeps running. Always clear intervals you no longer need, and use `.unref()` for ones that should not block shutdown.
-
-> **Q: Why prefer a self-scheduling `setTimeout` over `setInterval` for polling an API?** `setInterval` fires on a fixed schedule regardless of whether the previous call finished, so slow responses cause overlapping or bunched requests. Re-scheduling with `setTimeout` after each call completes guarantees a real gap and no overlap.
+> Because the delay is a minimum. The callback runs when the event loop is free and reaches the timers phase, not when the wall clock hits exactly 1000 milliseconds. A long synchronous task, or a backlog of other callbacks, holds the thread, and every timer waits behind it. The timer was not mis-set. The loop was busy. For example, a JSON parse of a huge payload scheduled just before the timeout will push the timeout out by however long that parse takes. The limit of blaming the timer is the overflow case, which is different: a delay above 2147483647 milliseconds is clamped to 1 millisecond. That one fires early, with a TimeoutOverflowWarning, rather than late.
 
 ## Cheat-card
 
-- `setTimeout` = once after ≥ ms; `setInterval` = repeat; `setImmediate` = next loop, check phase.
-- Cancel with `clearTimeout`/`clearInterval`/`clearImmediate`.
-- Per turn: sync → `process.nextTick` → Promise microtasks → timers/poll/check.
-- Delay is a *minimum*, never exact — a blocked loop delays every timer.
-- Inside an I/O callback, `setImmediate` beats `setTimeout(0)` deterministically.
-- Uncleared `setInterval` = leak + keeps process alive; use `.unref()` for background timers.
-- Even spacing / await async work → self-scheduling `setTimeout`, not `setInterval`.
-- Modern: `node:timers/promises` for `await` delays; `AbortSignal.timeout` for deadlines.
-- **`t.refresh()`** (v10.2.0): restart the same timer from now, same delay; re-arms a timer that already fired.
-- **`t.hasRef()`** (v11.0.0): `true` if the timer holds the process open; `unref()` → `false`, `ref()` → `true`.
-- **`scheduler.wait(ms, { signal })` / `scheduler.yield()`** (Experimental, v17.3.0): promise `setTimeout` / promise `setImmediate`; yield inside long loops.
+- setTimeout runs once after at least the delay. setInterval repeats. setImmediate runs on the next loop, in the check phase.
+- Cancel with clearTimeout, clearInterval, or clearImmediate.
+- Each turn: synchronous code, then process.nextTick, then promise microtasks, then timers, poll, and check.
+- A delay is a minimum. A blocked loop delays every timer.
+- Inside an I/O callback, setImmediate beats setTimeout of 0. At the top level that order is not guaranteed.
+- An uncleared setInterval leaks and keeps the process alive. unref background timers.
+- Even spacing, or waiting for async work: a self-scheduling setTimeout, not setInterval.
+- In async code, use node:timers/promises. For a deadline that stops the work, use AbortSignal.timeout.
+- The maximum delay is 2147483647 milliseconds. Longer, or NaN, Infinity, or negative, becomes 1 millisecond.
+
+## Good to know
+
+- How can a `setInterval` cause a memory leak? If it is never cleared and its callback closes over objects, those objects stay alive for the life of the process and the interval keeps firing. Clear it, and unref one that should not block shutdown.
+
+- Why prefer a self-scheduling `setTimeout` over `setInterval` for polling an API? setInterval fires on a fixed schedule even if the previous call has not finished, so slow responses overlap or bunch. Scheduling the next setTimeout after each call finishes leaves a real gap and no overlap.
+
+- timeout.refresh was added in v10.2.0. It restarts the same timer from now, with the same delay, and it re-arms a timer that has already fired. After clearTimeout, refresh does not bring it back.
+- timeout.hasRef was added in v11.0.0, and immediate.hasRef too. It is true when the timer holds the process open. unref makes it false. ref makes it true.
+- scheduler.wait and scheduler.yield, from node:timers/promises, were added in v17.3.0 and v16.14.0. They are Stability 1, experimental. wait is the promise form of setTimeout. yield is the promise form of setImmediate, useful inside a long CPU loop.
+- Additional examples: 7 Oct 2026, examples verified on Node v24.19.0.
 
 ---
 
@@ -178,11 +193,9 @@ async function poll(task, gapMs) {
 
 ## Additional topics
 
-*Added 7 Oct 2026 · examples verified on Node v24.19.0*
-
 ### `timeout.refresh()`
 
-`timeout.refresh()` (added in v10.2.0) sets an existing `Timeout`'s start time to *now* and reschedules it to fire after its original delay, with the same callback. It returns the same `Timeout` object. You need it for timers that are pushed back on every event: an idle timeout on a socket or session, a watchdog, a debounce. Without it, each event does `clearTimeout(t); t = setTimeout(fn, ms)`, which allocates a new `Timeout` object and needs a mutable variable that every piece of code holding the old handle must see.
+`timeout.refresh()` sets an existing `Timeout`'s start time to *now* and reschedules it to fire after its original delay, with the same callback. It returns the same `Timeout` object. You need it for timers that are pushed back on every event: an idle timeout on a socket or session, a watchdog, a debounce. Without it, each event does `clearTimeout(t); t = setTimeout(fn, ms)`, which allocates a new `Timeout` object and needs a mutable variable that every piece of code holding the old handle must see.
 
 How it works:
 

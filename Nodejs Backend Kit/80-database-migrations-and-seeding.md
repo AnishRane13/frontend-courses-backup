@@ -13,19 +13,19 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A migration is a versioned file that changes the database schema one step, and a tool records in a table inside each database which files have already run, so every environment ends up the same. The schema lives in the database, not in git, so hand-written changes drift. The trade-off is locks. A change that rewrites a big table can stall the app, so production changes are split into short steps.
+
 ## Why it matters
 
-Your code lives in git, so every developer, CI job and server can check out exactly the same version of it. Your database schema does not live in git: it lives inside each database. If developers change it by hand (`ALTER TABLE` in a SQL console), the databases drift apart:
+Code lives in git, so every laptop, CI job, and server can check out the same version. The schema lives inside each database. If people change it by hand, the databases drift. Your laptop has a column staging does not, and production has it with a different type. Two changes that depend on each other have no guaranteed order. And on a large table, one ALTER can hold a lock long enough that the app waits behind it.
 
-- **Drift between environments.** Your laptop has `posts.slug`, staging does not, and production has it with a different type. Code that passed its tests fails after deploy with `column "slug" does not exist`.
-- **No order.** Two schema changes that depend on each other (create a table, then add a foreign key to it) have to run in the same order everywhere. A list of SQL snippets in a wiki has no order and no record of which ones ran where.
-- **Locks in production.** On a table with two million rows, one innocent `ALTER TABLE` held a lock for 20 seconds in this lesson's final run. An insert from the app waited 19.8 s behind it.
-
-**Migrations** fix the first two: each schema change is a numbered file in git, and a tool records in a table inside each database which files it has already applied. Safe migration patterns fix the third: they split one dangerous change into short steps that keep the app running. **Seeding** answers a related question: how a fresh database gets the rows it needs (lookup data, a demo account) after the schema is in place.
+Migrations fix the drift and the order: each change is a numbered file, and a tool records which files this database has applied. Safe patterns fix the lock: one dangerous change becomes several short steps that keep the app running. Seeding is the related question of how a fresh database gets the rows it needs after the schema exists.
 
 ## The concept, simply
 
-A migration is a small, versioned script that changes the schema from one state to the next. The files are ordered, usually by a timestamp in the filename:
+A migration is a small, ordered script that moves the schema from one state to the next. Filenames usually start with a timestamp so the order is obvious.
 
 text
 
@@ -35,47 +35,43 @@ migrations/
   1791814309246_posts-created-at-index.js ← adds an index
 ```
 
-The migration tool keeps a **history table** in the database (`pgmigrations` for node-pg-migrate, `_prisma_migrations` for Prisma, `knex_migrations` for Knex). To bring any database up to date, the tool lists the files, reads the history table, and runs only the files that are not recorded there, in order. A brand-new database runs all of them. Production runs only the new one. Every environment ends up with the same schema because it ran the same files in the same order.
 
-Each migration usually has two halves. **Up** applies the change (`CREATE TABLE`). **Down** reverses it (`DROP TABLE`). You use down in development to undo a migration you are still working on. In production, a down that drops a column also deletes its data, so most teams fix forward with a new migration instead.
+The tool keeps a history table in the database: `pgmigrations` for node-pg-migrate, `_prisma_migrations` for Prisma, `knex_migrations` for Knex. It lists the files, reads the table, and runs only the files that are not recorded, in order. A new database runs all of them. Production runs only the new one.
 
-**Seed data** is the set of rows a database needs to be usable, such as lookup tables or a demo user. It is loaded by a script that is safe to run again. **Fixtures** are small, throwaway rows that one test creates for itself and that are wiped before the next test.
+Each migration usually has two halves. **Up** applies the change. **Down** reverses it. You use down in development while you are still working on the change. In production, a down that drops a column also deletes its data, so most teams fix forward with a new migration.
+
+**Seed data** is rows a database needs to be usable: lookup tables, a demo account. The script is safe to run again. **Fixtures** are small rows one test creates for itself and wipes before the next test.
 
 ## How it works
 
-What a migration tool does when you run `up` (node-pg-migrate 9.0.0 here; the other tools follow the same steps with different names):
+What `up` does, using node-pg-migrate 9.0.0. The other tools follow the same steps under different names.
 
-1. It connects to the database named by `DATABASE_URL`.
-2. It takes a lock so that two deploys cannot migrate at the same moment. node-pg-migrate calls `pg_try_advisory_lock(7241865325823964)` and fails with "Another migration is already running" if another process holds it. Knex uses a `knex_migrations_lock` table instead.
-3. It creates the history table (`pgmigrations`) if it does not exist yet.
-4. It reads the migration files, sorts them by name and compares them with the rows in the history table. If a file that has not run sorts *before* one that has, it stops (Example 2): the databases would otherwise end up with the changes in different orders.
-5. It runs each pending migration's `up`, then inserts a row with the file name into the history table, inside the same transaction. A failure rolls back both the change and its history row, so the history table never claims that a half-applied migration ran. The exception is a migration that opts out of the transaction (`pgm.noTransaction()`): its statements and its history row run one by one, so a failure part-way can leave a change applied but not recorded.
-6. It releases the lock.
+1. Connect using DATABASE_URL.
+2. Take a lock so two deploys cannot migrate at once. node-pg-migrate calls `pg_try_advisory_lock` and fails with "Another migration is already running" if the lock is held. Knex uses a `knex_migrations_lock` table instead.
+3. Create the history table if it is missing.
+4. Sort the files by name and compare them with the history rows. If a file that has not run sorts before one that has, stop. Otherwise two databases would apply the changes in different orders.
+5. Run each pending `up`, then insert the history row, in the same transaction. A failure rolls back both, so the table never claims a half-applied migration ran. A migration that opts out with `pgm.noTransaction()` runs its statements and its history row one by one, so a failure part-way can leave a change applied but not recorded.
+6. Release the lock.
 
-`down` follows the same steps in reverse: it takes the most recently applied migration, runs its `down` and deletes the history row.
+`down` takes the most recently applied migration, runs its down, and deletes the history row.
 
-**What makes a migration dangerous in production.** PostgreSQL protects a table's structure with table-level locks. Almost every `ALTER TABLE` needs an `ACCESS EXCLUSIVE` lock, which conflicts with everything, including plain `SELECT`. That is fine when the statement takes 2 ms. It hurts in two cases:
+**Why a migration can stall production.** Almost every ALTER TABLE needs an ACCESS EXCLUSIVE lock, which conflicts with everything, including a plain SELECT. That is fine when the statement takes a couple of milliseconds. It hurts in two cases. The statement does a lot of work while it holds the lock: a full-table UPDATE, SET NOT NULL, a volatile DEFAULT that rewrites the table, or a plain CREATE INDEX. Or the statement waits for its lock because a long transaction is reading the table. While it waits at the head of the queue, every query that arrives after it, including a SELECT, queues behind it. A fast ALTER can stop the app for as long as the slowest open transaction.
 
-- **The statement does a lot of work while holding the lock.** `UPDATE` of every row, `SET NOT NULL` (it scans the whole table to check for NULLs), `ADD COLUMN … DEFAULT random()` (it rewrites the table) and plain `CREATE INDEX` (it blocks writes, not reads, for the whole build) all hold their lock for as long as the work takes. Example 6 measured 20.0 s for the one-shot version; the `random()` rewrite in Example 9 took 3.7 s in the final run and 44 s in an earlier one.
-- **The statement waits for its lock.** If a long transaction is reading the table, the `ALTER` waits for it to finish. While it waits, it sits in the lock queue, and every query that arrives after it, even a `SELECT`, queues behind it (Example 12). A 2 ms `ALTER` can stop the app for as long as the slowest open transaction.
+**Add a NOT NULL column in steps.** The one-shot version, ADD COLUMN, UPDATE every row, and SET NOT NULL in one transaction, holds ACCESS EXCLUSIVE until COMMIT.
 
-The safe patterns below keep both cases short. Each was run against a `posts` table with 2,000,004 rows (185 MB). Timings come from `performance.now()` around each `client.query()`, single runs on one laptop (Intel i5-1135G7, 8 threads, embedded-postgres default settings). The laptop was also running other PostgreSQL servers, and the same step varied a lot between runs (the full backfill took 22.6 s in one run and 62.8 s in the final one), so compare numbers only within one run. Treat them as relative sizes, not benchmarks.
-
-**Pattern 1 — add a NOT NULL column in steps.** The one-shot version (`ADD COLUMN`, `UPDATE` every row, `SET NOT NULL` in one transaction) holds `ACCESS EXCLUSIVE` from the first statement to `COMMIT`. The stepwise version (Examples 7 and 8):
-
-1. `ADD COLUMN slug text`: nullable, no default. Only the catalog changes, so the lock is held for a few milliseconds.
-2. Deploy app code that writes `slug` for every new row.
-3. Backfill old rows in batches (50,000 rows per `UPDATE`, each its own transaction). Each batch locks only the rows it touches, and only for that batch.
-4. `ADD CONSTRAINT posts_slug_not_null CHECK (slug IS NOT NULL) NOT VALID`. `NOT VALID` means "enforce this on new and changed rows, but do not scan existing rows now". It is quick, but it still needs `ACCESS EXCLUSIVE` for a moment.
-5. `VALIDATE CONSTRAINT posts_slug_not_null`. This scans the table, but it holds only `SHARE UPDATE EXCLUSIVE`, which lets reads and writes continue.
-6. `ALTER COLUMN slug SET NOT NULL`. The PostgreSQL docs say this scan "is skipped" when "a valid CHECK constraint exists … which proves no NULL can exist". It took 1 ms.
+1. ADD COLUMN nullable, with no default. Only the catalog changes, so the lock is a few milliseconds.
+2. Deploy app code that writes the column on every new row.
+3. Backfill old rows in batches, each batch its own transaction. Here that was 50,000 rows. Each batch locks only the rows it touches.
+4. ADD a CHECK constraint that the column is NOT NULL, marked NOT VALID. New and changed rows are checked now. Existing rows are not scanned yet. This still needs ACCESS EXCLUSIVE for a moment.
+5. VALIDATE CONSTRAINT. This scans the table under SHARE UPDATE EXCLUSIVE, which lets reads and writes continue.
+6. SET NOT NULL. PostgreSQL skips that scan when a valid CHECK already proves no NULL can exist. In the run here that step took about 1 millisecond.
 7. Drop the now-redundant CHECK.
 
-PostgreSQL 18 shortens this: a NOT NULL constraint can itself be added `NOT VALID` and validated later (added in PostgreSQL 18; the PostgreSQL 17 docs allow `NOT VALID` only for foreign key and CHECK constraints). Example 8 runs it. One difference showed up: the column is reported as `attnotnull = true` and rejects new NULLs immediately, even before validation.
+PostgreSQL 18 can add the NOT NULL constraint itself as NOT VALID and validate it later. On 18 the column is reported as NOT NULL and rejects new NULLs immediately, even before validation. On 17 and earlier, NOT VALID on a NOT NULL constraint is a syntax error. Use the CHECK route there. If a constant default is enough, ADD COLUMN NOT NULL DEFAULT 0 has been instant since PostgreSQL 11, because the value is stored in the catalog. A volatile default such as `random()`, `clock_timestamp()`, or `gen_random_uuid()` must be computed per existing row, so the table is rewritten under ACCESS EXCLUSIVE.
 
-**Pattern 2 — build indexes with `CREATE INDEX CONCURRENTLY`.** A plain `CREATE INDEX` takes a `SHARE` lock: reads continue, writes wait for the whole build. `CONCURRENTLY` takes `SHARE UPDATE EXCLUSIVE`, so writes continue, but PostgreSQL "must perform two scans of the table, and in addition it must wait for all existing transactions that could potentially modify or use the index to terminate" (PostgreSQL docs). Because it manages its own transactions, it "cannot" run inside a transaction block (error `25001`). Migration tools that wrap each migration in `BEGIN … COMMIT` need an opt-out: `pgm.noTransaction()` in node-pg-migrate, `config.transaction = false` in Knex. If a concurrent build fails, for example on a duplicate in a unique index, it leaves an `INVALID` index behind that is still updated on every write. Drop it before retrying (Example 11).
+**CREATE INDEX CONCURRENTLY.** A plain CREATE INDEX takes a SHARE lock: reads continue, writes wait for the whole build. CONCURRENTLY takes SHARE UPDATE EXCLUSIVE, so writes continue, but PostgreSQL scans the table twice and waits for transactions that might use the index. It cannot run inside a transaction block. Error 25001. Tools that wrap each migration in BEGIN need an opt-out: `pgm.noTransaction()` or Knex `config.transaction = false`. If the build fails, it leaves an INVALID index that is still updated on every write. Drop it before you retry.
 
-**Pattern 3 — expand and contract for renames and type changes.** During a rolling deploy, old and new app versions run against the same database at the same time. A one-step `RENAME COLUMN name TO full_name` breaks every old instance at once with `column "name" does not exist`. Expand and contract splits the change across deploys:
+**Expand and contract** for renames and type changes. During a rolling deploy, old and new app versions hit the same database. RENAME COLUMN breaks every old instance at once. Split the change across deploys:
 
 text
 
@@ -90,19 +86,12 @@ time ─────────────────────────
                           ◄──── both columns exist and hold the same values ────►
 ```
 
-The sync trigger is what makes it safe for both versions to write at once: whichever column a version writes, the trigger copies the value into the other one. Example 13 runs v1 and v2 side by side. Prisma's docs warn that its schema diff turns a renamed field into "CREATE a new column" plus "DROP the existing column … and the data in that column" unless you edit the generated SQL (`prisma migrate dev --create-only`), which is one more reason to plan renames by hand.
 
-**Pattern 4 — `lock_timeout` on every migration session.** `lock_timeout` makes a statement give up if it has waited longer than the limit for a lock (error `55P03`, "canceling statement due to lock timeout"). The default `0` means wait forever. With `SET lock_timeout = '500ms'`, a blocked `ALTER` stops after half a second, the queries queued behind it go through, and the migration retries with a backoff (Example 12). The docs advise against setting it in `postgresql.conf`, "because it would affect all sessions": set it in the migration's own session.
+A sync trigger copies whichever column a version writes into the other one, so both versions can write at once. Prisma's schema diff turns a renamed field into a new column plus a drop of the old column, including its data, unless you edit the generated SQL.
 
-**Zero-downtime rules.** During a deploy, version N of the app is still serving traffic while N+1 starts. So every migration must work with both:
+**lock_timeout.** The default 0 means wait forever. Set it on the migration session, for example 500 milliseconds. A blocked ALTER then fails with 55P03, the queue behind it drains, and you retry with a backoff. Do not set it in postgresql.conf, because that would affect every session.
 
-- **Add before use.** Run the migration that adds a column or table *before* deploying code that reads it.
-- **Remove after last use.** Drop a column only in a later deploy, after no running code reads or writes it. For a while, the code must keep working whether the column is there or not.
-- **Never rename or retype in one step.** Use expand and contract.
-- **New required columns need a value for old writers.** Either a constant `DEFAULT` (instant since PostgreSQL 11, Example 9), or a nullable column plus backfill plus constraint.
-- **Keep every lock short.** Batch big `UPDATE`s, use `NOT VALID` + `VALIDATE`, build indexes `CONCURRENTLY`, set `lock_timeout` and retry.
-- **Do not edit a migration that has run anywhere shared.** The history table records only the file name, so a changed file never runs again on databases that already applied it. Write a new migration instead.
-- **Plan to roll forward.** A down migration that drops a column is not an undo: the data is gone. Keep downs for development and for reversing a failed deploy before any data depends on the change.
+**Rules while two versions run.** Add a column before any code reads it. Drop a column only after no running code uses it. Never rename or retype in one step. A new required column needs a value for old writers: a constant default, or nullable plus backfill plus a constraint. Keep every lock short. Do not edit a migration that has run anywhere shared. The history table stores the file name, so a changed file never runs again where the old version already ran. Plan to roll forward. A down that drops a column deletes the data.
 
 **Seed data vs fixtures.**
 
@@ -989,60 +978,66 @@ Three details make this work:
 
 ## Common mistakes & gotchas
 
-- **Editing a migration that already ran.** The history table stores only the file name, so databases that ran the old version never see your change, and new databases get a different schema. Add a new migration instead.
-- **One transaction for add + backfill + constrain.** The first `ALTER` takes `ACCESS EXCLUSIVE`, and the lock lasts until `COMMIT`. In Example 6, the app's insert waited 19.8 s.
-- **`SET NOT NULL` straight on a big table.** It scans the whole table under `ACCESS EXCLUSIVE`. Add a `CHECK … NOT VALID`, `VALIDATE` it, then `SET NOT NULL` (or on PostgreSQL 18, `ADD CONSTRAINT … NOT NULL … NOT VALID` + `VALIDATE`).
-- **A volatile default on a new column.** `DEFAULT gen_random_uuid()` or `DEFAULT random()` rewrites the table: 3.7 s to 44 s for 2 million rows in Example 9's runs. Constant defaults are instant.
-- **`CREATE INDEX CONCURRENTLY` inside the migration transaction.** Error `25001`. It also fails inside a multi-statement query string. Opt that one migration out of the transaction (`pgm.noTransaction()`, Knex `config.transaction = false`).
-- **Retrying a failed concurrent index build.** The INVALID index from the failed run is still there, so the retry fails with `42P07`, and the leftover index is still updated on every write. Drop it with `DROP INDEX CONCURRENTLY` first.
-- **No `lock_timeout`.** A 2 ms `ALTER` that waits behind a long transaction blocks every later query on that table, including reads. Set `lock_timeout` in the migration session and retry.
-- **Renaming or dropping a column in the same deploy as the code change.** Old instances that are still running break immediately. Use expand and contract over several deploys.
-- **Assuming down migrations restore data.** Dropping a column in `down` deletes what was written to it. Down is for development and for failed deploys before any data depends on the change.
-- **Seed scripts that are not idempotent.** Running a plain `INSERT` seed twice creates duplicate rows or fails on a UNIQUE constraint. Use natural keys with `ON CONFLICT DO NOTHING` or `NOT EXISTS`.
-- **Tests sharing state.** Without a per-test reset, one test's deleted rows break the next test. Truncate with `RESTART IDENTITY CASCADE`, or wrap each test in a transaction and roll it back.
+- **Editing a migration that already ran.** The history table stores the file name. Databases that ran the old file never see your edit, and new databases get a different schema. Add a new migration.
+- **One transaction for add, backfill, and constrain.** The first ALTER takes ACCESS EXCLUSIVE, and the lock lasts until COMMIT. In the one-shot run, the app's insert waited 19.8 seconds.
+- **SET NOT NULL straight on a big table.** It scans under ACCESS EXCLUSIVE. Add a CHECK NOT VALID, validate it, then SET NOT NULL. On PostgreSQL 18 you can add the NOT NULL constraint itself as NOT VALID.
+- **A volatile default on a new column.** `gen_random_uuid()` or `random()` rewrites the table. A constant default does not.
+- **CREATE INDEX CONCURRENTLY inside the migration transaction.** Error 25001. It also fails inside a multi-statement query string. Opt that migration out of the transaction.
+- **Retrying a failed concurrent index.** The INVALID index is still there, so the retry fails with 42P07, and the leftover index is still updated on writes. Drop it with DROP INDEX CONCURRENTLY first.
+- **No lock_timeout.** A short ALTER waiting behind a long transaction blocks every later query on that table, including reads. Set lock_timeout on the migration session and retry.
+- **Renaming or dropping a column in the same deploy as the code.** Old instances break immediately. Expand and contract across deploys.
+- **Assuming down restores data.** Dropping a column deletes what was written there. Down is for development, and for a failed deploy before any data depends on the change.
+- **A seed that is not idempotent.** A plain INSERT twice duplicates rows or hits a unique constraint. Use a natural key with ON CONFLICT DO NOTHING or NOT EXISTS.
+- **Tests that share rows.** One test's deletes break the next. Truncate with RESTART IDENTITY CASCADE, or wrap each test in a transaction and roll it back.
 
 ## Best practices
 
-- **Every schema change is a migration file in git,** reviewed like code and applied by the tool, never by hand. Build test and CI databases from the same migrations.
-- **Run migrations as a separate deploy step,** before the new app version starts, and only one at a time (the tool's lock covers this).
-- **Set `lock_timeout` (a few hundred ms to a few seconds) in the migration session** and retry with backoff. Consider `statement_timeout` for statements that should never run long.
-- **Keep each migration to one kind of change.** Put locking DDL and long scans in separate migrations, so a failure is easy to locate and retry.
-- **Batch backfills** in small transactions, by primary-key range, and make them restartable (`WHERE new_col IS NULL`).
-- **Use `NOT VALID` + `VALIDATE CONSTRAINT`** for CHECK, foreign key and (PostgreSQL 18) NOT NULL constraints on existing tables.
-- **Build and drop indexes `CONCURRENTLY`** on tables that take writes, in a migration that runs outside a transaction, and check for INVALID leftovers.
-- **Plan renames and type changes as expand → switch → contract,** with a sync trigger or dual writes while both versions run.
-- **Keep seed scripts idempotent and separate from migrations.** Only put data in a migration when every environment needs it.
-- **Test the down migration in CI** (up → down → up) if you rely on it, so it is not first run during an incident.
+- Every schema change is a migration file in git, reviewed like code, applied by the tool. Build test and CI databases from the same files.
+- Run migrations as their own deploy step, before the new app starts, one at a time. The tool's lock covers that.
+- Set lock_timeout, a few hundred milliseconds to a few seconds, on the migration session, and retry with backoff. Consider statement_timeout for statements that should never run long.
+- One kind of change per migration. Keep locking DDL and long scans in separate files so a failure is easy to retry.
+- Backfill in small transactions, by primary-key range, and make them restartable with WHERE the new column IS NULL.
+- NOT VALID plus VALIDATE CONSTRAINT for CHECK, foreign keys, and, on PostgreSQL 18, NOT NULL.
+- Build and drop indexes CONCURRENTLY on tables that take writes, outside a transaction, and check for INVALID leftovers.
+- Renames and type changes are expand, switch, then contract, with a sync trigger or dual writes while both versions run.
+- Keep seeds idempotent and separate from migrations. Put rows in a migration only when every environment must have them.
+- If you rely on down, test up, down, up in CI so the first run is not during an incident.
 
 ## ⭐ Interview lens
 
 > **Q: “Why do migration tools keep a table in the database?”**  
-> A: The table records which migration files have been applied to *that* database. The tool compares it with the files in git and runs only the missing ones, in filename order, recording each one in the same transaction as the change. That is how a laptop, CI and production end up with the same schema from the same files. It also lets the tool refuse to run when an unapplied file sorts before an applied one, which would apply changes in different orders on different databases. *Trap:* editing an applied migration. The table stores only the name, so the edit never runs where the old version already ran.
+> A: The history table records which migration files have been applied to that specific database. The tool compares the table with the files in git and runs only the missing ones, in filename order, and it records each file in the same transaction as the change. That is how a laptop, CI, and production reach the same schema from the same files. It also lets the tool refuse to run when an unapplied file sorts before an applied one, which would apply changes in different orders on different databases. For example, node-pg-migrate stores names in `pgmigrations`, takes an advisory lock so two deploys cannot migrate together, and rolls back both the DDL and the history row if up throws. The limit is what the table does not store. It stores the file name, not a checksum you can trust on every tool. Edit an applied file and databases that already ran the old text never see the edit. Write a new migration.
 
 > **Q: “How do you add a NOT NULL column to a table with millions of rows without downtime?”**  
-> A: Add it nullable (catalog-only, milliseconds). Deploy code that writes it. Backfill in batches of small transactions. Add `CHECK (col IS NOT NULL) NOT VALID`, then `VALIDATE CONSTRAINT`, which scans under `SHARE UPDATE EXCLUSIVE` and lets writes through. Then `SET NOT NULL` skips its scan because a valid CHECK proves it, and you drop the CHECK. On PostgreSQL 18 you can add the NOT NULL constraint itself as `NOT VALID` and validate it. If a constant default works, `ADD COLUMN … NOT NULL DEFAULT 0` is instant since PostgreSQL 11. *Trap:* a volatile default such as `gen_random_uuid()` rewrites the whole table.
+> A: You do not add the column, fill every row, and set NOT NULL in one transaction. That holds ACCESS EXCLUSIVE from the first statement until commit, and the app waits. Add the column nullable, with no default, which only touches the catalog. Deploy code that writes the column. Backfill old rows in batches of their own transactions, 50,000 rows in the run here, so each lock covers only those rows. Then add CHECK (column IS NOT NULL) NOT VALID, which enforces the rule on new writes without scanning old rows, and VALIDATE CONSTRAINT, which scans under SHARE UPDATE EXCLUSIVE so reads and writes continue. SET NOT NULL then skips its own scan, because the valid CHECK proves it, and you drop the CHECK. On PostgreSQL 18 you can mark the NOT NULL constraint itself NOT VALID and validate it. If a constant default is enough, ADD COLUMN NOT NULL DEFAULT 0 has been instant since PostgreSQL 11. The limit is a volatile default such as gen_random_uuid(). That rewrites the table under ACCESS EXCLUSIVE. Add it nullable and backfill instead.
 
 > **Q: “Why can't `CREATE INDEX CONCURRENTLY` run in a transaction, and what happens if it fails?”**  
-> A: It runs as several transactions of its own: it registers the index, waits for existing transactions, scans the table twice and waits again. A surrounding `BEGIN` would make that impossible, so PostgreSQL rejects it with `25001`. Migration tools need a per-migration opt-out. If it fails, for example on a duplicate in a unique index, it leaves an INVALID index that is ignored by queries but still updated on writes. Drop it with `DROP INDEX CONCURRENTLY` and retry.
+> A: CREATE INDEX CONCURRENTLY builds the index in several transactions of its own. It registers the index, waits for existing transactions, scans the table twice, and waits again, and it allows writes the whole time. A surrounding BEGIN makes that impossible, so PostgreSQL rejects it with error 25001. The same rejection happens if you send the statement inside a multi-statement string, because PostgreSQL runs that as one implicit transaction. Migration tools that wrap each file in a transaction need an opt-out, `pgm.noTransaction()` or Knex `transaction: false`. If the build fails, for example a duplicate on a unique index, it leaves an INVALID index. Queries ignore it, but every write still updates it, and a retry fails with 42P07 because the name is taken. Drop it with DROP INDEX CONCURRENTLY, then retry. The limit of a plain CREATE INDEX is the lock: SHARE blocks writes for the whole build. Use CONCURRENTLY on any table that is taking writes.
 
 > **Q: “A 2 ms `ALTER TABLE` took the site down. How?”**  
-> A: It needed `ACCESS EXCLUSIVE` and had to wait for a long-running transaction that had read the table. While it waited at the head of the lock queue, every new query on that table, including plain `SELECT`s, queued behind it. Set `lock_timeout` in the migration session so the `ALTER` gives up quickly (`55P03`) and retries later, and watch for long transactions in `pg_stat_activity`.
-
-> **Q: “Seed data or fixtures?”**  
-> A: Seed data makes a new database usable (lookup rows, a demo account), stays in place and must be idempotent. Fixtures are per-test rows that put one test in a known state and are wiped before the next test. Mixing them makes tests depend on whatever the seed happens to contain.
+> A: The ALTER needed ACCESS EXCLUSIVE, and a long transaction already held a weaker lock from a SELECT. The ALTER waited at the head of the lock queue. PostgreSQL grants locks in queue order, so a later SELECT, which would not have conflicted with the long reader, still waited behind the ALTER. The site looked down even though the ALTER itself was only a couple of milliseconds of work. Set lock_timeout on the migration session, for example 500 milliseconds. The ALTER then fails with 55P03, the queued reads proceed, and you retry with a backoff after the long transaction commits. Watch `pg_stat_activity` for idle-in-transaction sessions. The limit is that lock_timeout belongs on the migration connection, not in postgresql.conf, because a global setting would cancel ordinary application queries that wait on a lock.
 
 ## Cheat-card
 
-- **Migration:** versioned file with `up` (apply) and `down` (reverse), run in filename order; the tool records each in a history table (`pgmigrations`, `_prisma_migrations`, `__drizzle_migrations`, `SequelizeMeta`, `migrations`, `knex_migrations`).
-- **node-pg-migrate 9.0.0:** `create <name>`, `up`, `down`, `redo`; `DATABASE_URL`; `migrations/`; `pgm.noTransaction()`; advisory lock; refuses out-of-order files unless `--no-check-order`.
-- **Lock modes:** most `ALTER TABLE` → `ACCESS EXCLUSIVE` (blocks reads and writes); `CREATE INDEX` → `SHARE` (blocks writes); `VALIDATE CONSTRAINT` and `CREATE INDEX CONCURRENTLY` → `SHARE UPDATE EXCLUSIVE` (writes continue).
-- **NOT NULL column:** nullable add → batched backfill → `CHECK … NOT VALID` → `VALIDATE` → `SET NOT NULL` (no scan) → drop CHECK. PostgreSQL 18: `ADD CONSTRAINT x NOT NULL col NOT VALID` → `VALIDATE`.
-- **Defaults:** constant `DEFAULT` = instant (PostgreSQL 11+); volatile default = full rewrite.
-- **`CONCURRENTLY`:** not in a transaction or multi-statement string (`25001`); a failure leaves an INVALID index, so drop it before retrying.
-- **`lock_timeout`:** default 0 = wait forever; set it per session, catch `55P03`, retry with backoff.
-- **Zero downtime:** every migration works with app N and N+1; add before use, remove after last use; expand → switch → contract for renames.
-- **Seed vs fixture:** idempotent and kept vs per-test and wiped.
-- **Versions used:** Node v24.19.0, PostgreSQL 18.4, pg 8.23.1, node-pg-migrate 9.0.0; table facts checked against prisma 7.10.0, drizzle-kit 0.31.11, sequelize-cli 6.6.5, umzug 3.8.3, typeorm 1.1.2, knex 3.3.0.
+- **Migration:** a versioned up and down, run in filename order. The tool records each file in a history table: `pgmigrations`, `_prisma_migrations`, `__drizzle_migrations`, `SequelizeMeta`, `migrations`, or `knex_migrations`.
+- **node-pg-migrate 9.0.0:** create, up, down, redo. DATABASE_URL. `pgm.noTransaction()`. Advisory lock. It refuses out-of-order files unless you pass `--no-check-order`, and then every later up and down needs the flag too.
+- **Locks:** most ALTER TABLE is ACCESS EXCLUSIVE and blocks reads and writes. CREATE INDEX is SHARE and blocks writes. VALIDATE CONSTRAINT and CREATE INDEX CONCURRENTLY are SHARE UPDATE EXCLUSIVE, and writes continue.
+- **NOT NULL on a big table:** nullable add, batched backfill, CHECK NOT VALID, VALIDATE, SET NOT NULL, drop the CHECK. PostgreSQL 18 can add the NOT NULL constraint as NOT VALID and then validate it.
+- **Defaults:** a constant default is instant since PostgreSQL 11. A volatile default rewrites the table.
+- **CONCURRENTLY:** not inside a transaction or a multi-statement string (25001). A failure leaves an INVALID index. Drop it before retrying.
+- **lock_timeout:** default 0 waits forever. Set it per session, catch 55P03, retry with backoff.
+- **Two app versions:** every migration must work with N and N+1. Add before use. Remove after the last use. Expand, switch, contract for renames.
+- **Seed versus fixture:** idempotent and kept, versus per-test and wiped.
+
+## Good to know
+
+- Timings in this lesson are single runs on one laptop (Intel i5-1135G7, 8 threads, embedded-postgres defaults), with other PostgreSQL servers also running. The same step varied a lot: the full backfill was 22.6 seconds in one run and 62.8 seconds in the final one. Compare numbers only within one run.
+- The one-shot migration held AccessExclusiveLock for the whole run. The app insert waited 19.8 seconds. The `random()` rewrite was 3.7 seconds in the final run and 44 seconds in an earlier one, on 2,000,004 posts (185 MB).
+- One backfill batch took 13.6 seconds while the others were much shorter. A slow batch locks only the 50,000 rows it updates. Shrink the batch if that wait matters.
+- Lock samples are every 20 milliseconds, so a lock taken and released between samples is missing.
+- `npx node-pg-migrate --version` printed the project's own package.json version, not the tool's. Use `npm ls` for the installed version.
+- **Seed data or fixtures?** Seed data makes a new database usable, stays, and must be idempotent. Fixtures are per-test rows, wiped before the next test. Mixing them makes tests depend on whatever the seed happens to contain.
+- Versions checked for the tool table: Node v24.19.0, PostgreSQL 18.4, pg 8.23.1, node-pg-migrate 9.0.0, prisma 7.10.0, drizzle-kit 0.31.11, sequelize-cli 6.6.5, umzug 3.8.3, typeorm 1.1.2, knex 3.3.0.
 
 ---
 

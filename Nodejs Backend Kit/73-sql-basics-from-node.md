@@ -13,31 +13,35 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A relational database stores rows in tables with fixed, typed columns, and you ask for data with SQL, a language where you describe the set you want and the planner decides how to fetch it. Tables point at each other with keys: a primary key identifies a row, and a foreign key is a column that must match a primary key in another table. From Node you send the SQL text and the values separately, through a driver such as `pg`. The trade-off against a document store is that you join at read time and you get the database to enforce those relationships for you.
+
 ## Why it matters
 
-Not every backend should use MongoDB. A huge share of the industry — banking, e-commerce, anything with money, reporting, or strict relationships — runs on **relational (SQL) databases** like PostgreSQL and MySQL. As a Node developer you will absolutely be asked to talk to one, usually through the `pg` (node-postgres) or `mysql2` driver. And in interviews, "SQL vs NoSQL — which would you pick and why?" is one of the most common system-design openers there is. A weak answer ("Mongo is faster") tanks the conversation; a strong one shows you understand tradeoffs.
+A large share of backends, anything with money, reporting, or strict relationships, runs on PostgreSQL or MySQL. As a Node developer you talk to them through `pg` or `mysql2`. "SQL or a document store, and why?" is a standard system-design opener. "Mongo is faster" ends the conversation. A useful answer names consistency, joins, and the shape of the data.
 
-SQL also forces you to confront things a document store lets you gloss over: schemas as contracts, JOINs across tables, foreign keys, and real ACID transactions. Even if your day job is Mongo, understanding the relational model makes you a sharper data modeler everywhere. This topic gives you the working knowledge to query Postgres from Node safely and to reason about which database fits a problem.
+SQL also forces schemas as contracts, joins, foreign keys, and multi-row transactions. Even if your day job is Mongo, that model makes you more careful about data everywhere.
 
 ## The concept, simply
 
-A relational database stores data in **tables** made of **rows** and fixed **columns**, each column with a declared type. Tables relate to each other through **keys**: a *primary key* uniquely identifies a row, and a *foreign key* in one table points at the primary key of another. You retrieve and combine data with **SQL** (Structured Query Language) — a declarative language where you describe *what* you want and the database's query planner figures out *how*.
+A relational database stores **tables** of **rows** and fixed **columns**, each column with a declared type. A **primary key** identifies a row. A **foreign key** in one table points at the primary key of another, and the database rejects a row that points at nothing. **SQL**, structured query language, is declarative: you say what set you want, and the query planner chooses indexes and join strategies.
 
 ![Relational tables with users and orders joined by a foreign key on the left versus a nested MongoDB document on the right](assets/i42_01_2e6040e8.svg)
 
-SQL splits data into typed tables joined by keys; document stores nest related data into one flexible aggregate.
+SQL splits data into typed tables joined by keys. A document store nests related data into one document.
 
-The essential contrast with NoSQL: SQL enforces a **fixed schema** and pushes relationships into **JOINs** resolved at query time, giving you strong consistency and integrity. Document stores keep related data together and stay flexible, trading some integrity for scale and developer speed.
+The contrast: SQL enforces a fixed schema and resolves relationships with joins at query time, which gives you integrity and strong consistency. A document store keeps related data together and stays flexible, and it leaves more of that integrity to your application.
 
 ## How it works (deep)
 
-SQL has a handful of core statement types. `SELECT` reads (with `WHERE` to filter, `ORDER BY` to sort, `LIMIT`/`OFFSET` to page, `GROUP BY` plus aggregates like `COUNT`/`SUM` to summarise). `INSERT`, `UPDATE`, and `DELETE` write. `CREATE TABLE` and `ALTER TABLE` define structure. The declarative nature matters: you never write loops; you state a set-based condition and the planner picks indexes and join strategies.
+`SELECT` reads. `WHERE` filters, `ORDER BY` sorts, `LIMIT` and `OFFSET` page, and `GROUP BY` with `COUNT` or `SUM` summarises. `INSERT`, `UPDATE`, and `DELETE` write. `CREATE TABLE` and `ALTER TABLE` define structure. You do not write a loop. You state a condition on a set.
 
-A **JOIN** combines rows from two tables on a matching condition. `INNER JOIN` keeps only rows with a match on both sides. `LEFT JOIN` keeps every row from the left table and fills `NULL` where the right side has no match (essential for "users and their orders, including users with zero orders"). `RIGHT` and `FULL OUTER` joins mirror that. Understanding INNER vs LEFT is a near-guaranteed interview question because the wrong one silently drops rows.
+A **join** combines rows from two tables on a match. `INNER JOIN` keeps only rows that match on both sides. `LEFT JOIN` keeps every row from the left table and fills `NULL` where the right side has no match. That is how you list users and their orders, including users with zero orders. `RIGHT JOIN` and `FULL OUTER JOIN` are the mirror. The wrong join silently drops rows.
 
-From Node, you connect with a driver. `pg` gives you a `Pool` (recommended) whose `pool.query()` borrows a connection, runs your SQL, and returns it automatically. The single most important safety rule is **parameterised queries**: never build SQL by string concatenation. You pass placeholders (`$1`, `$2` in Postgres; `?` in mysql2) and an array of values; the driver sends the query text and the data *separately*, so a value like `' OR 1=1 --` is treated as data, not code. This is how you prevent **SQL injection**, the most classic and dangerous web vulnerability.
+From Node, `pg` gives you a `Pool`. `pool.query()` borrows a connection, runs the SQL, and returns the connection. The safety rule is **parameterised queries**. You never build SQL by gluing strings. You pass placeholders, `$1` and `$2` in Postgres, `?` in mysql2, and a separate array of values. The driver sends the text and the data separately, so a value such as `' OR 1=1 --` is data, not code. That is how you prevent **SQL injection**, which is user input executed as SQL.
 
-**When to use which?** Reach for SQL when you have well-structured data with clear relationships, need strong consistency and multi-row ACID transactions (money, inventory, bookings), do a lot of ad-hoc reporting/aggregation, or must guarantee referential integrity. Reach for a document store when your data is self-contained aggregates, the schema evolves fast, you need to scale writes horizontally across shards, or the shape is naturally hierarchical (a product with wildly varying attributes). Modern reality: many systems use **both** (polyglot persistence), and Postgres even has a strong `jsonb` type that blurs the line.
+Reach for SQL when the data has clear relationships, you need multi-row transactions (money, inventory, bookings), you do a lot of ad-hoc reporting, or a foreign key must be enforced. Reach for a document store when the data is a self-contained aggregate, the schema changes often, you need to scale writes across shards, or the shape is naturally a tree of varying attributes. Many systems use both. Postgres also has `jsonb`, so a relational database can store a document-shaped column.
 
 ## Code examples
 
@@ -131,55 +135,56 @@ const bad = await pool.query(
 
 ## Common mistakes & gotchas
 
-- **String-concatenating user input into SQL.** This is the #1 web vulnerability (SQL injection). Always use `$1`/`?` parameterised placeholders.
-- **Using `INNER JOIN` when you meant `LEFT JOIN`.** Inner join silently drops parent rows that have no children (users with zero orders vanish from the report).
-- **Forgetting `WHERE` on `UPDATE`/`DELETE`.** `DELETE FROM users;` wipes the whole table. There is no undo without a backup.
-- **Assuming `rows` is a single object.** `pg` returns `{ rows: [...] }` — an array. Read `rows[0]` for a single record.
-- **Mishandling `NULL`.** `column = NULL` is never true; use `IS NULL`/`IS NOT NULL`. Aggregates like `SUM` ignore NULLs, so wrap with `COALESCE`.
-- **Selecting `*` everywhere.** It fetches columns you do not need, breaks when the schema changes, and prevents covering indexes. Name your columns.
-- **N+1 queries.** Looping over users and querying orders per user is slow; do one JOIN or an `IN (...)` query.
+- **Gluing user input into SQL.** That is SQL injection. Use `$1` or `?` placeholders.
+- **`INNER JOIN` when you meant `LEFT JOIN`.** Users with zero orders vanish from the report.
+- **`UPDATE` or `DELETE` with no `WHERE`.** `DELETE FROM users` wipes the table.
+- **Treating `rows` as one object.** `pg` returns `{ rows: [...] }`. Read `rows[0]` for one record.
+- **Comparing with `= NULL`.** That comparison is never true. Use `IS NULL` or `IS NOT NULL`. `SUM` ignores nulls, so wrap it in `COALESCE`.
+- **`SELECT *` everywhere.** You fetch columns you do not need, and you block a covering index. Name the columns.
+- **A query per row.** Looping over users and querying orders for each is the N+1 problem. Use one join or one `IN` list.
 
 ## Best practices
 
-- Always use parameterised queries; treat any concatenated SQL as a security bug in review.
-- Use a `Pool`, not one-off `Client` connections per request, and let it manage reuse (covered in the next topic).
-- Prefer explicit column lists over `SELECT *`; it is faster, clearer, and index-friendly.
-- Add indexes on foreign keys and columns you filter/sort on; check plans with `EXPLAIN ANALYZE`.
-- Use `INSERT ... RETURNING` to get generated ids in one round trip instead of a follow-up SELECT.
-- Push filtering, sorting, and aggregation into SQL rather than pulling rows into Node and processing them — the database is far better at it.
-- Pick the database from the problem: relational integrity and transactions → SQL; flexible self-contained aggregates and horizontal scale → document store; often both.
+- Parameterised queries only. A concatenated SQL string is a review bug.
+- Use a `Pool`, not a new `Client` per request (lesson 74).
+- Name columns instead of `SELECT *`.
+- Index foreign keys and the columns you filter or sort on. Read plans with `EXPLAIN ANALYZE`.
+- Use `INSERT ... RETURNING` to get generated ids in the same round trip.
+- Filter, sort, and aggregate in SQL. Do not pull the table into Node to do it.
+- Pick the database from the problem. Integrity and transactions point to SQL. Flexible aggregates and horizontal write scale point to a document store. Often you want both.
 
 ## ⭐ Interview lens
 
 > **Q: SQL vs NoSQL — when would you choose each?**  
-> SQL for structured, related data needing strong consistency, multi-row ACID transactions, and rich ad-hoc queries/joins (finance, inventory, bookings). Document/NoSQL for self-contained aggregates, rapidly evolving schemas, hierarchical data, and horizontal write scale. The mature answer notes it is not either/or — polyglot persistence is common, and Postgres `jsonb` gives document-style flexibility inside a relational engine.
+> Choose a relational database when the data is structured, rows point at other rows, and a partial write would be wrong. Money, inventory, and bookings want multi-row transactions, foreign keys, and ad-hoc reports with joins. Choose a document store when one screen is one self-contained document, the shape changes often, or you need to spread writes across shards. For example, an order total that must match its line items and a payment row is a SQL transaction. A product with a different set of attributes per category is a natural document. The limit of treating this as a contest is that many systems use both, and Postgres `jsonb` stores a document-shaped value inside a relational table when only one column is flexible. "Mongo is faster" skips the question, which is about integrity and access patterns.
 
 > **Q: What is SQL injection and how do you prevent it?**  
-> An attack where user input is concatenated into SQL and executed as code, letting an attacker read or destroy data. Prevention is parameterised queries: send the SQL text and the values separately (`$1` in pg, `?` in mysql2) so values are always treated as data. ORMs/query builders do this for you; never build SQL with template strings around user input.
+> SQL injection is user input concatenated into the query text so the database executes it as SQL. A value such as `' OR 1=1 --` can change a login check into a condition that is always true, or a later statement can read or delete rows. Prevention is a parameterised query: the SQL text contains placeholders, `$1` and `$2` with `pg`, `?` with mysql2, and the values travel in a separate array. The driver sends text and data apart, so the value cannot close a quote and become syntax. For example, `pool.query('SELECT * FROM users WHERE email = $1', [email])` treats whatever is in `email` as a string to compare. The limit is dynamic identifiers. A placeholder cannot be a column name or a sort field. Those still have to come from an allow-list you wrote, not from the request.
 
 > **Q: INNER JOIN vs LEFT JOIN?**  
-> INNER JOIN returns only rows with a match in both tables. LEFT JOIN returns every row from the left table and NULLs where the right has no match. The classic trap: "list all users and their order totals" — INNER JOIN silently omits users with zero orders, so you need LEFT JOIN (plus `COALESCE` to turn NULL sums into 0).
+> An inner join returns only rows that have a match in both tables. A left join returns every row from the left table, and where the right table has no match the right-hand columns are `NULL`. The left table is the one you name first. For example, "all users and their order totals" with an inner join drops every user who has never ordered, and the report looks like those people do not exist. A left join keeps them, and `COALESCE` turns the null sum into 0. The limit is the opposite mistake: a left join when you only wanted matches inflates the report with empty rows, and a missing `WHERE` on the outer side can turn the join back into an inner join by rejecting the nulls. Say which table is preserved, and what a missing match should show.
 
 > **Q: What is a foreign key and what does it give you?**  
-> A column that references another table's primary key, declaring a relationship the database enforces — you cannot insert an order for a non-existent user, and (with cascade rules) deletes can propagate. It provides *referential integrity*, a guarantee document stores generally leave to application code.
-
-> **Q: Why prefer a Pool over creating a Client per request?**  
-> Opening a TCP connection and authenticating to Postgres is expensive (tens of milliseconds). A pool keeps a set of connections open and hands them out, so requests reuse warm connections instead of paying setup cost each time, and it caps total connections so you do not overwhelm the database. Per-request clients exhaust connection limits under load.
-
-> **Q: How does NULL behave in SQL comparisons and aggregates?**  
-> NULL means "unknown", so any comparison with it (`= NULL`, `<> NULL`) yields NULL (not true) — you must use `IS NULL`/`IS NOT NULL`. Aggregates like `COUNT(col)`, `SUM`, and `AVG` skip NULLs, which is why a sum over no rows returns NULL and you wrap it in `COALESCE(..., 0)`.
+> A foreign key is a column that references another table's primary key. The database checks it on write. You cannot insert an order whose `user_id` matches no user, and with a cascade rule a delete of the user can delete or block the orders. That guarantee is referential integrity: the relationship is enforced by the storage engine, not by a hope that every code path remembered the check. For example, two app instances cannot race an order in for a user who was just deleted, because the insert fails in the database. The limit is that a document store generally does not do this for you. An `ObjectId` stored on an order is a convention unless your application, or a transaction, checks that the user exists.
 
 ## Cheat-card
 
-- **Model:** tables → rows → typed columns; primary key + foreign key relate tables.
-- **Drivers:** `pg` (Postgres, `$1` params), `mysql2` (`?` params).
-- **Safety:** parameterised queries always — never concatenate user input.
-- **Joins:** INNER = matches only; LEFT = keep all left rows, NULL the rest.
-- **pg result:** `{ rows: [...], rowCount }`; use `RETURNING` for new ids.
-- **NULL:** use `IS NULL`; wrap aggregates in `COALESCE`.
-- **Choose SQL** for integrity + transactions; **document** for flexible aggregates + scale.
-- **Next lessons:** 101 Prisma, 102 Drizzle, 103 Sequelize + TypeORM, 104 Knex, 105 migrations and seeding, 106 choosing raw SQL vs builder vs ORM.
-- **RETURNING:** one row per row written; `ON CONFLICT DO NOTHING` on a duplicate returns `rows: []`; an unknown column fails the whole statement (`42703`).
+- Tables, rows, typed columns. A primary key identifies a row. A foreign key points at one.
+- `pg` uses `$1` placeholders. `mysql2` uses `?`.
+- Never concatenate user input into SQL.
+- Inner join keeps matches. Left join keeps every left row and nulls the rest.
+- `pg` returns `{ rows, rowCount }`. Use `RETURNING` for new ids.
+- `NULL` is unknown. Compare with `IS NULL`. Wrap aggregates in `COALESCE`.
+- SQL when you need integrity and transactions. A document store when the aggregate is flexible and you need to scale writes out.
+
+## Good to know
+
+- `RETURNING` gives one row per row actually written. `ON CONFLICT DO NOTHING` on a duplicate returns `rows: []`. An unknown column name fails the whole statement with SQLSTATE `42703`, before any row is written.
+- Next lessons, on one shared blog schema: Prisma (77), Drizzle (78), Sequelize and TypeORM (79), Knex (76), migrations and seeding (80), and choosing raw SQL, a builder, or an ORM (81).
+- Q: Why prefer a pool over a new client per request? Opening a TCP connection and authenticating is tens of milliseconds. A pool keeps connections open and reuses them, and it caps how many exist so you do not pass the database's connection limit. A client per request exhausts that limit under load. Lesson 74 is the detail.
+- Q: How does NULL behave? NULL means unknown, so `= NULL` and `<> NULL` are not true. Use `IS NULL` and `IS NOT NULL`. `COUNT(col)`, `SUM`, and `AVG` skip nulls, which is why a sum over no rows is null and you wrap it in `COALESCE(..., 0)`.
+- Q: Why `INSERT … RETURNING` instead of insert plus a select? It is one round trip, and it returns the row that statement wrote, including a `serial` id and defaults. A follow-up `SELECT … ORDER BY id DESC LIMIT 1` can pick up another session's row. Name the columns. With `ON CONFLICT DO NOTHING`, a duplicate returns no row, so check `rowCount`.
+- Q: Raw SQL, Knex, Drizzle, or Prisma? Compare whether the compiler checks columns and results, whether you can see the SQL, how migrations are written, the learning cost, and the escape hatch for a query the tool cannot express. Lesson 81 has the table. Lessons 76 to 80 run the same schema on each tool.
 
 ---
 
@@ -309,8 +314,4 @@ Grace's id is 2, not 3: Lin's insert failed before it reached the `serial` seque
 
 ### ⭐ Interview lens (additional topics)
 
-> **Q: “Why use `INSERT … RETURNING` instead of an INSERT followed by a SELECT?”**  
-> A: It is one round trip, and it returns exactly the row that statement wrote, including generated values such as the `serial` id and defaults. A follow-up `SELECT … ORDER BY id DESC LIMIT 1` can pick up another session's row under concurrency. Name the columns you need (`RETURNING id, name, email`). *Trap:* with `ON CONFLICT DO NOTHING`, a duplicate returns no row at all.
-
-> **Q: “Your team is choosing between raw SQL, Knex, Drizzle and Prisma. What do you compare?”**  
-> A: Type safety (does the compiler check columns and results?), whether you can see the SQL that runs, how migrations are written and applied, the learning cost, and the raw-SQL escape hatch for queries the tool cannot express. Lesson 81 has the table, and lessons 76–80 show each tool on the same schema.
+The questions from this section are under Good to know, one line each.

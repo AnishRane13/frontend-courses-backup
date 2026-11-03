@@ -13,46 +13,48 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+REST, short for representational state transfer, is a way to design an API so the client sends a picture of a resource, usually JSON, and the server applies it. A resource is any named thing, such as a user or an order: the URL names it, and the HTTP method names the action. It exists so clients, caches, and extra servers can work without remembering the last call. The trade-off is that full REST, where the response includes links for what to do next, is rare in real JSON APIs.
+
 ## Why it matters
 
-Almost every backend job description asks you to "build and consume REST APIs," and almost every system-design interview eventually reaches the words "expose an endpoint." REST is the default vocabulary of the web: it is how browsers talk to servers, how mobile apps talk to backends, and how microservices talk to each other. If you understand REST deeply, you can design an interface that a stranger can use without reading your source code — and that is the entire point of an API.
+Almost every backend job asks you to build and consume REST APIs. Browsers, mobile apps, and services talk to each other this way. If you understand the constraints, you can design an interface a stranger can use without reading your source.
 
-But REST is also one of the most *misunderstood* topics in interviews. Most developers think "REST" means "JSON over HTTP with some URLs." That is not REST; that is just HTTP. REST is a specific **architectural style** defined by Roy Fielding in his year-2000 dissertation, and it is a set of **constraints** that, when you accept them, buy you real properties: scalability, cacheability, and the ability to evolve a server and its clients independently. Interviewers probe this gap constantly. The candidate who can name the constraints and explain *what each one buys you* stands out immediately from the one who just says "REST is stateless, I think."
+Most people treat REST as JSON over HTTP. That is just HTTP. REST is an architectural style from Roy Fielding's year-2000 dissertation: a set of constraints that buy scalability, cacheability, and the ability to change the server and the client separately.
 
-Getting REST right early also saves you from expensive rewrites. A stateful API that stores per-user data in server memory cannot be load-balanced across many machines. An API that ignores the uniform interface forces every client to be hand-coded against your quirks. These are not academic concerns — they are the difference between an API that scales to millions of users and one that falls over at ten thousand.
+A stateful API that stores per-user data in server memory cannot be load-balanced across machines. An API that ignores the uniform interface forces every client to be hand-coded against your quirks. Those are the difference between an API that scales and one that falls over.
 
 ## The concept, simply
 
-REST stands for **REpresentational State Transfer**. Unpack the name and the whole idea falls out: a client transfers *representations* (usually JSON or HTML documents) of *resource state* back and forth with a server. A **resource** is any thing worth naming — a user, an order, a photo, a collection of comments. The resource itself lives on the server; what crosses the wire is a *representation* of it at a moment in time.
+A client transfers representations of resource state with the server. The resource lives on the server. What crosses the wire is a picture of it at one moment, usually JSON or HTML.
 
-REST is defined by six constraints. Five are mandatory and one is optional. Accepting them is what makes an API "RESTful."
+REST has six constraints. Five are required. One is optional. Accepting them is what makes an API RESTful.
 
-- **Client–Server:** separate the user interface from data storage. They evolve independently.
+- **Client-server:** the user interface and the data storage evolve separately.
 - **Stateless:** each request carries everything the server needs. The server keeps no memory of previous requests.
-- **Cacheable:** responses must declare whether they can be cached, so clients and intermediaries can reuse them.
-- **Uniform Interface:** the one big idea — resources are identified by URIs, manipulated through representations, messages are self-descriptive, and hypermedia drives state (HATEOAS).
-- **Layered System:** a client cannot tell whether it is talking to the real server or a proxy, gateway, or cache in between.
-- **Code on Demand (optional):** the server may ship executable code (e.g. JavaScript) to extend the client.
+- **Cacheable:** responses say whether they can be stored and reused.
+- **Uniform interface:** resources have URIs, you change them by sending representations, messages describe themselves, and hypermedia drives what the client does next. That last part is called HATEOAS.
+- **Layered system:** the client cannot tell whether it reached the origin server or a proxy, gateway, or cache in between.
+- **Code on demand (optional):** the server may send executable code, such as JavaScript, to extend the client.
 
 ![Grid of the six REST constraints with Uniform Interface highlighted](assets/i36_01_4e8d3a7b.svg)
 
-The six REST constraints. Five are mandatory; only Code on Demand is optional, and Uniform Interface is the one that most APIs get wrong.
+The six REST constraints. Five are required. Only code on demand is optional. The uniform interface is the one most APIs get wrong.
 
-The mental shortcut: **REST is about nouns, not verbs**. You do not have a `/getUser` function and a `/deleteUser` function. You have one noun — `/users/42` — and you use HTTP *verbs* (GET, DELETE) to act on it. The URL names the thing; the method names the action.
+The shortcut: REST is about nouns. You do not have `/getUser` and `/deleteUser`. You have `/users/42`, and you use GET or DELETE on it. The URL names the thing. The method names the action.
 
 ## How it works (deep)
 
-Let us take the constraints that carry the most interview weight and go deeper.
+**Statelessness** means the server stores no client session between requests. Every request contains what the server needs to process it, typically an auth token, not a pointer to memory on the server. Your database is still full of state. The conversation is stateless. Because request N does not depend on the server remembering request N-1, any of ten identical servers can handle it. You can add servers behind a load balancer, restart one, and route each request anywhere.
 
-**Statelessness** is the constraint people quote but rarely explain correctly. It means the *server* stores no client *session context* between requests. Every request must contain all information needed to understand and process it — typically an auth token, not a server-side session pointer. This does *not* mean the application has no state; your database is full of state. It means the *conversation* is stateless. Why does this matter? Because if request N does not depend on the server remembering request N−1, then any of your ten identical servers can handle it. You can add servers behind a load balancer freely, restart one without losing sessions, and route each request anywhere. Statelessness is what makes horizontal scaling trivial.
+A JWT or a cookie that carries the token is state that lives on the client and is sent every time. The server checks it and forgets it. An old server-side session, where the cookie is only an id pointing at memory on that machine, is stateful. It needs sticky sessions or a shared session store.
 
-The classic confusion: "But I use JWTs / cookies for auth — isn't that state?" No. The *token* is state that lives on the *client* and is sent with every request. The server validates it fresh each time and forgets it. Contrast that with an old-style server-side session where the cookie is just an ID pointing at memory *on the server* — that version is stateful and does not scale without sticky sessions or a shared session store.
+**The uniform interface** has four parts. Identification: each resource has a stable URI, such as `/orders/9`. Manipulation through representations: the client sends a JSON body describing the new state. It does not edit the resource in place. Self-descriptive messages: the method, `Content-Type`, and status code are enough to understand the message alone. HATEOAS, hypermedia as the engine of application state: the response includes links that tell the client what it can do next, so the client discovers actions instead of hard-coding URLs.
 
-**The Uniform Interface** is the constraint that actually makes REST feel like REST, and it has four sub-parts. (1) *Identification of resources*: each resource has a stable URI, e.g. `/orders/9`. (2) *Manipulation through representations*: the client never edits the resource directly; it sends a representation (a JSON body) describing the desired new state. (3) *Self-descriptive messages*: each message carries enough metadata — the method, `Content-Type`, status code — to be understood on its own. (4) *HATEOAS* (Hypermedia As The Engine Of Application State): responses include links telling the client what it can do next, so the client discovers actions rather than hard-coding URLs.
+**HATEOAS** is the least implemented part, and Fielding treated an API without it as not truly REST. Instead of the client memorizing `POST /orders/9/pay`, the order document contains a link such as `{ "rel": "pay", "href": "/orders/9/pay" }`. The server can move the URL and the client still works. Very few JSON APIs do this fully, because it adds complexity clients rarely use. A fair interview line is that full HATEOAS is rare, and most teams ship a pragmatic REST-ish API with hard-coded routes.
 
-**HATEOAS** is the most theoretical and least implemented part of REST, and interviewers love it because knowing it signals depth. The idea: instead of a client memorizing that "to pay an order, POST to `/orders/9/pay`," the order response itself contains a link like `{ "rel": "pay", "href": "/orders/9/pay" }`. The client follows links the way a human follows hyperlinks on a web page — the server can move or rename endpoints and the client keeps working. In practice, very few JSON APIs are fully HATEOAS-driven (it adds complexity clients rarely exploit), but you should be able to explain it, because Fielding considered it the part *without which an API is not truly REST*. Be honest in interviews: "Full HATEOAS is rare in real JSON APIs; most teams ship 'REST-ish' APIs and that's a pragmatic, accepted trade-off."
-
-**Cacheability** and the **layered system** work together. Because responses are self-descriptive and can be labeled cacheable (via `Cache-Control`, `ETag`, `Last-Modified`), a proxy sitting between client and server can serve a cached copy without the origin ever seeing the request. The client cannot tell — and does not need to — whether it hit the origin or a CDN edge. That invisibility is the layered-system constraint, and it is why CDNs and reverse proxies can accelerate a well-designed REST API for free.
+**Cacheability and the layered system** work together. If a response says it can be cached, through `Cache-Control`, `ETag`, or `Last-Modified`, a proxy can answer later requests without the origin seeing them. The client cannot tell whether it hit the origin or a CDN. That invisibility is the layered system, and it is why a well-labeled REST API gets CDN speed without extra code.
 
 ## Code examples
 
@@ -137,66 +139,65 @@ function getProduct(req, res) {
 
 ## Common mistakes & gotchas
 
-- **Putting verbs in URLs:** `/getUser`, `/createOrder`, `/api/deleteUser?id=3`. The method already carries the verb; the path is a noun. Verbs in paths are the #1 sign of an RPC-shaped API wearing a REST costume.
-- **Confusing "stateless" with "no database."** Statelessness is about *per-client session* state on the server, not about persistence. Your DB is fine.
-- **Server-side sessions in memory:** storing login state in a module-level object breaks the moment you run two instances — requests hit the wrong server. This is a statelessness violation, not a "bug."
-- **Pluralization chaos:** mixing `/user/42` and `/orders/9`. Pick plural collection nouns and stay consistent.
-- **Claiming full REST while hard-coding every URL client-side:** that is fine and common, but do not call it HATEOAS. Know the difference so you can answer honestly.
-- **Nesting resources infinitely:** `/users/1/orders/9/items/3/reviews/2` is unusable. Nest one level for ownership, then link.
+- **Verbs in URLs:** `/getUser`, `/createOrder`, `/api/deleteUser?id=3`. The method already carries the verb. The path is a noun. A verb in the path is an RPC API wearing a REST costume. RPC means you call a remote function.
+- **Treating stateless as "no database."** Statelessness is about per-client session data on the server. Persistence in the database is fine.
+- **Sessions in process memory.** A module-level map of logins breaks as soon as two instances run. That is a statelessness violation.
+- **Mixed plurals:** `/user/42` next to `/orders/9`. Pick plural collection nouns and stay with them.
+- **Calling hard-coded URLs HATEOAS.** Hard-coded routes are common and fine. They are not HATEOAS.
+- **Infinite nesting:** `/users/1/orders/9/items/3/reviews/2`. Nest one level for ownership, then link.
 
 ## Best practices
 
-- Model **nouns as resources** and use HTTP methods as the verbs; keep paths free of action words.
-- Use **plural collection names** (`/users`, `/orders`) consistently, and identify members by ID (`/users/42`).
-- Keep the server **stateless**: carry auth in a token, and if you need shared session data, put it in Redis or the DB — never in process memory.
-- **Declare cacheability** explicitly with `Cache-Control` and `ETag`; a self-descriptive response is a scalable one.
-- **Nest shallowly.** One level of nesting to express ownership; beyond that, return links or use query filters.
-- Be pragmatic about HATEOAS: add `_links` where they genuinely help clients discover actions, but do not over-engineer.
-- Pick REST when your resources map cleanly to CRUD and you want HTTP caching; reach for gRPC or GraphQL when the fit is poor (see below).
+- Model nouns as resources and use HTTP methods as the verbs.
+- Use plural collection names (`/users`, `/orders`) and identify members by id (`/users/42`).
+- Carry auth in a token. If you need shared session data, put it in Redis or the database, never in process memory.
+- Declare cacheability with `Cache-Control` and `ETag`.
+- Nest one level. Beyond that, return links or use query filters.
+- Add `_links` where they help a client discover an action. Do not pretend the whole API is HATEOAS.
+- Pick REST when resources map cleanly to create, read, update, and delete and you want HTTP caching. Reach for gRPC or GraphQL when that fit is poor.
 
 ## REST vs RPC vs GraphQL
 
-Interviewers often ask you to compare REST with its alternatives, because the comparison reveals whether you understand *why* REST is shaped the way it is.
-
 ![Three-column comparison of REST resource-oriented RPC action-oriented and GraphQL query-oriented](assets/i36_02_af6f2f0c.svg)
 
-REST names resources, RPC names actions, GraphQL lets the client shape the response. Each optimizes for a different pain.
+REST names resources, RPC names actions, and GraphQL lets the client shape the response.
 
-**RPC** (Remote Procedure Call, e.g. gRPC) is *action-oriented*: you call remote functions like `getUser(42)` or `chargeCard(...)`, usually POSTing to a single endpoint per procedure. It is great for internal service-to-service traffic where you control both ends, want a typed contract (Protobuf), and do not care about HTTP caching. **GraphQL** exposes one endpoint and lets the client ask for exactly the fields it needs, solving REST's over-fetching (getting more data than you use) and under-fetching (needing several round-trips). Its cost: HTTP caching and simple status-code semantics are harder because everything is a POST that returns 200. **REST** sits in the middle: resource-oriented, cache-friendly, universally tooled, and dead simple to consume with `curl` or a browser. A strong interview answer: "REST for public, cacheable, CRUD-shaped resources; gRPC for high-throughput internal RPC; GraphQL when many clients need flexible, differently-shaped reads from one graph."
+**RPC** (remote procedure call, for example gRPC) is action-oriented. You call a remote function such as `getUser(42)` or `chargeCard(...)`, usually by POSTing to one endpoint per procedure. It fits internal service-to-service traffic when you control both ends, want a typed contract such as Protobuf, and do not need HTTP caching. **GraphQL** exposes one endpoint and lets the client ask for the fields it needs. That addresses over-fetching, which is getting fields you do not use, and under-fetching, which is needing several round trips. The cost is that HTTP caching and simple status codes get harder, because everything is a POST that returns 200. **REST** sits in the middle: resource-oriented, cache-friendly, and usable with curl or a browser. A strong answer: REST for public, cacheable, CRUD-shaped resources; gRPC for high-throughput internal calls; GraphQL when many clients need differently shaped reads from one graph.
 
 ## ⭐ Interview lens
 
 > **Q: What does "stateless" really mean in REST, and why do we want it?**  
-> It means the server keeps no client session context between requests — every request carries everything needed to process it (typically an auth token). The trap is thinking it means "no database"; application state in the DB is fine. We want it because it enables horizontal scaling: any server can handle any request, so you can load-balance freely and restart instances without losing sessions.
+> Stateless means the server keeps no client session between requests. Each request carries everything needed to process it, usually an auth token in a header. The application still has state in the database. Users, orders, and balances live there. What the server does not keep is "this browser was in the middle of a conversation." For example, ten identical servers can sit behind a load balancer, and any of them can handle the next call, because none of them has to remember the last one. You can restart a machine without logging people out. The limit is a cookie that is only an id pointing at memory on one machine. That design is stateful. It needs sticky sessions, where the balancer always sends that user to the same machine, or a shared store such as Redis.
 
 > **Q: Name the REST constraints. Which is optional?**  
-> Client–Server, Stateless, Cacheable, Uniform Interface, Layered System, and Code on Demand. Code on Demand is the only optional one. Bonus points for naming the four sub-constraints of the Uniform Interface, especially HATEOAS.
+> The six constraints are client-server, stateless, cacheable, uniform interface, layered system, and code on demand. Code on demand is the only optional one. It means the server may send code, such as JavaScript, for the client to run. The uniform interface is the one that makes an API feel like REST, and it has four parts: a stable URI for each resource, changes sent as a representation such as JSON, messages that carry their own method and content type, and HATEOAS, links in the response that say what the client can do next. For example, `/orders/9` plus GET or DELETE, with `Content-Type` and a status code, is the uniform interface in daily use. The limit is that naming the six words is not the same as using them. An API that stores the session in process memory has already dropped statelessness, whatever it says on the slide.
 
 > **Q: What is HATEOAS and do real APIs use it?**  
-> Hypermedia As The Engine Of Application State: responses include links telling the client what it can do next, so it discovers actions instead of hard-coding URLs. Honestly, full HATEOAS is rare in JSON APIs; most ship "REST-ish" APIs with hard-coded routes. The trap is claiming your API is HATEOAS when it just returns data — interviewers respect the honest, nuanced answer.
-
-> **Q: Is a JWT-based auth API stateful?**  
-> No. The token is state held by the *client* and sent each request; the server validates it fresh and forgets it. That is stateless. A server-side session where the cookie is an ID pointing at server memory *is* stateful — that's the distinction they're testing.
+> HATEOAS means hypermedia as the engine of application state. The response includes links that tell the client the next legal actions, so the client follows links the way a person follows a web page. For example, an order with status pending can include `{ "rel": "pay", "href": "/orders/9/pay" }`, and the client posts to that href instead of memorizing the path. If the server renames the path, clients that follow the link keep working. Fielding treated an API without this as not really REST. The limit is that full HATEOAS is rare in JSON APIs. Most teams hard-code the routes, ship a REST-ish API, and accept that trade-off. Calling a plain JSON body HATEOAS is the mistake.
 
 > **Q: How do you decide between REST and GraphQL?**  
-> REST when resources map cleanly to CRUD and you want HTTP caching and simple tooling. GraphQL when many diverse clients need to fetch differently-shaped data and REST forces over- or under-fetching. Trap: saying "GraphQL is just better" — it trades away easy caching and clear status semantics.
-
-> **Q: Why is `POST /users/deleteAll` not RESTful?**  
-> It puts a verb in the URL and uses POST for a destructive bulk action instead of modeling resources. The RESTful shape is `DELETE` on specific resources; a bulk operation is better expressed as an operation resource or a filtered `DELETE`, not an RPC-style verb path.
+> REST fits when the data is resources you create, read, update, and delete, and you want HTTP caching, status codes, and tools as simple as curl. GraphQL fits when many different clients each need a different slice of the same graph, so a fixed REST response would over-fetch, sending fields they do not use, or under-fetch, forcing extra round trips. For example, a mobile screen that needs a user, three orders, and one field of each product can ask for exactly that in one GraphQL query. The limit is that GraphQL usually sends everything as a POST that returns 200, so caches and status-code monitoring do less of the work for you. gRPC is the third option when both sides are yours and you want a typed remote function call.
 
 ## Cheat-card
 
-- **REST** = REpresentational State Transfer; an architectural *style*, not "JSON over HTTP."
-- **6 constraints:** Client–Server, Stateless, Cacheable, Uniform Interface, Layered System, Code-on-Demand (optional).
-- **Resources are nouns**; HTTP methods are the verbs. No verbs in paths.
-- **Stateless** = no server-side session between requests ≠ no database.
-- **Uniform Interface** sub-parts: identify resources, manipulate via representations, self-descriptive messages, HATEOAS.
-- **HATEOAS** = responses link to next actions; rare in real JSON APIs — be honest.
-- **REST vs RPC vs GraphQL:** nouns vs actions vs client-shaped queries.
-- Use **plural collection names**, shallow nesting, and explicit cache headers.
-- **Built-in ETag:** `res.send`/`res.json` add `W/"<len hex>-<sha1 prefix>"` unless you set `ETag` first; `app.set('etag', 'strong' | false | fn)` changes it (lesson 52).
-- **304 only for** GET/HEAD (QUERY too in Express 5.3.0) with a 2xx status and a matching `If-None-Match`; Express strips the body and `Content-*` headers.
-- **`req.fresh`** = weak compare, lists and `*`; `false` on request `Cache-Control: no-cache` or when the response has no `ETag`/`Last-Modified` yet.
+- REST means representational state transfer. It is an architectural style, not "JSON over HTTP."
+- Six constraints: client-server, stateless, cacheable, uniform interface, layered system, code on demand (optional).
+- Resources are nouns. HTTP methods are the verbs.
+- Stateless means no server-side session between requests. The database can still hold state.
+- Uniform interface: identify resources, change them through representations, self-descriptive messages, HATEOAS.
+- HATEOAS means the response links to the next actions. Rare in real JSON APIs.
+- REST, RPC, and GraphQL: nouns, actions, and client-shaped queries.
+- Plural collection names, shallow nesting, explicit cache headers.
+
+## Good to know
+
+- Built-in ETag: `res.send` and `res.json` add `W/"<len hex>-<sha1 prefix>"` unless you set `ETag` first. `app.set('etag', 'strong' | false | fn)` changes it (lesson 52).
+- A 304 happens only for GET and HEAD, and also QUERY in Express 5.3.0, with a 2xx status and a matching `If-None-Match`. Express strips the body and the `Content-*` headers.
+- `req.fresh` uses a weak compare and understands lists and `*`. It is false when the request has `Cache-Control: no-cache`, or when the response has no `ETag` or `Last-Modified` yet.
+- Q: Is a JWT-based auth API stateful? No. The token is state the client holds and sends each request. The server checks it and forgets it. A server-side session, where the cookie is an id pointing at server memory, is stateful.
+- Q: Why is `POST /users/deleteAll` not RESTful? The path contains a verb, and POST is used for a destructive bulk action. Model the resources and use DELETE, or make the bulk action its own resource.
+- Q: Does Express support conditional GET, and what does a 304 cost? Yes. `res.send` and `res.json` add a weak ETag, and a matching `If-None-Match` becomes a 304 with no body, only for GET and HEAD (QUERY too in Express 5.3.0) with a 2xx status. It saves bandwidth, not work: the tag is a hash of the finished body, so the handler has already run. POST and 404 responses still get an ETag. They never become 304.
+- Q: Why does a 304 test pass with curl and fail with `fetch`? With the default cache mode, a hand-written `If-None-Match` makes `fetch` switch to `no-store` and add `Cache-Control: no-cache`, and `fresh` then refuses the 304. Use `cache: 'no-cache'`, curl, or supertest.
 
 ---
 
@@ -420,8 +421,4 @@ All four status codes agree. The manual version is not wrong for the client: whe
 
 ### ⭐ Interview lens (additional topics)
 
-> **Q: “Does Express support conditional GET out of the box? What does a 304 cost the server?”**  
-> A: Yes. `res.send`/`res.json` adds a weak ETag (`W/"<len hex>-<sha1 prefix>"`), and if the request's `If-None-Match` matches, it sends 304 with no body. This applies only to GET/HEAD (and QUERY in Express 5.3.0) with a 2xx status. It saves bandwidth, not CPU: the tag is a hash of the finished body, so the handler has already run. To skip the work, set an ETag from a version column and return early when `req.fresh` is true. *Trap:* saying POST or 404 responses never get an ETag. They do get one; they just never become 304.
-
-> **Q: “Why does my 304 test pass with curl but fail with `fetch`?”**  
-> A: `fetch` with the default cache mode treats a hand-written `If-None-Match` as a sign you are managing the cache yourself. It switches to `no-store` and adds `Cache-Control: no-cache`, and `fresh` then refuses to return 304. Use `cache: 'no-cache'`, curl, or supertest.
+The questions from this section are under Good to know, one line each.

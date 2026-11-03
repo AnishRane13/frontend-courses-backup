@@ -13,33 +13,35 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A template engine takes an HTML file with placeholders and a data object, and returns a finished HTML string, escaping a less-than sign so user text cannot become markup. Express does not include an engine. When a route renders a view named home, Express finds the file under the views setting, calls the engine you registered, and sends the string as HTML. Server-side rendering here means the server does that on each request and sends a complete page. It exists for admin pages, emails, and anywhere the browser should show HTML before any script runs. The trade-off is escaping. It protects text between tags, and it does nothing for a javascript colon link or a value you paste inside a script.
+
 ## Why it matters
 
-Lessons 47–51 and 63–66 build Express apps that answer with JSON. Plenty of Express apps answer with HTML instead: admin panels, account pages, docs sites, order-confirmation emails, the login form in front of an API. Building that HTML by gluing strings together in a route handler breaks quickly. You forget to escape one value, and a user named `<script>…</script>` runs code in every visitor's browser.
+Lessons 47 to 51 and 63 to 66 answer with JSON. Plenty of Express apps answer with HTML instead: an admin panel, an account page, a docs site, an order email, the login form in front of an API. Building that HTML by gluing strings in a handler breaks as soon as you forget to escape one value. A user named with a `<script>` tag runs code in every visitor's browser.
 
-A template engine fixes the gluing, and Express has a fixed protocol for plugging one in: `res.render()`, `app.engine()` and the `views`, `view engine` and `view cache` settings. If you don't know that protocol, you hit these problems:
+A template engine does the gluing, and Express has a fixed way to plug one in: `res.render()`, `app.engine()`, and the settings `views`, `view engine`, and `view cache`. Miss that protocol and you hit these:
 
-- **"Failed to lookup view" in production only.** The `views` setting defaults to `process.cwd() + '/views'`, so starting the app from another directory breaks every page.
-- **Templates that never update.** `view cache` turns itself on when `NODE_ENV=production`, so an edited template is not picked up until you restart the process (Example 5). One engine version even ignores the per-render switch (Example 6).
-- **XSS through a template that "escapes everything".** HTML escaping protects text between tags. It does nothing for a `javascript:` URL in an `href` or a value pasted into a `<script>` (Example 4).
-- **User input steering the engine.** Some local names are engine options. Spreading `req.query` into the locals lets a visitor pick which layout file is read (Example 8).
-
-This lesson covers the render protocol, the three engines you are most likely to meet (EJS, Pug, Handlebars) on one shared page, escaping and its limits, view caching, `res.locals`, and when an HTML response is a better fit than a JSON API.
+- **"Failed to lookup view" in production only.** `views` defaults to `process.cwd()` plus `/views`. Start the app from another directory and every page breaks.
+- **Templates that never update.** `view cache` turns on when `NODE_ENV` is `production`, so an edited template is ignored until you restart. Example 5 shows it. One engine even ignores the per-render switch. Example 6 shows it.
+- **XSS through a template that "escapes everything".** HTML escaping protects text between tags. It does nothing for a `javascript:` URL in an `href`, or a value pasted into a `<script>`. Example 4 shows each.
+- **User input steering the engine.** Some local names are engine options. Spreading `req.query` into the locals lets a visitor pick which layout file is read. Example 8 shows it.
 
 ## The concept, simply
 
-A **template** is a text file of HTML with placeholders and a little control flow (loops, conditionals, includes). A **template engine** is a function that takes a template and a data object and returns the finished HTML string. Engines differ in syntax but share two jobs: replace placeholders with values, and **HTML-escape** those values by default (turn `<` into `&lt;`, `&` into `&amp;`, and so on) so data cannot become markup.
+A template is a text file of HTML with placeholders and a little control flow: loops, conditionals, and includes. A template engine is a function that takes that file and a data object and returns HTML. Engines differ in syntax and share two jobs. They replace placeholders, and they HTML-escape those values by default, turning `<` into `&lt;` and `&` into `&amp;`, so data cannot become markup.
 
-**Server-side rendering (SSR)** here means the classic kind: the server runs the engine for each request and sends a complete HTML page. (Frameworks such as Next.js also call it SSR when they render React components on the server; that is a different stack and not covered here.)
+Server-side rendering here means the classic kind. The server runs the engine for each request and sends a complete HTML page. Frameworks such as Next.js also say SSR when they render React on the server. That is a different stack, and this lesson does not cover it.
 
-Express does not include an engine. It defines a contract and calls whatever engine you register:
+Express does not ship an engine. It defines a contract and calls whatever you register.
 
-- `app.set('views', dir)` says where template files live. It can be an array of directories.
-- `app.set('view engine', 'ejs')` says which extension to assume when `res.render('home')` has none.
-- An engine is a function `(filePath, options, callback)`. Express gets it from `app.engine(ext, fn)`, or, if nothing is registered for that extension, from `require(ext).__express`.
-- `res.render(name, locals)` finds the file, calls the engine with the merged data, and sends the returned string with `Content-Type: text/html; charset=utf-8`.
+- `app.set('views', dir)` is where template files live. It can be an array of directories.
+- `app.set('view engine', 'ejs')` is the extension to assume when `res.render('home')` has none.
+- An engine is a function `(filePath, options, callback)`. Express gets it from `app.engine(ext, fn)` or, if nothing is registered for that extension, from `require(ext).__express`.
+- `res.render(name, locals)` finds the file, calls the engine with the merged data, and sends the string as `Content-Type: text/html; charset=utf-8`.
 
-The three engines in this lesson, all installed from npm:
+The three engines in this lesson:
 
 | Engine | Package (version used) | Placeholder (escaped / raw) | Layouts | Partials |
 | --- | --- | --- | --- | --- |
@@ -47,21 +49,21 @@ The three engines in this lesson, all installed from npm:
 | Pug | `pug` 3.0.4 | `#{x}` or `p= x` / `!{x}` or `p!= x` | `extends layout` + `block content` | `include file` (compile time) |
 | Handlebars | `express-handlebars` 9.0.2 (on `handlebars` 4.7.10) | `{{x}}` / `{{{x}}}` | `views/layouts/main.hbs` with `{{{body}}}` | `{{> name}}` from `views/partials/` |
 
-EJS and Pug export `__express`, so Express loads them by extension with no `app.engine` call. express-handlebars does not, so you register it with `app.engine('hbs', engine({ extname: '.hbs' }))`. This lesson uses express-handlebars rather than `hbs` because its layout and partial directories are conventions you don't have to wire by hand.
+EJS and Pug export `__express`, so Express loads them from the extension with no `app.engine` call. express-handlebars does not, so you register it with `app.engine('hbs', engine({ extname: '.hbs' }))`. This lesson uses express-handlebars rather than the `hbs` package because its layout and partial directories are conventions you do not wire by hand.
 
 ## How it works
 
-What happens on `res.render('guestbook', { title: 'Guestbook' })` in Express 5.3.0 (`lib/response.js`, `lib/application.js`, `lib/view.js`):
+What `res.render('guestbook', { title: 'Guestbook' })` does in Express 5.3.0:
 
-1. **`res.render` adds `res.locals`.** It stores `res.locals` as `options._locals` and supplies a default callback that calls `res.send(html)` on success or `next(err)` on failure.
-2. **`app.render` merges the data.** `{ ...app.locals, ...res.locals, ...options }`, so a later source wins when the same key appears twice. `app.locals.settings` (the app settings object) is always included.
-3. **It decides on caching.** If the merged object has no `cache` key, Express sets `cache = app.enabled('view cache')`. When `cache` is true and a `View` for this name is already stored in `app.cache`, steps 4–5 are skipped.
-4. **It builds a `View`.** The extension comes from the name (`guestbook.pug`) or, if there is none, from the `view engine` setting. The engine function is `app.engines[ext]`, or `require(ext without the dot).__express` the first time (then stored). With no extension and no `view engine`, it throws `No default engine was specified and no extension was provided.`
-5. **It looks up the file.** For each directory in `views`, in order, it tries `<dir>/<name><ext>` and then `<dir>/<name>/index<ext>`. If none exists, the error is `Failed to lookup view "guestbook" in views directory "…"`.
-6. **It calls the engine.** `engine(filePath, mergedOptions, callback)`. The engine reads and compiles the file (or reuses its own compiled copy when `cache` is set), runs it with the data, and calls `callback(null, html)` or `callback(err)`.
-7. **It sends the result.** Express 5 always delivers the callback asynchronously, even if the engine called it synchronously (changed in v5.0.0; Example 9). `res.send(html)` then sets `Content-Type`, `Content-Length` and an `ETag`.
+1. `res.render` stores `res.locals` as `options._locals` and supplies a default callback. Success calls `res.send(html)`. Failure calls `next(err)`.
+2. `app.render` merges `{ ...app.locals, ...res.locals, ...options }`. A later source wins on the same key. `app.locals.settings` is always included.
+3. If the merged object has no `cache` key, Express sets `cache` from `app.enabled('view cache')`. When `cache` is true and a `View` for this name is already in `app.cache`, the lookup steps are skipped.
+4. The extension comes from the name, such as `guestbook.pug`, or from `view engine` when the name has none. The engine function is `app.engines[ext]`, or `require` of the extension's package, then `.__express`, the first time. With no extension and no `view engine`, Express throws `No default engine was specified and no extension was provided.`
+5. For each directory in `views`, in order, it tries `<dir>/<name><ext>` and then `<dir>/<name>/index<ext>`. If none exists, the error is `Failed to lookup view "guestbook" in views directory "…"`.
+6. The engine reads and compiles the file, or reuses its compiled copy when `cache` is set, runs it, and calls `callback(null, html)` or `callback(err)`.
+7. Express 5 always delivers that callback asynchronously, even if the engine called it synchronously. That changed in v5.0.0. Example 9 shows it. `res.send(html)` then sets `Content-Type`, `Content-Length`, and an `ETag`.
 
-No SVG in the kit shows this flow, so here it is as text:
+No SVG in the kit shows this flow.
 
 text
 
@@ -89,32 +91,32 @@ callback(err, html)   always async in Express 5
   └── html → res.send(html) → 200, text/html; charset=utf-8, ETag
 ```
 
-**Two caches, not one.** `view cache` makes Express keep the `View` object (the resolved file path and engine) in `app.cache`, and it passes `cache: true` to the engine. The engine decides what that means. EJS, Pug and express-handlebars all keep compiled template functions in memory keyed by file path, so after the first render they stop reading the file. That is why an edited template is ignored in production until you restart (Example 5). The default is in `lib/application.js`: `if (env === 'production') this.enable('view cache')`, where `env` is `process.env.NODE_ENV || 'development'`. The check is case-sensitive, so `NODE_ENV=PRODUCTION` leaves caching off. The same code is in Express 4.22.3.
+**Two caches, not one.** `view cache` makes Express keep the `View`, the resolved path and the engine, in `app.cache`, and it passes `cache: true` into the engine. EJS, Pug, and express-handlebars then keep compiled functions in memory, keyed by file path, and stop reading the file. That is why an edited template is ignored in production until you restart. Example 5 shows it. The default is in `lib/application.js`: when `env` is `'production'`, Express enables `view cache`. `env` is `process.env.NODE_ENV` or `'development'`. The check is case-sensitive, so `NODE_ENV=PRODUCTION` leaves caching off. Express 4.22.3 has the same check.
 
-**Layouts and partials.** A *layout* is the page frame (doctype, `<head>`, nav, footer) shared by every page. A *partial* is a fragment reused inside pages (one list row, a form field). Each engine does these differently:
+**Layouts and partials.** A layout is the page frame shared by every page. A partial is a fragment reused inside pages.
 
-- **EJS** has only `include`. `<%- include('partials/entry', { entry }) %>` runs the other file at render time, with paths relative to the current file. You use `<%-` (raw) so the included HTML is not escaped a second time. EJS has no layout inheritance, so the README's pattern is a `header` include at the top of each page and a `footer` include at the bottom.
-- **Pug** has real inheritance. A page starts with `extends layout` and fills `block content`. `include partials/entry` pastes the other file in at **compile time**, so it sees the variables in scope where it is included (here the loop variable `entry`). For a fragment that takes arguments, Pug also has `mixin`.
-- **express-handlebars** renders the page first and then renders the layout with the page HTML as `{{{body}}}`. The layout comes from `layoutsDir` (default `<views>/layouts/`) and `defaultLayout` (default `main`). Partials come from `partialsDir` (default `<views>/partials/`) and are used as `{{> entry}}`. A local named `layout` overrides the layout per render, and `layout: false` turns it off.
+- EJS has only `include`. `<%- include('partials/entry', { entry }) %>` runs the other file at render time, with paths relative to the current file. You use `<%-`, the raw form, so the included HTML is not escaped a second time. EJS has no layout inheritance. The usual pattern is a header include at the top and a footer include at the bottom.
+- Pug has inheritance. A page starts with `extends layout` and fills `block content`. `include` pastes the other file in at compile time, so it sees the variables in scope, such as a loop variable. A fragment that takes arguments can be a `mixin`.
+- express-handlebars renders the page first, then the layout, with the page HTML as `{{{body}}}`. The layout comes from `layoutsDir`, default `<views>/layouts/`, and `defaultLayout`, default `main`. Partials come from `partialsDir`, default `<views>/partials/`, and are used as `{{> entry}}`. A local named `layout` overrides the layout for that render. `layout: false` turns it off.
 
-**What escaping does, exactly.** Escaped output replaces the characters that let text become markup. In the runs below, EJS replaces `& < > " '` (as `&amp; &lt; &gt; &#34; &#39;`). Handlebars also replaces `` ` `` and `=` (`&#x27;`, `&#x3D;`). Pug replaces only `& < > "`, so a single quote passes through. That is enough for text between tags and for an attribute value inside double quotes. It is **not** enough in three places, and Example 4 shows each one:
+**What escaping does.** Escaped output replaces the characters that let text become markup. In the runs here, EJS replaces `& < > " '` with `&amp; &lt; &gt; &#34; &#39;`. Handlebars also replaces a backtick and `=`. Pug replaces only `& < > "`, so a single quote passes through. That is enough for text between tags and for an attribute value inside double quotes. It is not enough in three places. Example 4 shows each.
 
-- **URL attributes** (`href`, `src`, `action`). `javascript:alert(1)` contains no character an escaper touches, and the browser runs it when the link is clicked. You need a scheme allowlist.
-- **Unquoted attributes.** A space ends the attribute value, so `x onerror=alert(1)` adds a new `onerror` attribute. Always quote attributes.
-- **Inside `<script>`.** The browser does not decode `&#39;` and similar entities in script text, so escaping is either useless (backticks, bare numbers, Pug's single quote) or corrupts the value. Put data into a script as JSON with `<` escaped, or in a `data-` attribute that the script reads.
+- A URL attribute such as `href`, `src`, or `action`. `javascript:alert(1)` contains no character an escaper touches, and the browser runs it when the link is clicked. You need an allowlist of schemes.
+- An unquoted attribute. A space ends the value, so `x onerror=alert(1)` adds an `onerror` attribute. Always quote attributes.
+- Inside `<script>`. The browser does not decode `&#39;` and similar entities in script text, so escaping is either useless or it corrupts the value. Put data in a script as JSON with `<` escaped, or in a `data-` attribute the script reads.
 
-**`res.locals` and `app.locals`.** `app.locals` is one object for the life of the app, merged into every render: the site name, helper functions, the asset base URL. `res.locals` is a fresh object for each request: the signed-in user, a CSRF token, flash messages. Middleware usually fills `res.locals` so that every template can read the values without each route passing them. Lesson [86 — Express app settings and locals](52-express-app-settings-and-locals.md) covers `app.locals` and `app.set` in detail. For rendering, remember the order: `app.locals` < `res.locals` < the object passed to `res.render`.
+**Locals.** `app.locals` is one object for the life of the app: the site name, helpers, an asset base URL. `res.locals` is a fresh object per request: the signed-in user, a CSRF token, flash messages. Middleware fills `res.locals` so every template can read them without each route passing them again. Lesson 52 covers `app.set` and `app.locals`. For rendering, the order is `app.locals`, then `res.locals`, then the object passed to `res.render`. Later wins.
 
-**Reserved names in the data.** The merged data object is also the engine's options object. Express reads `cache` from it. express-handlebars reads `layout`. Templates can read `settings` (all app settings, including `env` and `views`). The Express docs warn that the view name and the locals' keys "should not contain user-controlled input". Pass named values (`{ q: req.query.q }`), never a spread of `req.query` or `req.body` (Example 8).
+**Reserved names.** The merged data object is also the engine's options. Express reads `cache` from it. express-handlebars reads `layout`. Templates can read `settings`, which is all app settings, including `env` and `views`. Pass named values, such as `{ q: req.query.q }`. Never spread `req.query` or `req.body`. Example 8 shows why.
 
-**When SSR beats a JSON API.** No benchmarks were run for this lesson, so this comparison is about how each one works, not speed:
+**When HTML beats a JSON API.** No benchmarks were run for this lesson, so this is about how each one works, not about speed.
 
-- *An HTML response is a complete document.* The browser can show it before any script loads, and it works with scripts disabled. Clients that don't run JavaScript can read it too: search crawlers that skip scripts, link-preview bots that read `<meta property="og:…">`, and email clients (render with `app.render` for emails).
-- *A server-rendered app has fewer parts.* There is no client router, no client state store and no API versioning between your own front end and back end. A form `POST`s, the server redirects, and the next page is rendered. Escaping happens in one place, the engine.
-- *JSON wins when there are several clients* (a mobile app, partners, a separate front end team that deploys on its own schedule), or when the page is an application whose state lives in the browser (editors, dashboards that update without page loads).
-- *You can serve both from one route.* `res.format()` picks HTML or JSON from the `Accept` header (Example 10).
+- An HTML response is a complete document. The browser can show it before any script loads, and it works with scripts disabled. A crawler that skips scripts, a link-preview bot that reads `og:` meta tags, and an email client can all read it. For email, render with `app.render`.
+- A server-rendered app has fewer parts. There is no client router, no client state store, and no API version between your own front end and back end. A form POSTs, the server redirects, and the next page is rendered. Escaping happens in one place, the engine.
+- JSON wins when there are several clients, such as a mobile app or a partner, or when the page is an application whose state lives in the browser.
+- One route can do both. `res.format()` picks HTML or JSON from the `Accept` header. Example 10 shows it.
 
-Measure before you pick for speed. Look at time to first byte and Largest Contentful Paint for your real pages, on your hosting, with your data.
+Measure before you pick for speed. Look at time to first byte and Largest Contentful Paint on your real pages.
 
 ## Code examples
 
@@ -819,61 +821,54 @@ Not Acceptable
 
 ## Common mistakes & gotchas
 
-- **Relying on the default `views` path.** It is `process.cwd() + '/views'`, so it depends on where you start Node, not where your code lives. Set `app.set('views', path.join(__dirname, 'views'))`.
-- **Raw output for user data.** `<%-`, `!{}` and `{{{ }}}` skip escaping (Example 3). Keep them for includes, the layout `body` and HTML you sanitised yourself.
-- **Trusting escaping in every context.** A `javascript:` URL, an unquoted attribute and data inside `<script>` all get through an HTML escaper (Example 4).
-- **Pug escapes fewer characters.** It leaves `'` alone, so `'#{x}'` inside a script or a single-quoted attribute is injectable.
-- **Expecting template edits to show up in production.** `view cache` is on when `NODE_ENV=production` and engines keep compiled code (Example 5). Deploy templates with a restart.
-- **Using `cache: false` per render to bypass the cache.** EJS 7.0.1 ignores it (Example 6). Use the app setting.
-- **Thinking `NODE_ENV=Production` is production.** The check is a case-sensitive `=== 'production'`.
-- **User input as the view name or spread into locals.** `res.render(req.params.page)` lets a client `require()` a module by extension (Example 1 rendered `page.path`), and a spread `req.query` can set `layout`, `cache` or `settings` (Example 8).
-- **Putting secrets in `app.locals`.** Every template can read every key, and `settings` is already there.
-- **Sending a response after `res.render` with a callback.** With a callback, `res.render` does not send anything. You must call `res.send(html)` yourself, and only once.
+- **A relative `views` directory.** The default is `process.cwd() + '/views'`. Start the process from another directory and every `res.render` throws "Failed to lookup view". Set an absolute path.
+- **Editing a template in production and expecting it to show up.** `view cache` is on when `NODE_ENV` is exactly `production`. The engines keep the compiled function. Restart, or the old HTML stays. Example 5 shows `v1` still served after the file says `v2`.
+- **Assuming every engine honors `{ cache: false }` the same way.** Example 6 shows they do not.
+- **Raw output for user text.** `<%- %>`, `!{}`, and `{{{ }}}` skip escaping. Use them only for HTML you produced, such as an include or sanitized Markdown.
+- **Trusting escaping inside a URL, an unquoted attribute, or a `<script>`.** Example 4 shows each one still exploitable after escaping.
+- **Spreading `req.query` into the locals.** A visitor can set `layout` or other engine options. Example 8 shows it. Pass named fields.
+- **A view name from the user.** `res.render(req.params.page)` can `require` an unexpected package. Example 1 shows `page.path` loading the `path` module and finding no `__express`.
 
 ## Best practices
 
-- **Set `views` with `__dirname`** and set `view engine`, so names like `res.render('orders/show')` stay short and don't depend on the working directory.
-- **Keep escaping on by default.** Only use raw output for HTML your code produced, and grep for `<%-`, `!{` and `{{{` during review.
-- **Handle each output context on purpose:** scheme allowlist for URLs, always-quoted attributes, `JSON.stringify` plus `<` → `<` for script data, and a CSP header as a backstop.
-- **Fill `res.locals` in middleware** for per-request data that every page needs (user, CSRF token, flash), and use `app.locals` only for constants and helpers.
-- **Pass explicit locals.** `{ q: req.query.q }`, not `...req.query`.
-- **Leave `view cache` to `NODE_ENV`.** Run production with `NODE_ENV=production` and development without it. If you need the other behaviour, use `app.enable` or `app.disable`.
-- **Use `app.render(name, data, cb)` for emails** and other HTML that is not an HTTP response. It takes the same views and locals, minus `res.locals`.
-- **Pick one engine per app** and lock its version. EJS 6 → 7 changed caching behaviour with no release notes.
+- Set `views` to an absolute directory, and set `view engine`, before the first render.
+- Escape by default. Use the raw form only for HTML your own code produced.
+- For a URL, allowlist the scheme. Quote every attribute. For data inside a script, `JSON.stringify` and escape `<`.
+- Pass a specific object of locals. Do not spread the query string or the body.
+- Fill `res.locals` in middleware for the user, the CSRF token, and flash messages. Keep `app.locals` for values that are the same on every request.
+- Leave `view cache` on in production. Restart the process to pick up a template edit, or disable the cache only when you mean to.
+- Add a Content-Security-Policy header as a second layer. Lesson 86 covers it.
 
 ## ⭐ Interview lens
 
 > **Q: “What happens, step by step, when a route calls `res.render('home')`?”**  
-> A: `res.render` attaches `res.locals` and a default callback, then calls `app.render`. That merges `app.locals`, `res.locals` and the passed object (later wins), decides `cache` from `view cache`, and builds a `View`. The `View` takes the extension from the name or the `view engine` setting, gets the engine from `app.engine` or `require(ext).__express`, and looks for `<views>/home.<ext>` then `<views>/home/index.<ext>`. The engine is called as `(filePath, options, callback)`. Its HTML goes to `res.send`, and an error goes to `next(err)`. *Trap:* in Express 5 the callback is always asynchronous; in Express 4 a synchronous engine ran it inline.
+> A: `res.render('home')` does not send HTML itself until the engine returns a string. It stores `res.locals` on the options as `_locals` and calls `app.render`. That merges `app.locals`, then `res.locals`, then the object you passed, with later keys winning, and it includes `app.locals.settings`. If `view cache` is on and this view was already resolved, Express skips the file lookup. Otherwise it adds the `view engine` extension when the name has none, loads `require(ext).__express` or the function you registered with `app.engine`, and looks in each `views` directory for `home.ejs` and then `home/index.ejs`. The engine compiles the file, or reuses a compiled copy when `cache` is true, and calls back with HTML. Express 5 runs that callback asynchronously even if the engine called it synchronously. `res.send` then sets `text/html; charset=utf-8`. The limit is the lookup. A wrong `views` path, which defaults to `cwd/views`, throws `Failed to lookup view`.
 
 > **Q: “Your template uses `<%= %>` everywhere. Is the page safe from XSS?”**  
-> A: Only for values placed in element text or quoted attributes. HTML escaping does nothing for `href="javascript:…"`, for an unquoted attribute (a space starts a new attribute such as `onerror`), or inside `<script>`, where entities are not decoded. Use a scheme allowlist, quote attributes, serialise script data with `JSON.stringify` and escape `<`, and add a CSP. *Trap:* Pug's escaper leaves `'` alone.
+> A: No. `<%= %>` in EJS, and the escaped forms in Pug and Handlebars, replace the characters that would open a tag or break a quoted attribute. In the runs here, EJS turns `& < > " '` into entities. That stops a name of `<script>...` from becoming a tag, which Example 3 shows. It does not stop three other contexts. `javascript:alert(1)` in an `href` has no character the escaper touches. An unquoted attribute can be split by a space into a new `onerror` attribute. Inside `<script>`, the browser does not treat `&#39;` as a quote, so the escaping either does nothing useful or corrupts the value. Allowlist URL schemes, quote attributes, and put script data in as JSON with `<` escaped. Pug also leaves a single quote unescaped. Add Content-Security-Policy as a second layer.
 
 > **Q: “You fixed a typo in a template and deployed by copying the file. Production still shows the typo. Why?”**  
-> A: With `NODE_ENV=production`, Express enables `view cache`. It keeps the resolved `View` and passes `cache: true`, so the engine keeps the compiled template in memory and never reads the file again. Restart the process (the usual deploy does). Disabling it per render with `cache: false` does not work on every engine; EJS 7 ignores it.
+> A: `view cache` compiled the template on the first request and kept the function in memory, keyed by file path. Copying a fixed file onto disk does not update that function. Express turns the cache on by itself when `NODE_ENV` is exactly the string `production`. `PRODUCTION` in any other case does not. EJS, Pug, and express-handlebars all stop rereading the file once `cache` is true, which is a second cache on top of Express keeping the `View` object. Example 5 edited the file from `v1` to `v2` and production kept serving `v1`. Restart the process, or call `app.disable('view cache')` when you intentionally want reads. The per-render `cache` flag is not honored the same way by every engine. Example 6 shows that.
 
 > **Q: “`res.locals` vs `app.locals`?”**  
-> A: `app.locals` lives as long as the app and is merged into every render, which suits the site name and helpers. `res.locals` is a new object per request, which suits the current user and the CSRF token, usually set by middleware. If both have a key, `res.locals` wins, and the object passed to `res.render` beats both.
-
-> **Q: “When would you render HTML on the server instead of building a JSON API and a SPA?”**  
-> A: When the pages are mostly content and forms, need to work with JavaScript off or for clients that don't run it (crawlers, link previews, email), and there is one front end owned by the same team. A JSON API fits several clients or a browser app with lots of client-side state. Both can come from one route with `res.format`. I would measure TTFB and LCP for the real pages rather than assume either is faster.
+> A: `res.locals` is created for one request and discarded with the response. Middleware puts the signed-in user, a CSRF token, or a flash message there, and every template rendered for that request can see it, without each route passing it again. `app.locals` is one object for the life of the process. Use it for the site name or a helper that is the same for everyone. `res.render` merges app, then res, then the object you pass, and the later value wins. The limit of putting the current user on `app.locals` is sharing. Two overlapping requests write the same object, so one user can see the other's data. Lesson 52 shows that leak with two concurrent requests.
 
 ## Cheat-card
 
-- **Contract:** engine = `(filePath, options, callback)`; register with `app.engine('ext', fn)` or export `__express` (EJS and Pug do; express-handlebars needs `app.engine`).
-- **Settings:** `views` (default `process.cwd()/views`, can be an array), `view engine` (default extension), `view cache` (`true` only when `NODE_ENV === 'production'`, otherwise undefined).
-- **Lookup:** `<dir>/<name><ext>`, then `<dir>/<name>/index<ext>`, for each dir in order; else `Failed to lookup view`.
-- **Data merge:** `app.locals` < `res.locals` < `res.render(name, data)`. `settings` is always there; `cache` and engine options (`layout`) are read from it.
-- **Escaped / raw:** EJS `<%= %>` / `<%- %>`; Pug `#{}` `=` / `!{}` `!=`; Handlebars `{{ }}` / `{{{ }}}`.
-- **Escaped chars:** EJS `& < > " '`; Handlebars also `` ` `` and `=`; Pug only `& < > "`.
-- **Not covered by escaping:** URL schemes, unquoted attributes, `<script>` contents. Use an allowlist, quotes, `JSON.stringify(v).replace(/</g,'\\u003c')`.
-- **Layouts:** EJS include header/footer; Pug `extends` + `block`; express-handlebars `layouts/main` + `{{{body}}}`, `layout: false` to skip.
-- **Partials:** EJS `include()` (runtime); Pug `include` (compile time) / `mixin`; Handlebars `{{> name}}` from `partials/`.
-- **Caching:** cached = resolved View + compiled template; edits need a restart. EJS 7.0.1 ignores the per-render `cache` local.
-- **Express 5:** render callback always async (changed in v5.0.0).
-- **Both formats:** `res.format({ html, json })` adds `Vary: Accept`.
+- `res.render(name, locals)` finds the file, runs the engine, and sends `text/html; charset=utf-8`.
+- `views` is the directory, default `<cwd>/views`. `view engine` is the extension when the name has none. `app.engine(ext, fn)` registers `(filePath, options, callback)`.
+- EJS 7.0.1 uses `<%= %>` escaped and `<%- %>` raw, and includes at runtime. Pug 3.0.4 uses `#{ }` or `!=`, and `extends` plus `include` at compile time. express-handlebars 9.0.2 uses `{{ }}` and `{{{ }}}`, a layout with `{{{body}}}`, and `{{> partial}}`.
+- EJS and Pug export `__express`. express-handlebars must be registered with `app.engine`.
+- Merge order is `app.locals`, then `res.locals`, then the render argument. Later wins.
+- `view cache` turns on only when `NODE_ENV` is exactly `production`. The engines then keep compiled functions and ignore edits until restart.
+- Escaping is not enough for a URL scheme, an unquoted attribute, or the inside of `<script>`.
+- Do not spread `req.query` or `req.body` into locals. `cache`, `layout`, and `settings` are engine and app data.
+- Express 5 delivers the render callback asynchronously. That changed in v5.0.0.
 
----
+## Good to know
+
+- Render HTML on the server when the browser should show a finished page before any script runs, when a crawler or a link-preview bot or an email client must read the document, or when you want one place that escapes output. Prefer JSON when several clients share the API, or when the page's state lives in the browser. One route can do both with `res.format`. No speed benchmark was run for this lesson.
+- `NODE_ENV=PRODUCTION` does not enable `view cache`. The check is case-sensitive against `'production'`. In every other environment the setting starts out undefined, which `app.enabled('view cache')` treats as off.
 
 ## Learn More
 

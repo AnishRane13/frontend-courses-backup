@@ -13,39 +13,43 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+An npm script is a named shell command stored under `scripts` in `package.json`. `npm run` starts that command with your project's `node_modules/.bin` at the front of `PATH`, so a tool installed in the project, such as `tsc`, runs without a global install. For any script name, npm also runs `pre` and `post` scripts around it if you defined them.
+
+Scripts exist so `npm test` and `npm run build` mean the same thing on every laptop and in CI. The trade-off is that install runs scripts too. A `postinstall` in a dependency executes on your machine when you install it, which is a supply-chain risk. `npx` is the one-shot version: it runs a package's binary, from the local install if you have one, otherwise from a temporary download.
+
+`PATH` is the list of directories the shell searches for a command. `.bin` is the folder of executables your dependencies declared.
+
 ## Why it matters
 
-npm is the package manager that ships with Node and the front door to the largest software registry in the world. Every day you use it to install dependencies, run tasks, execute one-off tools, and — if you publish — share your own code. The scripts you define in `package.json` become the shared vocabulary of a project: `npm run dev`, `npm test`, `npm run build` mean the same thing on every machine and in CI, regardless of the developer's local setup. Mastering npm scripts, `npx`, the alternative clients (yarn, pnpm), and security tooling like `npm audit` is what turns "I can install stuff" into "I can run and ship a real Node project safely."
-
-This is also a security surface. Installing a package runs its lifecycle scripts on your machine; publishing exposes your code and credentials to the world. Knowing how scripts fire and how to audit dependencies is table stakes for professional Node work.
+npm is the package manager that ships with Node, and the scripts in `package.json` are the shared vocabulary of a project. `npm run dev`, `npm test`, and `npm run build` should not depend on what a developer installed globally. The same mechanism is a security surface. Installing a package runs its lifecycle scripts. Publishing sends your code, and your credentials, to a registry. Knowing when a script fires is part of running a Node project safely.
 
 ## The concept, simply
 
-**npm scripts** are named shell commands stored under `"scripts"` in `package.json`. You run them with `npm run <name>` — and a few names (`start`, `test`, `stop`, `restart`) can drop the `run`. When a script runs, npm temporarily adds your project's `node_modules/.bin` to the `PATH`, so you can call locally-installed tools (like `tsc` or `eslint`) by their bare name without a global install.
+**npm scripts** are named commands under `"scripts"`. You run them with `npm run <name>`. A few names, `start`, `test`, `stop`, and `restart`, can drop the `run`. When a script runs, npm puts `node_modules/.bin` on `PATH`, so `tsc` and `eslint` resolve to the copies this project installed.
 
-**`npx`** executes a package's binary without permanently installing it — ideal for scaffolding (`npx create-vite`) or running a tool once. **yarn** and **pnpm** are alternative clients that read the same `package.json` but store dependencies differently and offer speed or disk-efficiency gains. **`npm audit`** scans your dependency tree against a vulnerability database.
+**`npx`** runs a package binary without adding it as a permanent dependency. **yarn** and **pnpm** read the same `package.json` and store the files differently. **`npm audit`** checks the installed tree against a vulnerability database.
 
 ![Diagram showing prebuild, build and postbuild scripts running in order, plus reserved lifecycle names like postinstall](assets/i12_01_90755c45.svg)
 
-npm runs pre and post hooks around any script automatically, and reserved lifecycle names like postinstall fire during install — a real supply-chain consideration.
+npm runs `pre` and `post` hooks around a script on its own. Reserved names such as `postinstall` fire during install, which is the supply-chain case.
 
 ## How it works
 
-**Script lifecycle hooks.** For any script `x`, npm automatically runs `prex` before it and `postx` after it, if those scripts exist. So defining `build`, `prebuild`, and `postbuild` makes `npm run build` execute all three in order. This is how projects clean a folder, compile, then copy assets without a task runner. Several names are *reserved lifecycle* scripts that npm fires at specific moments: `preinstall`/`install`/`postinstall` run during `npm install`; `prepare` runs on local install and before publishing (commonly used to build a package or set up git hooks); `prepublishOnly` runs only before `npm publish`.
+**Hooks.** For a script `x`, npm runs `prex` before it and `postx` after it, if those names exist. `prebuild`, `build`, and `postbuild` all run from `npm run build`. That is how a project cleans a folder, compiles, and copies assets without a task runner.
 
-**Why lifecycle scripts are a security concern.** Because `postinstall` runs automatically whenever someone installs a package, a malicious dependency can execute arbitrary code on your machine at install time. This is a real supply-chain attack vector. Mitigations include reviewing dependencies, using `npm ci` with `--ignore-scripts` in sensitive environments, and pinning versions via the lockfile so you don't silently pull a compromised release.
+Some names are reserved and fire at a lifecycle moment. `preinstall`, `install`, and `postinstall` run during `npm install`. `prepare` runs on a local install and before publishing, which is the usual place to build or to install git hooks. `prepublishOnly` runs only before `npm publish`.
 
-**Passing arguments and chaining.** Pass flags to the underlying command with `--`: `npm run test -- --watch` forwards `--watch` to the test runner. Chain scripts by calling `npm run other` inside a script, or run several with `&&` (sequential) — for parallelism reach for a tool like `npm-run-all` or `concurrently`, since raw `&` is not portable to Windows.
+**Why `postinstall` is a security concern.** It runs automatically for every dependency, on your laptop and in CI. A malicious package can run arbitrary code at install time. Review what you add, install from the lockfile, and use `npm ci --ignore-scripts` where install-time code is unacceptable.
 
-**node\_modules/.bin on PATH.** When a script runs, npm prepends `node_modules/.bin` to `PATH`. That directory holds the executables of your installed packages (created from each package's `bin` field). So `"build": "tsc"` works even though `tsc` isn't installed globally — it resolves to your local TypeScript. This keeps tool versions pinned per-project.
+**Arguments and chaining.** `npm run test -- --watch` forwards `--watch` to the test runner. The `--` is required, because flags before it belong to npm. Call another script with `npm run other`, or chain with `&&`. For parallel scripts use `npm-run-all` or `concurrently`. A raw `&` is not portable to Windows.
 
-**npx resolution.** `npx foo` looks for `foo` in the local `node_modules/.bin` first; if not found, it downloads the package to a temporary cache, runs it, and (by default) discards it. `npx create-next-app` is the canonical use — run a scaffolder once without polluting global installs. You can pin a version with `npx pkg@1.2.3`.
+**Local binaries.** `node_modules/.bin` holds executables created from each package's `bin` field. `"build": "tsc"` works because `tsc` resolves to the TypeScript this project pinned, not to whatever is installed globally.
 
-**yarn vs pnpm vs npm.** All three consume the same `package.json`. Practical differences: **npm** is built-in, uses a flattened `node_modules`, lockfile `package-lock.json`. **yarn** (classic and modern/Berry) popularised fast, deterministic installs and workspaces; modern yarn offers Plug'n'Play (no `node_modules`). **pnpm** stores every package version once in a global content-addressable store and links it into projects, saving huge amounts of disk and creating a stricter, non-flattened `node_modules` that prevents "phantom dependency" access to undeclared packages. Each has its own lockfile — do not mix clients in one repo, or you'll get competing lockfiles.
+**`npx`.** `npx foo` looks in the local `.bin` first. If it is missing, npx downloads the package to a temporary cache, runs it, and discards it. `npx create-next-app` is the usual example. Pin a version with `npx pkg@1.2.3`.
 
-**Publishing basics.** To share a package: ensure `name`/`version` are set and the version is bumped (use `npm version patch|minor|major`, which updates `package.json` and creates a git tag), authenticate with `npm login`, control what ships with the `files` allowlist (or `.npmignore`), preview the tarball with `npm pack --dry-run`, then run `npm publish` (add `--access public` for a scoped public package). A `prepublishOnly` or `prepare` script commonly runs the build first.
-
-**Auditing.** `npm audit` compares your installed tree against the advisory database and reports known vulnerabilities by severity. `npm audit fix` upgrades within your ranges automatically; `--force` allows breaking upgrades (review carefully). Audit is advisory — not every finding is exploitable in your usage — but it is a fast first pass and belongs in CI.
+**Publishing, short version.** `npm version patch`, `minor`, or `major` bumps `package.json` and creates a git tag. `npm login` authenticates. The `files` field, or `.npmignore`, limits the tarball. `npm pack --dry-run` previews it. `npm publish` uploads it, with `--access public` for a scoped public package. `prepublishOnly` or `prepare` usually runs the build first. `npm audit` reports known vulnerabilities by severity. `npm audit fix` upgrades inside your ranges. `--force` allows breaking upgrades, so read the diff. An advisory is not proof that your code path is exploitable.
 
 ## Code examples
 
@@ -67,6 +71,7 @@ json
 }
 ```
 
+
 **2. Running scripts and forwarding args.**
 
 javascript
@@ -77,6 +82,7 @@ javascript
 // npm run test -- --watch   // forwards --watch to node --test
 // npm run lint -- --fix     // forwards --fix to eslint
 ```
+
 
 **3. npx for one-off tools.**
 
@@ -89,6 +95,7 @@ javascript
 //   npx prettier@3.3.3 --check "src/**/*.js"
 // Uses local node_modules/.bin if the tool is already installed.
 ```
+
 
 **4. Publish flow and audit.**
 
@@ -107,55 +114,59 @@ javascript
 //   npm audit fix             // safe upgrades within ranges
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Forgetting `--` when passing flags.** `npm run test --watch` gives the flag to npm, not your script. Use `npm run test -- --watch`.
-- **Global installs of project tools.** Leads to version mismatches across machines. Install locally and call via scripts or `npx`.
-- **Mixing package managers.** Running `yarn` then `npm install` creates two lockfiles and inconsistent trees. Pick one client per repo.
-- **Ignoring `postinstall` risk.** Untrusted dependencies can run code at install time; audit deps and consider `--ignore-scripts` in CI for sensitive builds.
-- **Using `&` for parallel scripts.** Not portable to Windows; use `npm-run-all -p` or `concurrently`.
-- **Publishing more than intended.** Without a `files` allowlist you may ship source, tests, or secrets. Preview with `npm pack --dry-run`.
-- **Publishing a scoped package without `--access public`.** It fails or publishes privately unexpectedly.
-- **Treating every audit finding as critical.** Advisories may not apply to your code path; assess severity and reachability, and avoid blind `audit fix --force`, which can introduce breaking major upgrades.
+- **Forgetting `--`.** `npm run test --watch` gives `--watch` to npm. Write `npm run test -- --watch`.
+- **Global installs of project tools.** Versions drift between machines. Install locally and call the tool from a script or from `npx`.
+- **Mixing package managers.** `yarn` and then `npm install` produces two lockfiles. Pick one client per repo.
+- **Ignoring `postinstall`.** An untrusted dependency runs code at install time. Audit dependencies, and consider `--ignore-scripts` for a sensitive CI install.
+- **`&` for parallel scripts.** It is not portable to Windows. Use `npm-run-all -p` or `concurrently`.
+- **Publishing more than you meant.** Without `files` you can ship tests or secrets. Preview with `npm pack --dry-run`.
+- **A scoped package without `--access public`.** The publish fails, or it publishes as private when you did not mean to.
+- **Treating every audit finding as critical.** Check whether the advisory reaches your code. Do not run `audit fix --force` blindly. It can jump a major.
 
 ## Best practices
 
-- Standardise on a small set of scripts (`dev`, `build`, `test`, `lint`, `start`) so every project feels the same.
-- Install tools locally and invoke them through scripts/`npx`; avoid global installs of project dependencies.
-- Use pre/post hooks for setup and teardown instead of pulling in a heavier task runner.
-- Pick one package manager per repo and commit only its lockfile; consider pnpm for large monorepos to save disk and catch phantom deps.
-- Run `npm audit` (and dependency review) in CI; keep dependencies few and reputable to shrink the attack surface.
-- Before publishing: bump with `npm version`, gate the build behind `prepublishOnly`/`prepare`, restrict output with `files`, and dry-run with `npm pack`.
-- In CI/Docker use `npm ci` for reproducibility; add `--ignore-scripts` where install-time code execution is a concern.
+- Standardise on `dev`, `build`, `test`, `lint`, and `start`.
+- Install tools locally and invoke them through scripts or `npx`.
+- Use `pre` and `post` hooks instead of a task runner when the sequence is just setup and teardown.
+- One package manager per repo, and commit only its lockfile.
+- Run `npm audit` in CI. Keep the dependency list short.
+- Before you publish: `npm version`, build in `prepublishOnly` or `prepare`, set `files`, and dry-run with `npm pack`.
+- In CI and Docker, `npm ci`. Add `--ignore-scripts` where install-time execution is the risk you care about.
 
 ## ⭐ Interview lens
 
-> **Q: How do npm script lifecycle hooks work?** For any script `x`, npm runs `prex` before and `postx` after automatically if defined. Reserved lifecycle names (`preinstall`/`postinstall`, `prepare`, `prepublishOnly`) fire during install and publish. That is how `npm run build` can run clean → compile → copy without a task runner.
+> **Q: How do npm script lifecycle hooks work?**
+> For any script `x`, npm looks for `prex` and `postx` and runs them around `x` if they exist. You do not call them yourself. `npm run build` runs `prebuild`, then `build`, then `postbuild`, which is how a project can clean, compile, and copy assets with one command. Separate from those prefixes, a few names are reserved lifecycle scripts. `preinstall`, `install`, and `postinstall` run during `npm install`. `prepare` runs on a local install and before publish. `prepublishOnly` runs only before `npm publish`. The limit is that `postinstall` is not just your hook. Every dependency's `postinstall` runs too, on your machine, which is why `--ignore-scripts` exists.
 
-> **Q: Difference between `npm install pkg` and `npx pkg`?** `npm install` adds the package to `node_modules` and `package.json` for repeated use. `npx` executes a package's binary once — using a local copy if present, otherwise downloading to a temp cache and discarding it — ideal for scaffolders and one-off tools.
+> **Q: Difference between `npm install pkg` and `npx pkg`?**
+> `npm install pkg` puts the package in `node_modules`, records it in `package.json`, and leaves it there for every later run. `npx pkg` only executes the package's binary. It uses the local copy if you already have one. Otherwise it downloads into a temporary cache, runs the command, and discards it. `npx create-vite` is the usual case: a scaffolder you want once, not as a dependency. You can pin it with `npx pkg@1.2.3`. The limit of npx for a tool you run every day is that you want that version locked in the project. Install it and call it from a script.
 
-> **Q: How does `npm run build` find `tsc` without a global install?** npm prepends `node_modules/.bin` to `PATH` when running a script. That folder contains executables for locally-installed packages (from each package's `bin` field), so bare tool names resolve to the project-local, version-pinned copies.
+> **Q: How does `npm run build` find `tsc` without a global install?**
+> When npm runs a script, it prepends this project's `node_modules/.bin` to `PATH`. That folder contains the executables installed packages declared in their `bin` field, so the shell finds `./node_modules/.bin/tsc` before any global `tsc`. The version is the one in your lockfile, which is why two developers get the same TypeScript. The limit is a command you type yourself in the terminal. Your interactive shell does not get that `PATH` change. Only the script's process does, unless you call the binary through `npx` or `npm exec`.
 
-> **Q: Why are `postinstall` scripts a security risk?** They run automatically on `npm install`, so a malicious dependency executes arbitrary code on your machine or CI at install time — a supply-chain attack. Mitigate with dependency review, lockfile pinning, and `--ignore-scripts` in sensitive environments.
-
-> **Q: npm vs yarn vs pnpm — what actually differs?** They share `package.json` but differ in storage and lockfiles. npm flattens `node_modules` (`package-lock.json`). pnpm uses a global content-addressable store with symlinks — big disk savings and a strict layout that blocks phantom (undeclared) dependencies. yarn added fast installs, workspaces, and optional Plug'n'Play (no `node_modules`). Don't mix them in one repo.
-
-> **Q: Walk through publishing a package safely.** `npm login`; bump with `npm version patch|minor|major` (updates version + git tag); restrict output via the `files` allowlist; build in a `prepublishOnly`/`prepare` script; preview with `npm pack --dry-run`; then `npm publish` (`--access public` for scoped). Run `npm audit` beforehand.
+> **Q: Why are `postinstall` scripts a security risk?**
+> `postinstall` runs automatically as part of `npm install`, for your package and for every dependency. A compromised or malicious package can execute arbitrary code on a laptop or in CI at install time. That is a supply-chain attack, and it does not need anyone to run the program afterward. Reduce it by reviewing dependencies, installing from a committed lockfile so a new release cannot appear silently, and using `npm ci --ignore-scripts` in environments where install-time code is unacceptable. The limit of `--ignore-scripts` is that some packages need their script to build a native addon. Turning scripts off can leave the install incomplete, so you use it where the risk matters, not as a blanket default you never check.
 
 ## Cheat-card
 
-- **Run scripts:** `npm run x`; `start`/`test`/`stop`/`restart` skip `run`.
-- **Hooks:** `prex` → `x` → `postx` auto-fire; reserved: `postinstall`, `prepare`, `prepublishOnly`.
-- **Pass flags:** `npm run x -- --flag`.
-- **Local bins:** npm adds `node_modules/.bin` to PATH.
-- **npx** = run a binary once (local first, else temp download).
-- **pnpm** = shared store + strict layout; **yarn** = workspaces/PnP; one client per repo.
-- **Publish:** `npm version` → `files` allowlist → `npm pack --dry-run` → `npm publish [--access public]`.
-- **Security:** `npm audit` / `audit fix`; `--ignore-scripts` for untrusted installs.
-- **Workspaces:** `-w <name>` one, `--workspaces` all (glob order), `--if-present`; see lesson 16.
-- **`npm link`:** global symlink + `bin`, then `npm link <name>` in the app; extraneous unless `--save`; try it with `npm_config_prefix=<scratch>`.
-- **Portable env:** `cross-env NAME=v cmd`, or `node --env-file=.env` (environment wins over the file).
-- **Provenance:** `npm publish --provenance` from GitHub Actions/GitLab with `id-token: write`; trusted publishing = OIDC, no npm token; local run → `EUSAGE`.
+- `npm run x`. `start`, `test`, `stop`, and `restart` can skip `run`.
+- Hooks: `prex`, then `x`, then `postx`. Reserved: `postinstall`, `prepare`, `prepublishOnly`.
+- Forward flags with `npm run x -- --flag`.
+- npm puts `node_modules/.bin` on `PATH` for the script.
+- `npx` runs a binary once: local first, otherwise a temp download.
+- Publish: `npm version`, then a `files` allowlist, then `npm pack --dry-run`, then `npm publish`, with `--access public` for a public scoped package.
+- `npm audit` reports advisories. `audit fix` stays inside ranges. `--force` can jump majors.
+- `npm ci` for CI. Add `--ignore-scripts` when install-time code is the threat.
+
+## Good to know
+
+- Q: npm vs yarn vs pnpm — what actually differs? They share `package.json` and differ in storage and lockfiles. npm flattens `node_modules` and writes `package-lock.json`. pnpm keeps one copy of each version in a global content-addressable store and symlinks it in, which saves disk and blocks phantom dependencies, packages you import without declaring. Yarn added fast installs and workspaces, and modern Yarn can use Plug'n'Play, which has no `node_modules`. Do not mix clients in one repo.
+- Q: Walk through publishing a package safely. `npm login`, then `npm version` with `patch`, `minor`, or `major`, which updates the version and makes a git tag. Limit the tarball with `files`. Build in `prepublishOnly` or `prepare`. Preview with `npm pack --dry-run`. Publish with `npm publish`, plus `--access public` for a scoped public package. Run `npm audit` first.
+- `cross-env` 10.1.0 is an ES module package that needs Node 20 or newer. `node --env-file` was added in v20.6.0 and is no longer experimental since v24.10.0. `--env-file-if-exists` was added in v22.9.0. A variable already in the environment wins over the file.
+- Provenance needs npm 9.5.0 or later and a public `repository` field that matches the publishing repo. Trusted publishing needs npm 11.5.1 or later and Node 22.14.0 or later, and it generates provenance without the `--provenance` flag. npm 11.17.0 also ships `npm trust`.
 
 ---
 
@@ -169,22 +180,22 @@ javascript
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### Scripts in workspaces and monorepos
 
-In a repository with a `workspaces` field, every npm script command accepts a workspace selector: `-w <name>` (or `--workspace`) runs the command in one workspace, `--workspaces` in all of them, and `--if-present` skips workspaces that do not define the script. This exists so a root script can drive many packages without `cd packages/x && npm run build` chains, which break as soon as a folder moves. The layouts, pnpm/Yarn differences, build caching and publishing are covered in [Monorepos and Workspaces](16-monorepos-and-workspaces.md).
-
-How it works:
+In a repo with a `workspaces` field, `-w <name>` or `--workspace` runs a command in one workspace, `--workspaces` runs it in all of them, and `--if-present` skips workspaces that do not define the script. A root script can drive many packages without `cd packages/x && npm run build`. Layouts, pnpm and Yarn, caching, and publishing are in lesson 16.
 
 1. npm reads the root `workspaces` globs and maps each folder to its package `name`.
-2. With `-w <name>`, npm runs that workspace's script with the workspace folder as the working directory, and puts every `node_modules/.bin` from the workspace folder up to the repository root on `PATH`.
-3. With `--workspaces`, it repeats step 2 for every workspace in the order the globs list them, which is not dependency order.
-4. `npm exec -w <name> -- <cmd>` runs an arbitrary command inside that workspace the same way.
+2. `-w <name>` runs that workspace's script with the workspace folder as the working directory, and puts every `node_modules/.bin` from the workspace up to the repo root on `PATH`.
+3. `--workspaces` repeats that for every workspace, in glob order, which is not dependency order.
+4. `npm exec -w <name> -- <cmd>` runs an arbitrary command in that workspace the same way.
 
-**Example — one workspace, from the repository root.** (The Example 1 repository from lesson 16.)
+**Example. One workspace, from the repository root.** This is the Example 1 repository from lesson 16.
 
 bash
 
@@ -199,19 +210,18 @@ $ npm exec -w @acme/api -- node -p "require('./package.json').name + ' in ' + pr
 @acme/api in apps/api
 ```
 
+
 ### `npm link`
 
-`npm link` connects a package you are developing to a project that uses it, through two symlinks, so you can test changes without publishing. It works in two steps: `npm link` inside the package creates a symlink in npm's **global** `lib/node_modules` (and links its `bin` entries into the global `bin`), and `npm link <name>` inside the project points the project's `node_modules/<name>` at the package folder. Without it you would publish a prerelease or copy files by hand for every change. Because step 1 writes into the global prefix, the example below sets `npm_config_prefix` to a throwaway folder so the real global install is never touched.
+`npm link` connects a package you are developing to an app, through two symlinks, so you can test without publishing. Inside the package, `npm link` symlinks it into npm's global `lib/node_modules` and links its `bin` entries. Inside the app, `npm link <name>` points `node_modules/<name>` at the package folder. The example sets `npm_config_prefix` to a throwaway folder so the real global install is never touched.
 
-How it works:
+1. In `greet-cli/`, `npm link` creates `<prefix>/lib/node_modules/greet-cli` pointing at the package, and `<prefix>/bin/greet` pointing at `bin/greet.js`.
+2. In `app/`, `npm link greet-cli` creates `app/node_modules/greet-cli` as a symlink straight to the source folder.
+3. Node follows the symlink to the real path, so `require('greet-cli')` loads the files you are editing. Edits show up with no reinstall.
+4. The link is not written to `app/package.json` unless you pass `--save`, so npm treats it as extraneous.
+5. `npm unlink -g` inside the package removes the global entries.
 
-1. In `greet-cli/`, `npm link` creates `<prefix>/lib/node_modules/greet-cli -> <path to greet-cli>` and `<prefix>/bin/greet -> ../lib/node_modules/greet-cli/bin/greet.js`.
-2. In `app/`, `npm link greet-cli` finds that global entry and creates `app/node_modules/greet-cli`, a symlink straight to the source folder.
-3. Node follows the symlink to the real path, so `require('greet-cli')` loads the source files you are editing; edits are visible immediately, with no reinstall.
-4. The link is not recorded in `app/package.json` unless you pass `--save`, so npm treats it as `extraneous`.
-5. `npm unlink -g` inside the package removes the global entries again.
-
-**Example — link a CLI into a project inside a throwaway prefix.** `greet-cli/package.json`, `index.js` and `bin/greet.js`:
+**Example. Link a CLI into a project, inside a throwaway prefix.**
 
 json
 
@@ -224,11 +234,13 @@ json
 }
 ```
 
+
 javascript
 
 ```
 module.exports = (name) => `hello, ${name} (from ${__dirname})`;
 ```
+
 
 javascript
 
@@ -237,7 +249,6 @@ javascript
 console.log(require('../index.js')(process.argv[2] ?? 'world'));
 ```
 
-Real output (Node v24.19.0, npm 11.17.0), run with `npm_config_prefix=<throwaway>/prefix` exported (`…` replaces the throwaway directory; the `sed` only removes the permission and date columns from `ls -l`):
 
 bash
 
@@ -262,22 +273,18 @@ $ node -p "require('greet-cli')('app')"
 hello, app (from …/link/greet-cli)
 ```
 
-The `__dirname` in the output proves the app is running the linked source folder, not a copy.
+The `__dirname` in the output shows the app is running the linked source, not a copy. The commands used `npm_config_prefix` pointed at the throwaway directory. The `sed` in the fence only drops the permission and date columns from `ls -l`.
 
 ### cross-env and portable environment variables
 
-`cross-env` is a small CLI (`cross-env NAME=value command …`) that sets environment variables and then spawns the command, so the same `package.json` script works in POSIX shells and in Windows `cmd.exe`. It exists because npm runs scripts through the system shell (`sh` on Linux and macOS, `cmd.exe` on Windows; npm's `script-shell` setting changes it), and only POSIX shells understand the `NAME=value command` prefix. Without it, `"start": "NODE_ENV=production node app.js"` fails on a Windows shell. cross-env 10.1.0 is an ES module package that requires Node `>=20`.
-
-How it works:
+`cross-env` is a small CLI, `cross-env NAME=value command …`, that sets variables and then spawns the command. npm runs scripts through the system shell, `sh` on Linux and macOS and `cmd.exe` on Windows, and only a POSIX shell understands the `NAME=value command` prefix. `"start": "NODE_ENV=production node app.js"` fails on a Windows shell. Two dependency-free alternatives: `node --env-file=<file>`, where a variable already set in the environment wins over the file, and a small Node script that sets `process.env` before importing the app. The version dates are in Good to know.
 
 1. npm hands the script string to the shell.
 2. The shell runs `cross-env`, which parses the leading `NAME=value` arguments.
-3. cross-env copies `process.env`, adds the new variables, and spawns the remaining command with that environment.
-4. The child exits and cross-env exits with the same code.
+3. cross-env copies `process.env`, adds those variables, and spawns the rest of the command with that environment.
+4. cross-env exits with the child's exit code.
 
-There are two dependency-free alternatives. `node --env-file=<file>` (added in v20.6.0, no longer experimental since v24.10.0) loads variables from a file before the app starts, with a variable already set in the environment taking precedence over the file; `--env-file-if-exists` (added in v22.9.0) does the same without failing when the file is missing. Or keep the logic in Node itself, for example a small `scripts/start.js` that sets `process.env` before importing the app, which runs the same way in every shell.
-
-**Example — three ways to set `NODE_ENV`.** `package.json` and `show-env.js`:
+**Example. Three ways to set `NODE_ENV`.**
 
 json
 
@@ -294,11 +301,13 @@ json
 }
 ```
 
+
 javascript
 
 ```
 console.log(`NODE_ENV=${process.env.NODE_ENV} PORT=${process.env.PORT ?? '(unset)'}`);
 ```
+
 
 bash
 
@@ -337,20 +346,18 @@ engines = { node: '>=20' }
 type = 'module'
 ```
 
-All three give `NODE_ENV=production` on Linux. Only the `--env-file` version also loads `PORT` from the file, and the run with `NODE_ENV=staging` already exported shows the environment winning over the file.
+All three give `NODE_ENV=production` on Linux. Only the `--env-file` run also loads `PORT` from the file. The run with `NODE_ENV=staging` already exported shows the environment winning over the file.
 
 > ⚠️ Unverified: the failure of `start:posix` and the success of `start:cross` on Windows `cmd.exe` were not reproduced; no Windows machine was available. The cmd.exe behaviour is taken from the cross-env README.
 
 ### Provenance and trusted publishing
 
-A **provenance statement** is a signed attestation, attached to a published package version, that records which source repository, commit and CI workflow built it; it is signed through Sigstore and logged in a public transparency log, and `npm audit signatures` verifies it. **Trusted publishing** removes the long-lived npm token: you register a specific CI workflow (GitHub Actions, GitLab CI/CD or CircleCI, cloud-hosted runners only) as a trusted publisher on npmjs.com, and the npm CLI exchanges the CI's short-lived OIDC identity token for publish rights at publish time. These exist because stolen publish tokens and tampered release builds are a supply-chain attack path; without them a consumer cannot tell whether a tarball came from the repository it claims. Per docs.npmjs.com, provenance needs npm 9.5.0 or later and a public `repository` field that matches the publishing repository; trusted publishing needs npm 11.5.1 or later and Node 22.14.0 or later, and generates provenance automatically without the `--provenance` flag.
+A provenance statement is a signed attestation attached to a published version. It records which repository, commit, and CI workflow built the package. It is signed through Sigstore and written to a public transparency log. `npm audit signatures` checks it. Trusted publishing removes the long-lived npm token. You register one CI workflow, GitHub Actions, GitLab CI/CD, or CircleCI, on cloud-hosted runners only, and the npm CLI exchanges that job's short-lived OIDC token for publish rights. A consumer otherwise cannot tell whether a tarball came from the repository it names. The version requirements are in Good to know.
 
-How it works (GitHub Actions, as described on docs.npmjs.com):
-
-1. The workflow is granted `permissions: id-token: write` and runs on a GitHub-hosted runner.
-2. During `npm publish --provenance` (or a trusted-publishing `npm publish`), npm detects the CI provider and requests an OIDC ID token from it.
-3. For trusted publishing, npm sends that token to the registry, which checks it against the trusted-publisher configuration (organisation, repository, workflow filename, optional environment) and returns a short-lived token for this publish.
-4. For provenance, npm uses the identity token to get a signing certificate from Sigstore, signs a statement describing the build, and uploads it with the tarball; the registry records it in the transparency log.
+1. The workflow has `permissions: id-token: write` and runs on a GitHub-hosted runner.
+2. During `npm publish --provenance`, or a trusted-publishing `npm publish`, npm detects the CI provider and requests an OIDC token.
+3. For trusted publishing, npm sends that token to the registry. The registry checks it against the trusted publisher (organisation, repository, workflow filename, optional environment) and returns a short-lived token for this publish.
+4. For provenance, npm uses the identity token to get a signing certificate from Sigstore, signs a statement about the build, and uploads it with the tarball. The registry records it in the transparency log.
 5. Outside a supported CI provider there is no identity token, so a provenance publish fails before upload.
 
 The parts that can run locally:
@@ -387,7 +394,7 @@ npm trust list [package]
 npm trust revoke [package] --id=<trust-id>
 ```
 
-The dry run accepted `--provenance` but did not exercise it (it printed the normal dry-run lines). The real publish, sent to the same local stand-in registry used in lesson 14 (every request answered with an error, `registry.log` lists them), failed with `EUSAGE` because no CI provider was detected; only two `GET` requests reached the registry and nothing was uploaded. npm 11.17.0 also ships `npm trust`, which configures trusted publishers from the CLI instead of the npmjs.com settings page.
+The dry run accepted `--provenance` and did not exercise it. The real publish, sent to the same local stand-in registry as lesson 14, failed with `EUSAGE` because no CI provider was detected. Only two `GET` requests reached the registry. Nothing was uploaded.
 
 A publish workflow following the docs.npmjs.com trusted-publishing example:
 
@@ -418,16 +425,17 @@ jobs:
       - run: npm publish
 ```
 
+
 > ⚠️ Unverified: the workflow above, the OIDC token exchange, the provenance signing and `npm audit signatures` output were not run; they need a GitHub Actions or GitLab CI/CD runner, a trusted-publisher configuration on npmjs.com and a real package to publish. Steps 2 to 4 are summarised from docs.npmjs.com ("Generating provenance statements" and "Trusted publishing for npm packages"), not observed.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **Running `npm link` against the real global prefix in experiments.** It writes into the global `lib/node_modules` and `bin`. Set `npm_config_prefix` to a scratch folder when trying it, and run `npm unlink -g` afterwards.
-- **Forgetting that a link is extraneous.** Without `--save`, the link is not in `package.json`, and installing another package removes it (edge case below).
-- **Linking a package that has peer dependencies.** The linked package resolves its own imports from its real folder, so if that folder has its own `node_modules` (from developing it), it loads its own copy of, say, a framework instead of the app's. Prefer workspaces for packages developed together.
-- **Hard-coding `NAME=value cmd` in scripts that must run on Windows.** Use cross-env, `node --env-file`, or a Node script.
-- **Expecting `--env-file` to override the environment.** Values already in the environment win over the file.
-- **Expecting `npm publish --provenance --dry-run` to test provenance.** It does not; provenance only runs on a real publish from a supported CI runner.
+- **`npm link` against the real global prefix.** It writes into the global `lib/node_modules` and `bin`. Set `npm_config_prefix` to a scratch folder, and run `npm unlink -g` afterward.
+- **A link is extraneous.** Without `--save` it is not in `package.json`, and installing another package removes it. The edge case below is that removal.
+- **Linking a package that has peer dependencies.** The linked package resolves imports from its real folder, so its own `node_modules` can load a second copy of a framework. Prefer workspaces for packages you develop together.
+- **`NAME=value cmd` in a script that must run on Windows.** Use cross-env, `node --env-file`, or a Node script.
+- **Expecting `--env-file` to override the environment.** Values already set win over the file.
+- **Expecting `npm publish --provenance --dry-run` to test provenance.** It does not. Provenance runs on a real publish from a supported CI runner.
 
 ### Edge case worked through: installing another package silently removes a link
 
@@ -456,12 +464,12 @@ $ npm unlink -g >/dev/null; ls ../prefix/lib/node_modules ../prefix/bin
 ../prefix/lib/node_modules:
 ```
 
-A plain `npm install` kept the extraneous link, but `npm install ms@2.1.3` rebuilt the tree from `package.json`, where `greet-cli` was not listed, and removed `node_modules/greet-cli`; any `require('greet-cli')` would now fail. `npm link greet-cli --save` records it as `"file:../greet-cli"`, so it survives later installs; remember to restore the real range before committing. Finally `npm unlink -g` emptied the throwaway global folders.
+A plain `npm install` kept the extraneous link. `npm install ms@2.1.3` rebuilt the tree from `package.json`, where `greet-cli` was not listed, and removed `node_modules/greet-cli`. `npm link greet-cli --save` records `"file:../greet-cli"`, so later installs keep it. Restore the real range before you commit. `npm unlink -g` then emptied the throwaway global folders.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “How do you test a local library inside an app without publishing it?”**  
-> A: In a monorepo, make both workspaces and depend on the library by name; the install symlinks it. Across repositories, `npm link` in the library (a global symlink plus its `bin`), then `npm link <name>` in the app, which points `node_modules/<name>` at the library folder. Node follows the symlink, so edits are live. *Trap:* the link is extraneous unless saved, and the next `npm install <pkg>` removes it.
+> In a monorepo, make both packages workspaces and depend on the library by name. The install symlinks it. Across repositories, run `npm link` in the library, which creates a global symlink and its `bin`, then `npm link <name>` in the app, which points `node_modules/<name>` at the library folder. Node follows the symlink, so edits are live. The trap is that the link is extraneous unless you pass `--save`, and the next `npm install <pkg>` removes it. For a trial, set `npm_config_prefix` to a scratch folder so the global link is not your real prefix.
 
 > **Q: “What is npm provenance, and what does trusted publishing add?”**  
-> A: Provenance is a Sigstore-signed statement attached to the published version that links it to the source repository, commit and CI workflow that built it, recorded in a public transparency log and checkable with `npm audit signatures`. Trusted publishing replaces long-lived npm tokens: npm exchanges the CI job's short-lived OIDC token for publish rights, only for the workflow registered on npmjs.com, and provenance is generated automatically. Both need a supported cloud CI runner; a local `npm publish --provenance` fails with `EUSAGE`.
+> Provenance is a Sigstore-signed statement attached to the published version. It links that tarball to the repository, commit, and CI workflow that built it, records the statement in a public transparency log, and `npm audit signatures` checks it. Trusted publishing replaces a long-lived npm token. npm exchanges the CI job's short-lived OIDC token for publish rights, only for the workflow registered on npmjs.com, and provenance is generated automatically. Both need a supported cloud CI runner. A local `npm publish --provenance` fails with `EUSAGE` before upload. The steps that need a real CI runner and a real publish were not run here.

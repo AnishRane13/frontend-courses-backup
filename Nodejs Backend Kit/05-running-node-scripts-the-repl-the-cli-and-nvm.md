@@ -13,77 +13,73 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+You run JavaScript with Node in three ways. `node app.js` runs a file. `node` with no file opens the REPL, a prompt that reads a line, evaluates it, and prints the result. `node -e` runs a snippet you pass as a string. nvm, the Node Version Manager, installs several Node versions side by side and points the current shell at the one a project asks for.
+
+The file stays running only while asynchronous work is still pending, which is why a server stays up and a plain script exits. The trade-off of nvm is that global CLIs belong to one version. Switch versions and that command can disappear until you install it again.
+
+REPL stands for read, eval, print, loop. LTS means long-term support, the even-numbered majors you run in production.
+
 ## Why it matters
 
-Knowing the concepts is one thing; actually *running* Node fluently is what makes you productive day to day. There is a real difference between a developer who only knows `node app.js` and one who reaches for the REPL to test an idea in two seconds, uses `node -e` in a shell script, keeps the right Node version per project with nvm, and knows the CLI flags that turn a manual dev loop into an automatic one. These are small skills, but together they are the difference between fighting your tools and flowing with them.
-
-They also come up constantly in interviews and on the job: “How do you check your Node version?”, “How would you quickly test whether this snippet works?”, “How do you run different Node versions for different projects?” This lesson gives you a confident answer to all of them and a mental map of the ways Node executes code.
+Day to day you need more than `node app.js`. The REPL answers "what does this return?" without a file. `node -e` and `node -p` drop a check into a shell script. nvm keeps an old project on one major and a new one on another. Interviews ask how you check the version, how you try a snippet, and how you run two versions on one machine.
 
 ## The concept, simply
 
-There are three everyday ways to run JavaScript with Node, and it helps to picture them as three doors into the same runtime.
+**1. A file.** `node app.js` runs the script from top to bottom. This is how servers and real programs start.
 
-**1. Run a file:** `node app.js` executes a whole script from top to bottom. This is how you run real programs and servers — the everyday default.
+**2. The REPL.** `node` with no file opens an interactive prompt. You type an expression, press Enter, and Node prints the result.
 
-**2. The REPL:** type `node` with no file and you drop into an interactive prompt (Read–Eval–Print Loop). You type an expression, press Enter, and Node immediately evaluates it and prints the result — perfect for experimenting, checking how an API behaves, or doing quick calculations.
-
-**3. Inline evaluation:** `node -e "code"` runs a single snippet passed as a string, straight from the command line — handy inside shell scripts and one-off checks.
+**3. Inline.** `node -e "code"` runs a string from the command line. `node -p` runs it and prints the result.
 
 ![Three panels showing node app.js to run a file, node for the interactive REPL, and node -e for inline evaluation](assets/i02_01_d8b026e1.svg)
 
-Three doors into the runtime: run a file, open the interactive REPL, or evaluate a one-line snippet inline.
-
-On top of *how* you run Node sits *which version* of Node you run. Because projects target different Node versions, a tool called **nvm** (Node Version Manager) lets you install several versions side by side and switch between them per project — so an old client project on Node 18 and a new one on Node 22 can coexist on one machine.
+Which version you run is a separate question. nvm installs several versions and switches per project, so a project on Node 18 and a project on Node 22 can share one machine.
 
 ## How it works
 
-**Running a file.** `node path/to/file.js` starts a process, loads the file, runs it, and — importantly — keeps the process alive as long as there is pending asynchronous work (an open server, a timer, a pending Promise). A plain script with no async work exits as soon as the last line runs. This is why a web server “stays running”: `server.listen()` keeps the event loop busy. You can pass arguments after the filename (`node app.js --port 8080`), and read them via `process.argv`.
+**A file.** `node path/to/file.js` starts a process, loads the file, and runs it. The process stays alive while asynchronous work is pending: an open server, a timer, a pending promise. A script with nothing pending exits when the last line finishes. `server.listen()` is why a web server stays up. Arguments after the filename are `process.argv`.
 
-**The REPL in depth.** Start it with `node`. Each line you type is evaluated and its result printed. Useful REPL features:
+**The REPL.** Start it with `node`.
 
-- `_` holds the value of the last evaluated expression (like a calculator's answer memory).
-- Tab completion works — type `process.` and press Tab to see available properties.
-- Multi-line input is supported: an unfinished statement (an open brace or bracket) shows a `...` continuation prompt.
-- Dot commands start with a period: `.help`, `.exit` (or Ctrl-D) to quit, `.clear` to reset the context, `.load file.js` and `.save file.js`.
-- Core modules are pre-loaded lazily — you can just type `os.platform()` without requiring `os` first.
+- `_` is the last value, like a calculator's answer memory.
+- Tab completes. `process.` then Tab lists properties.
+- An unfinished statement, an open brace or bracket, shows a `...` continuation prompt.
+- Commands that start with a dot: `.help`, `.exit` or Ctrl-D to quit, `.clear` to reset, `.load file.js`, `.save file.js`.
+- Core modules load lazily. You can type `os.platform()` without requiring `os`.
 
-The REPL is the fastest way to answer “what does this actually return?” without creating a file.
-
-**Handy CLI flags.** The `node` command has flags worth knowing:
-
-| Command / flag | What it does |
+| Command | What it does |
 | --- | --- |
-| `node app.js` | Run a script file |
-| `node` | Start the interactive REPL |
-| `node -e "expr"` | Evaluate a snippet inline |
-| `node -p "expr"` | Evaluate *and print* the result |
-| `node --version` / `-v` | Print the Node version |
-| `node --watch app.js` | Re-run automatically when files change (built in, v18.11+) |
-| `node --env-file=.env app.js` | Load env vars from a file (built in, v20.6+) |
-| `node --check app.js` | Syntax-check without running |
-| `node --inspect app.js` | Enable the debugger (Chrome DevTools) |
+| `node app.js` | Run a file |
+| `node` | Open the REPL |
+| `node -e "expr"` | Run a snippet |
+| `node -p "expr"` | Run it and print the result |
+| `node -v` | Print the version |
+| `node --watch app.js` | Re-run when files change |
+| `node --env-file=.env app.js` | Load environment variables from a file |
+| `node --check app.js` | Check syntax, do not run |
+| `node --inspect app.js` | Open the debugger for Chrome DevTools |
 
-`--watch` and `--env-file` are especially nice: modern Node can auto-restart on save and read a `.env` file without extra packages like `nodemon` or `dotenv` for simple cases.
+`--watch` and `--env-file` cover the simple cases people used to add nodemon and dotenv for. The versions those flags arrived in are in Good to know.
 
-**nvm basics.** Node versions matter because language features, performance, and security fixes differ between them, and each project may pin a version. nvm (on macOS/Linux; nvm-windows or alternatives like `fnm`/`Volta` elsewhere) manages this. The core commands:
+**nvm.** On macOS and Linux, nvm is the usual manager. Windows uses nvm-windows, or fnm or Volta. Lesson 3 compares them.
 
 | Command | Meaning |
 | --- | --- |
-| `nvm install 22` | Install Node 22 (latest of that major) |
-| `nvm install --lts` | Install the latest LTS release |
-| `nvm use 20` | Switch the current shell to Node 20 |
-| `nvm ls` | List installed versions |
-| `nvm alias default 22` | Set the default version for new shells |
+| `nvm install 22` | Install the latest Node 22 |
+| `nvm install --lts` | Install the latest LTS |
+| `nvm use 20` | Switch this shell to Node 20 |
+| `nvm ls` | List what is installed |
+| `nvm alias default 22` | Default for new shells |
 
 ![Diagram showing nvm at the top feeding three projects each pinned to a different Node version: 20, 22, and 18](assets/i02_02_ba74adeb.svg)
 
-nvm installs multiple Node versions side by side so each project can use the version it was built for.
-
-A common workflow: put an `.nvmrc` file containing a version (e.g. `22`) in a project, and `nvm use` reads it automatically — so everyone on the team runs the same Node. Under the hood, LTS versions are the ones to prefer: even-numbered majors (18, 20, 22) get long-term support and security patches; odd ones are experimental and short-lived.
+Put `22` in `.nvmrc` and `nvm use` reads it, so the team runs the same major. Even-numbered majors become LTS and get security patches. Odd majors are short-lived. Prefer LTS for anything real. The phase lengths are in lesson 1.
 
 ## Code examples
 
-**Example 1 — a REPL session.** Everything after `>` is what you type.
+**Example 1. A REPL session.** Everything after `>` is what you type.
 
 javascript
 
@@ -103,7 +99,8 @@ undefined
 > .exit           // or press Ctrl-D
 ```
 
-**Example 2 — inline evaluation for quick answers and scripts.**
+
+**Example 2. Inline evaluation.**
 
 javascript
 
@@ -119,7 +116,8 @@ $ node -p "Math.max(3, 7, 2)"
 $ node -e "console.log('Build at', new Date().toISOString())"
 ```
 
-**Example 3 — running a file with the modern dev flags.**
+
+**Example 3. A file, with the built-in dev flags.**
 
 javascript
 
@@ -136,7 +134,8 @@ http.createServer((req, res) => res.end('ok'))
 // The process stays alive because server.listen keeps the loop busy.
 ```
 
-**Example 4 — checking and switching versions.**
+
+**Example 4. Check and switch versions.**
 
 javascript
 
@@ -152,59 +151,58 @@ $ nvm use
 Now using node v22.11.0 (npm v10.x)
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Expecting a plain script to “stay running.”** Node exits when there's no pending async work. A script only keeps running if something (a server, an interval) holds the event loop open.
-- **Confusing `-e` and `-p`.** `node -e` runs code but prints nothing unless you `console.log`; `node -p` runs it *and* prints the returned value. Reaching for `-e` when you wanted the result is a common slip.
-- **Treating REPL results as if they came from your program.** REPL variables and state vanish when you exit — it's a scratchpad, not persistence. Also, a statement like `const x = 5` shows `undefined` (the statement's value), which confuses beginners.
-- **Version drift across a team.** Without an `.nvmrc` or pinned version, teammates run different Node versions and hit “works on my machine” bugs. Pin it.
-- **Installing global packages under the wrong Node version.** With nvm, global installs are per-version — switch versions and your globally-installed CLI may “disappear” because it lives under the other version.
-- **Using odd-numbered Node versions in production.** Odd majors (19, 21, 23) are short-lived and don't get long-term support; stick to LTS (even) majors for anything real.
-- **Reaching for `nodemon` when `--watch` exists.** Modern Node restarts on file change natively; you often don't need an extra dependency for simple cases.
+- **Expecting a plain script to stay running.** Node exits when nothing asynchronous is pending. A server or an interval is what holds the loop open.
+- **Mixing up `-e` and `-p`.** `-e` prints nothing unless you `console.log`. `-p` prints the result.
+- **Treating the REPL as the program.** Its variables vanish when you exit. `const x = 5` prints `undefined`, because that is the statement's value.
+- **No pin file.** Teammates run different majors and hit "works on my machine." Commit `.nvmrc`, and say the same thing in `engines`.
+- **Globals installed under the wrong version.** With nvm, global packages belong to one version. Switch, and the CLI looks gone.
+- **An odd major in production.** 19, 21, and 23 do not get long-term support. Use an even LTS major.
+- **Adding nodemon when `--watch` is enough.** For a simple restart-on-save loop, the built-in flag is the whole tool.
 
 ## Best practices
 
-- **Use the REPL to learn APIs fast** — when unsure what a method returns, type it into `node` rather than guessing or writing a throwaway file.
-- **Pin your Node version per project** with an `.nvmrc` (and an `engines` field in `package.json`) so everyone, including CI, runs the same version.
-- **Prefer LTS versions** (even-numbered majors) for production; upgrade deliberately when an LTS line reaches end of life.
-- **Lean on built-in flags before adding tools:** `--watch` for auto-restart, `--env-file` for env loading, `--inspect` for debugging — fewer dependencies, less to break.
-- **Put run commands in `package.json` scripts** (`npm run dev`) so the exact flags are documented and shared, not re-typed from memory.
-- **Know how to exit the REPL** (`.exit` or Ctrl-D, twice-Ctrl-C) so you're never stuck — a small thing that saves real friction.
+- When you do not know what a method returns, type it in the REPL before you write a file.
+- Pin the version with `.nvmrc` and `engines`, including CI.
+- Run production on LTS. Upgrade when that line is approaching end of life.
+- Prefer built-in flags before new dependencies: `--watch`, `--env-file`, `--inspect`.
+- Put the exact command in a `package.json` script so nobody retypes the flags.
+- Leave the REPL with `.exit` or Ctrl-D. Ctrl-C twice also works.
 
 ## ⭐ Interview lens
 
 > **Q: “What is the Node REPL and when would you use it?”**  
-> A: REPL = Read–Eval–Print Loop, an interactive prompt started by running `node` with no file. You type expressions and see results immediately — ideal for testing snippets, exploring an API, or quick calculations without creating a file. `_` holds the last result. *Trap:* not knowing what the acronym stands for.
+> REPL means read, eval, print, loop. You start it with `node` and no file. Each line is evaluated and the result is printed. `_` holds the last value. Use it to try a snippet, check what an API returns, or do a one-off calculation without creating a file. Dot commands such as `.exit` and `.load` manage the session. The limit is that nothing persists. Close the prompt and the variables are gone, and a `const` statement prints `undefined` because the statement itself has no value.
 
 > **Q: “How do you run a one-off JavaScript snippet without a file?”**  
-> A: `node -e "code"` to execute it, or `node -p "code"` to execute and print the result. Great for shell scripts and CI checks.
+> `node -e "code"` runs the string. `node -p "code"` runs it and prints the result, which is what you want in a shell script or a CI check. `-e` stays quiet unless the code calls `console.log`. The limit is anything that needs a module graph or a long program. Past a line or two, a file is easier to read, and `-e` still starts a real process with the same event loop as `node app.js`.
 
 > **Q: “How do you run different Node versions on the same machine?”**  
-> A: A version manager like nvm (or fnm/Volta). Install versions with `nvm install`, switch with `nvm use`, and pin per-project with an `.nvmrc` file so the team stays consistent. *Trap:* suggesting you reinstall Node each time — the point is coexistence.
+> Use a version manager. nvm installs versions with `nvm install`, switches the current shell with `nvm use`, and reads a one-line `.nvmrc` so the project picks the version. fnm and Volta do the same job with different pin files. Lesson 3 is the mechanical difference. The limit is reinstalling Node from the operating system each time. That replaces the one binary on `PATH`. A manager keeps the versions side by side under your home directory.
 
 > **Q: “Why does a Node web server keep running while a plain script exits?”**  
-> A: Node exits when the event loop has no more work. A server calls `listen()`, which keeps a handle open and the loop alive; a plain synchronous script finishes its last line with nothing pending, so the process ends.
-
-> **Q: “What's the difference between LTS and Current Node releases?”**  
-> A: Even-numbered majors become LTS (Long-Term Support) with ~30 months of maintenance and security fixes — use these in production. Odd-numbered ‘Current’ releases are short-lived and carry the newest experimental features. *Trap:* recommending a bleeding-edge odd version for production.
-
-> **Q: “How would you auto-restart a Node app during development without extra packages?”**  
-> A: Use the built-in `node --watch app.js` (Node 18.11+), which restarts on file changes — historically people used `nodemon`, but it's now built in. Pair with `--env-file` to load a `.env` without `dotenv`.
+> Node exits when the event loop has no more work. `server.listen()` holds a ref'd handle, a listening socket, so the loop stays alive. A script that only computes and prints finishes its last line with nothing pending, and the process ends. The limit is a timer you forgot. `setInterval` also keeps the process alive. `unref()` on that timer lets the process exit when the server is the only thing you meant to keep.
 
 ## Cheat-card
 
-- **Run a file:** `node app.js` (stays alive while async work is pending).
-- **REPL:** `node` → interactive; `_` = last result; `.exit` / Ctrl-D to quit.
-- **Inline:** `node -e "code"` runs; `node -p "code"` runs and prints.
-- **Version:** `node -v`. **Dev flags:** `--watch`, `--env-file`, `--inspect`, `--check`.
-- **nvm:** `install`, `use`, `ls`; pin with `.nvmrc` + `engines`.
-- **Versions:** even = LTS (use in prod); odd = short-lived/experimental.
-- **`node --run <script>`:** runs a `package.json` script without loading npm; no `pre`/`post` hooks, no `npm_*` variables.
-- **`node --test`:** built-in runner (stable v20); `--test-reporter=dot|tap|junit`, `--test-name-pattern`.
-- **`node app.ts`:** type stripping (stable v24.12.0), no type checking; `enum` → `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
-- **`NODE_OPTIONS`:** allow-listed flags only (`--test`, `--run`, `--eval`, `--env-file` → exit 9); inherited by every child process.
-- **`--max-old-space-size=MiB`:** caps the old generation; OOM → `FATAL ERROR`, exit 134; keep it below the container limit.
-- **Corepack:** bundled (0.35.0) in v24.19.0 but Experimental; not distributed from Node 25.
+- Run a file: `node app.js`. It stays up while async work is pending.
+- REPL: `node`. `_` is the last result. `.exit` or Ctrl-D quits.
+- Inline: `node -e` runs. `node -p` runs and prints.
+- Version: `node -v`. Dev flags: `--watch`, `--env-file`, `--inspect`, `--check`.
+- nvm: `install`, `use`, `ls`. Pin with `.nvmrc` and `engines`.
+- Even majors become LTS. Odd majors are short-lived.
+
+## Good to know
+
+- Q: What's the difference between LTS and Current Node releases? Even-numbered majors become LTS, long-term support, about 30 months of fixes. Use those in production. Odd majors are short-lived Current releases. Do not deploy one.
+- Q: How would you auto-restart a Node app during development without extra packages? `node --watch app.js`. It re-runs when files change. Pair it with `--env-file` to load a `.env` without dotenv.
+- `--watch` has been built in since v18.11. `--env-file` since v20.6. `node --run` was added in v22.0.0, and v22.3.0 added the walk up to `package.json` and the `NODE_RUN_*` variables. `node --test` was added in v18.1.0 and v16.17.0, stable since v20.0.0. Type stripping was added in v22.6.0 behind `--experimental-strip-types`, on by default in v23.6.0 and v22.18.0, and stable in v24.12.0, when the opt-out became `--no-strip-types`. `NODE_OPTIONS` was added in v8.0.0. Corepack was added in v16.9.0 and v14.19.0.
+- `node --run` skips npm's startup and also skips `pre` and `post` hooks and `npm_*` variables. In the lesson's timing, the gap was about tenfold. One run was on the order of 10 ms versus about 140 ms.
+- On this 15 GB machine, `heap_size_limit` without a flag was 2240 MiB. With `--max-old-space-size`, the reported limit was the flag plus 192 MiB of young generation: 512 became 704, 1024 became 1216. Out of memory is `FATAL ERROR`, exit 134. A container kill with no stack is often 137, SIGKILL, because the heap limit was larger than the container.
+- Corepack in v24.19.0 reports 0.35.0 and is still experimental. It is not distributed starting with Node 25.
+- `NODE_OPTIONS` rejects flags that choose what to run, including `--test`, `--run`, `--eval`, `--print`, and `--env-file`, with exit code 9. A flag there is inherited by every child `node`. A flag on the command line is not. In the edge-case run, the child kept the default 2240 MiB with a CLI flag, and got the parent's 704 MiB cap from `NODE_OPTIONS`.
 
 ---
 
@@ -217,22 +215,22 @@ Now using node v22.11.0 (npm v10.x)
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### `node --run`
 
-`node --run <name>` (added v22.0.0; v22.3.0 added the walk up to the nearest `package.json` and the `NODE_RUN_*` variables) runs a command from the `"scripts"` object of `package.json` without starting npm. `npm run` first loads npm itself, which is a large JavaScript program, and only then spawns your script. `node --run` does the lookup in the `node` binary: it skips npm's start-up but also npm's extras.
+`node --run <name>` runs a command from the `"scripts"` object of `package.json` without starting npm. `npm run` loads npm, a large JavaScript program, and then spawns your script. `node --run` does the lookup inside the `node` binary. It skips npm's startup and also skips npm's extras.
 
-How it works:
+1. Node finds the nearest `package.json`, walking up from the current folder.
+2. It prepends `node_modules/.bin` of every ancestor to `PATH`, so a local `eslint` or `tsc` resolves.
+3. It sets `NODE_RUN_SCRIPT_NAME` and `NODE_RUN_PACKAGE_JSON_PATH`, appends arguments after `--`, and runs the script string in a shell in the folder that holds `package.json`.
+4. It does not run `pre<name>` or `post<name>` hooks, and it does not set `npm_lifecycle_event` or the other `npm_*` variables.
 
-1. Node finds the nearest `package.json`, starting in the current folder and walking up to the root.
-2. It prepends `node_modules/.bin` of every ancestor folder to `PATH`, so locally installed CLIs (`eslint`, `tsc`) resolve.
-3. It sets `NODE_RUN_SCRIPT_NAME` and `NODE_RUN_PACKAGE_JSON_PATH`, appends any arguments after `--`, and runs the script string in a shell in the folder that holds `package.json`.
-4. It does **not** run `pre<name>`/`post<name>` hooks and does not set npm's `npm_*` variables (such as `npm_lifecycle_event`).
-
-**Example — the same script both ways, and the start-up cost.**
+**Example. The same script both ways, and the startup cost.**
 
 json
 
@@ -244,6 +242,7 @@ json
   }
 }
 ```
+
 
 javascript
 
@@ -261,6 +260,7 @@ console.log('node --run hello:', avgMs(process.execPath, ['--run', 'hello']).toF
 console.log('npm run hello   :', avgMs('npm', ['run', 'hello']).toFixed(0), 'ms');
 ```
 
+
 bash
 
 ```
@@ -276,20 +276,18 @@ node --run hello: 8 ms
 npm run hello   : 144 ms
 ```
 
-Under `npm run`, the name came from `$npm_lifecycle_event`; under `node --run`, it came from `$NODE_RUN_SCRIPT_NAME`. The start-up times differ between runs and machines; the roughly tenfold gap is the cost of loading npm. Lesson 96 shows the skipped `pre` hook and the "Missing script" listing: [Modern Node Features: A Guided Tour](96-modern-node-features-tour.md).
+Under `npm run`, the name came from `$npm_lifecycle_event`. Under `node --run`, it came from `$NODE_RUN_SCRIPT_NAME`. The times move between machines. The roughly tenfold gap is the cost of loading npm. Lesson 96 shows the skipped `pre` hook.
 
 ### `node --test`
 
-`node --test` (added v18.1.0 / v16.17.0, stable since v20.0.0) starts the built-in test runner. Test files use the `node:test` module (`test`, `describe`, `it`, hooks, mocks) and `node:assert`. No Jest or Mocha install is needed, and there is no config file.
+`node --test` starts the built-in test runner. Tests use `node:test` (`test`, `describe`, `it`, hooks, mocks) and `node:assert`. There is no config file and no Jest or Mocha install.
 
-How it works:
+1. With no file arguments, it collects the default globs: `**/*.test.{cjs,mjs,js}`, `**/*-test.*`, `**/*_test.*`, `**/test-*.*`, `**/test.*`, and `**/test/**/*.*`, plus the `.ts`, `.mts`, and `.cts` forms unless `--no-strip-types` is set. `node_modules` is skipped.
+2. Each file runs in its own child process. Isolation `'process'` is the default, and several run at once.
+3. `spec` is the default reporter. `--test-reporter` also accepts `dot`, `tap`, `junit`, and `lcov`.
+4. The exit code is 1 if any test failed, otherwise 0.
 
-1. With no file arguments, it collects files matching the default globs: `**/*.test.{cjs,mjs,js}`, `**/*-test.*`, `**/*_test.*`, `**/test-*.*`, `**/test.*` and `**/test/**/*.*`, plus their `.ts`/`.mts`/`.cts` forms unless `--no-strip-types` is set. `node_modules` is skipped.
-2. It runs each file in its own child process (isolation `'process'` is the default), several at a time.
-3. A reporter formats the results. `spec` is the default; `--test-reporter=dot|tap|junit|lcov` selects another.
-4. The exit code is 1 if any test failed, 0 otherwise.
-
-**Example — run, change the reporter, filter by name.**
+**Example. Run, change the reporter, filter by name.**
 
 javascript
 
@@ -306,6 +304,7 @@ describe('slug', () => {
   it('handles empty input', () => assert.equal(slug(''), ''));
 });
 ```
+
 
 bash
 
@@ -340,20 +339,18 @@ $ node --test --test-name-pattern="punctuation"
 ℹ duration_ms 78.292709
 ```
 
-The `dot` reporter printed four dots: three tests plus the `describe` suite. Lessons 91–94 cover testing itself; lesson 96 shows why `*.spec.js` files are skipped by default.
+The `dot` reporter printed four dots: three tests plus the `describe` suite. Lessons 91 to 94 cover testing. Lesson 96 shows why `*.spec.js` is skipped by default.
 
 ### Built-in TypeScript type stripping
 
-Node can run a `.ts` file directly: `node app.ts`. It does this by **type stripping**: it removes the type annotations (`: string`, `interface`, `as T`) and runs what is left as JavaScript. There is **no type checking**, so a type error still runs. History: added v22.6.0 behind `--experimental-strip-types`; enabled by default in v23.6.0 / v22.18.0; **stable** in v24.12.0, when the opt-out flag was renamed `--no-strip-types`.
+`node app.ts` runs a TypeScript file by stripping types. It removes annotations such as `: string`, `interface`, and `as T`, and runs what is left. It does not type-check. A type error still runs.
 
-How it works:
+1. Node sees `.ts`, `.mts`, or `.cts`.
+2. It replaces type-only syntax with whitespace, so line and column numbers stay put and stack traces point at your source.
+3. Syntax that would need generated JavaScript, such as `enum`, a `namespace` with values, or parameter properties, is rejected with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. `--experimental-transform-types` handles those.
+4. Run `tsc --noEmit` in CI or the editor for real type checking.
 
-1. Node sees a `.ts`, `.mts` or `.cts` extension.
-2. It replaces the type-only syntax with whitespace. Line and column numbers stay the same, so stack traces point at your source.
-3. Syntax that would need *generated* JavaScript (`enum`, `namespace` with values, parameter properties) is rejected with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; `--experimental-transform-types` handles those.
-4. Run `tsc --noEmit` separately (in CI or your editor) to get type checking.
-
-**Example — a `.ts` file with no build step, and an `enum` that is refused.**
+**Example. A `.ts` file with no build step, and an `enum` that is refused.**
 
 typescript
 
@@ -369,6 +366,7 @@ console.log(greet({ name: 'Ada', age: 36 }));
 const wrong: number = 'not a number' as any as number;   // no type check happens at run time
 console.log(typeof wrong);
 ```
+
 
 bash
 
@@ -396,20 +394,18 @@ SyntaxError: Unexpected identifier 'User'
     …
 ```
 
-`<cwd>` stands for the working directory. The full story (`tsconfig` settings, `import type`, `.ts` extensions in imports) is in [TypeScript with Node](95-typescript-with-node.md).
+`<cwd>` stands for the working directory. `tsconfig`, `import type`, and `.ts` extensions in imports are in lesson 95.
 
 ### `NODE_OPTIONS`
 
-`NODE_OPTIONS` (added v8.0.0) is an environment variable holding a space-separated list of `node` flags. Node reads it at start-up as if those flags had been typed before the ones on the command line. It is the way to pass flags to a `node` process you do not launch yourself: one started by npm, a test runner, a framework's CLI or a container entrypoint.
+`NODE_OPTIONS` is a space-separated list of `node` flags in the environment. Node reads them at startup as if they were typed before the real command line. Use it for a `node` process you do not launch yourself: one started by npm, a test runner, or a container entrypoint.
 
-How it works:
+1. Node parses `NODE_OPTIONS` first, then the command line. If a flag may appear only once, the command line wins.
+2. Only an allow-list is accepted (`process.allowedNodeEnvironmentFlags`, and the docs). Flags that choose what to run, `--eval`, `--print`, `--test`, `--run`, a script path, and `--env-file`, are rejected. The process exits 9.
+3. Every child process inherits the variable, including every `node` that npm or your tools start.
+4. On v24.19.0 the allow-list included `--max-old-space-size`, `--enable-source-maps`, `--require`, `--import`, `--inspect`, `--watch`, `--permission`, and `--no-strip-types`.
 
-1. Node parses `NODE_OPTIONS` first, then the real command line. For a flag that can appear only once, the command-line value wins.
-2. Only an allow-list of flags is accepted (`process.allowedNodeEnvironmentFlags`, and the list in the docs under `NODE_OPTIONS`). Flags that pick *what* to run (`--eval`, `--print`, `--test`, `--run`, a script path) and `--env-file` are rejected, and the process exits with code 9.
-3. Because it is an environment variable, every child process inherits it, and that includes every `node` process that npm, your tests or your tools start (see the edge case below).
-4. On v24.19.0, `--max-old-space-size`, `--enable-source-maps`, `--require`, `--import`, `--inspect`, `--watch`, `--permission` and `--no-strip-types` were all on the allow-list.
-
-**Example — allowed and rejected flags.**
+**Example. Allowed and rejected flags.**
 
 bash
 
@@ -431,18 +427,17 @@ $ NODE_OPTIONS="--env-file=.env" node -p 1
 node: --env-file= is not allowed in NODE_OPTIONS
 ```
 
+
 ### `--max-old-space-size`
 
-V8 splits the JavaScript heap into a small **young generation** (new objects, collected often) and a large **old generation** (objects that survived a few collections). `--max-old-space-size=<MiB>` caps the old generation. When live data cannot fit under the cap even after a full mark-compact collection, V8 aborts the process with `FATAL ERROR: … JavaScript heap out of memory`. Set the cap to fit the memory the container really has: if V8's default is larger than the container limit, the kernel OOM-killer ends the process first, with SIGKILL and no message.
-
-How it works:
+V8 splits the heap into a small young generation and a large old generation. `--max-old-space-size=<MiB>` caps the old generation. If live data still does not fit after a full collection, V8 aborts with `FATAL ERROR` and "JavaScript heap out of memory." If the default limit is larger than the container, the kernel's OOM killer ends the process first, with SIGKILL and no message.
 
 1. Without the flag, V8 picks a default from the machine's memory. On this 15 GB machine, `heap_size_limit` was 2240 MiB.
-2. With the flag, `heap_size_limit` = your value + the young-generation size (192 MiB here: 512 → 704, 1024 → 1216).
-3. As the heap approaches the limit, V8 runs more and more full collections (the "Last few GCs" in the crash log), and then aborts.
-4. An abort is SIGABRT (signal 6), so the shell sees exit status 134 = 128 + 6.
+2. With the flag, the reported limit is your value plus the young generation, 192 MiB here. 512 became 704. 1024 became 1216.
+3. As the heap nears the limit, V8 runs more full collections, the "Last few GCs" in the crash log, then aborts.
+4. An abort is SIGABRT, signal 6, so the shell sees 134, which is 128 plus 6.
 
-**Example — read the limit, then hit it.**
+**Example. Read the limit, then hit it.**
 
 javascript
 
@@ -460,6 +455,7 @@ if (process.argv[2] === 'grow') {
   }, 0);
 }
 ```
+
 
 bash
 
@@ -489,20 +485,18 @@ $ echo $?
 134
 ```
 
-The fourth run shows the command-line flag (1024) winning over `NODE_OPTIONS` (512). Lesson 04's exit-code table explains the 134.
+The fourth run shows the command-line flag, 1024, winning over `NODE_OPTIONS`, 512. Lesson 4's exit-code line explains 134.
 
 ### Corepack
 
-**Corepack** is a small tool bundled with Node that downloads and runs the exact pnpm or Yarn version a project names in the `"packageManager"` field of its `package.json`. You do not install the package manager globally. In v24.19.0 it is still bundled (`corepack --version` → `0.35.0`), but it is marked **Stability 1 Experimental** (added v16.9.0 / v14.19.0), and the v24 docs say: "Corepack will no longer be distributed starting with Node.js v25". After v24, install it from npm (`npm install -g corepack`) if you still want it.
+Corepack downloads and runs the exact pnpm or Yarn version named in `"packageManager"`. You do not install that package manager globally. In v24.19.0 it is still bundled, `corepack --version` prints `0.35.0`, and it is marked experimental. The v24 docs say it will no longer be distributed starting with Node 25. After that, `npm install -g corepack` if you still want it.
 
-How it works:
+1. `package.json` says `"packageManager": "pnpm@10.34.6"`.
+2. `corepack pnpm`, or a shim from `corepack enable`, reads that field, downloads that exact version into `COREPACK_HOME` on first use, and runs it.
+3. Calling a different package manager in that project is refused, so lockfiles do not mix.
+4. `corepack enable` writes shims (`pnpm`, `pnpx`, `yarn`, `yarnpkg`) next to the `corepack` binary, or into `--install-directory`.
 
-1. `package.json` declares `"packageManager": "pnpm@10.34.6"`.
-2. `corepack pnpm …` (or a `pnpm` shim created by `corepack enable`) reads that field, downloads that exact version into its cache (`COREPACK_HOME`) on first use and runs it.
-3. Calling a *different* package manager inside that project is refused, which stops lockfiles from mixing.
-4. `corepack enable` writes shims (`pnpm`, `pnpx`, `yarn`, `yarnpkg`) next to the `corepack` binary (found the way `which corepack` would find it; in a standard install that is the folder holding `node`), or into the folder given with `--install-directory`.
-
-**Example — run in a throwaway `COREPACK_HOME` and shim folder, so the real environment is not changed.**
+**Example. A throwaway `COREPACK_HOME` and shim folder, so the real environment is not changed.**
 
 bash
 
@@ -532,18 +526,19 @@ $ PATH=$PWD/../shims:$PATH pnpm --version
 10.34.6
 ```
 
+
 ### Common mistakes & gotchas (additional topics)
 
-- **Switching `npm run` to `node --run` in a project with `pre`/`post` hooks.** The hooks stop running and nothing warns you. Check for `pre*`/`post*` scripts first.
+- **Switching `npm run` to `node --run` when you have `pre` and `post` hooks.** The hooks stop, and nothing warns you.
 - **Thinking `node app.ts` type-checks.** It only strips types. Keep `tsc --noEmit` in CI.
-- **Putting `--env-file` or `--test` in `NODE_OPTIONS`.** Both are rejected with exit code 9. Put them on the command line or in a `package.json` script.
-- **Setting `NODE_OPTIONS` globally** (a shell profile, a Dockerfile `ENV`) for one app. Every Node process inherits it, including npm and build tools.
-- **Setting `--max-old-space-size` larger than the container's memory limit.** The kernel OOM-killer then sends SIGKILL (exit 137) before V8 can report anything. Leave headroom for buffers, native memory and the young generation.
-- **Relying on the bundled Corepack in new setups.** It is experimental and no longer bundled from Node 25.
+- **Putting `--env-file` or `--test` in `NODE_OPTIONS`.** Both are rejected with exit 9. Put them on the command line or in a script.
+- **Setting `NODE_OPTIONS` in a shell profile or a Dockerfile `ENV` for one app.** Every Node process inherits it, including npm and build tools.
+- **Setting `--max-old-space-size` above the container limit.** The kernel then sends SIGKILL, exit 137, before V8 can print anything. Leave room for the young generation, buffers, and native memory.
+- **Relying on bundled Corepack in a new setup.** It is experimental, and it is not bundled from Node 25.
 
 ### Edge case worked through: `NODE_OPTIONS` reaches every child process, a CLI flag does not
 
-A flag on the command line applies to that one process. The same flag in `NODE_OPTIONS` is part of the environment, so every `node` started below it inherits it. That is useful for adding `--require ./tracing.js` to an app started by a framework CLI. It also means a memory cap meant for one server is applied to npm, the test runner and every worker those tools spawn.
+A flag on the command line applies to that one process. The same flag in `NODE_OPTIONS` is in the environment, so every `node` started below it inherits it. That is how you add `--require ./tracing.js` to an app a framework CLI starts. It also means a memory cap meant for one server lands on npm, the test runner, and every worker those tools spawn.
 
 javascript
 
@@ -554,6 +549,7 @@ const limit = "Math.round(require('node:v8').getHeapStatistics().heap_size_limit
 console.log('parent:', eval(limit), '| NODE_OPTIONS =', JSON.stringify(process.env.NODE_OPTIONS));
 console.log('child :', execFileSync(process.execPath, ['-p', limit]).toString().trim());
 ```
+
 
 bash
 
@@ -566,12 +562,12 @@ parent: 704 MiB | NODE_OPTIONS = "--max-old-space-size=512"
 child : 704 MiB
 ```
 
-With the CLI flag, the child got the default 2240 MiB. With `NODE_OPTIONS`, the child got the same 704 MiB cap as the parent. If you want a flag in one child only, pass `execArgv` to `fork()`, or give `spawn()` an `env` that drops or changes `NODE_OPTIONS`.
+With the CLI flag, the child got the default 2240 MiB. With `NODE_OPTIONS`, the child got the same 704 MiB cap as the parent. For one child only, pass `execArgv` to `fork()`, or give `spawn()` an `env` that drops or changes `NODE_OPTIONS`.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “Your Node service in a 1 GiB container is killed with exit code 137 and no stack trace. What is happening and what do you change?”**  
-> A: 137 is 128 + 9: the process got SIGKILL, here from the kernel OOM-killer because the container hit its memory limit. V8 never noticed, because its default heap limit is set from the machine's memory and can be larger than the container's limit. Set `--max-old-space-size` below the container limit (for example 700–768 MiB for 1 GiB, leaving room for the young generation, buffers and native memory). V8 then collects garbage harder and, if the data really does not fit, fails with a `FATAL ERROR` and exit 134 that you can see in the logs. *Trap:* raising the heap limit above the container limit.
+> 137 is 128 plus 9. The process received SIGKILL. Here that is the kernel OOM killer, because the container hit its memory limit. V8 never noticed. Its default heap limit comes from the machine's memory and can be larger than the container. Set `--max-old-space-size` below the limit, for example 700 to 768 MiB for 1 GiB, leaving room for the young generation, buffers, and native memory. If the data really does not fit, V8 then fails with `FATAL ERROR` and exit 134, which shows up in the logs. The trap is raising the heap limit above the container. That makes 137 more likely, not less.
 
 > **Q: “`node --run` or `npm run`?”**  
-> A: `node --run` starts much faster (about 10 ms versus about 140 ms in the run above), because it does not load npm. In return it has no `pre`/`post` hooks and no `npm_*` variables. Use it for scripts you run often in a dev loop, and keep `npm run` where hooks or npm variables matter.
+> `node --run` starts faster because it does not load npm. In the run in this lesson the gap was about tenfold, on the order of 10 ms versus about 140 ms, and the exact times move by machine. In return there are no `pre` or `post` hooks and no `npm_*` variables. Use `node --run` for a script you run constantly in a dev loop. Keep `npm run` where a hook or an npm variable is part of the script. The limit is switching a project over without reading the `scripts` block. A `prebuild` that used to run will silently stop.

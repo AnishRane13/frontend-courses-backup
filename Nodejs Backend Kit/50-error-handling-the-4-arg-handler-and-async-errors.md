@@ -13,33 +13,37 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Express treats a function with four parameters, error, request, response, and next, as an error handler. When a normal handler throws, or calls next with an error, Express skips the remaining normal functions and calls that four-parameter handler. It exists so every failure becomes one JSON shape instead of a stack trace or a hung request. The trade-off is that Express 4 only catches throws that happen while the handler is still on the stack. A promise that rejects later is not caught unless you forward it yourself, or you use Express 5, which does that for you.
+
 ## Why it matters
 
-How an app handles errors is what separates a demo from a production service. Errors are not exceptional — a database is momentarily down, a client sends malformed JSON, a record is missing, a token is expired — these happen constantly. If your Express app leaks stack traces to clients, hangs on a rejected promise, or returns HTML error pages from a JSON API, it will fail review and frustrate every consumer. Interviewers love error handling because it is subtle: Express has a *specific mechanism* (a special four-argument middleware), and Express 4's most notorious footgun — async errors silently not being caught — has burned nearly every Node developer at least once.
+A database blip, bad JSON, a missing record, and an expired token are normal traffic, not rare events. An app that leaks stack traces, hangs on a rejected promise, or returns an HTML error page from a JSON API fails review. Interviewers like this topic because Express has one specific mechanism, the four-argument middleware, and because Express 4's async gap has burned almost everyone once.
 
-This topic covers the whole error story: the special error-handling middleware and why it has four parameters, how errors *propagate* through the pipeline, the crucial difference between synchronous and asynchronous error handling (and how Express 5 fixes it), catching unmatched routes with a 404 handler, and centralising all of it into one place so every error in your app is formatted consistently. Get this right and your API becomes predictable under failure — which is most of what "production-ready" means.
+This lesson covers that four-argument handler, how an error moves through the pipeline, why sync and async errors differ, the 404 handler, and one central place that formats every error the same way.
 
 ## The concept, simply
 
-Express recognises one special kind of middleware: an **error-handling middleware has four parameters** — `(err, req, res, next)` — instead of three. That extra first parameter, `err`, is how Express identifies it. You do not call these functions directly; Express routes an error to them automatically. The rule is simple: whenever a normal middleware throws (synchronously) or calls `next(err)`, Express stops running normal middleware and looks for the next four-argument handler in the stack, then calls it with the error.
+An error-handling middleware has four parameters, `(err, req, res, next)`, instead of three. Express recognizes it by that extra first parameter. You do not call it yourself. Express routes an error to it. When normal middleware throws synchronously, or calls `next(err)`, Express stops the normal pipeline and calls the next four-argument handler with the error.
 
-To send an error into that system you have two moves. In synchronous code you can just `throw` — Express wraps route handlers in a try/catch and turns a thrown error into `next(err)` for you. In asynchronous code (a rejected promise, an error inside a callback) you must call `next(err)` yourself in Express 4, because Express 4's try/catch cannot catch an error that happens later, after the function has already returned. Express 5 closes this gap: it awaits async handlers and forwards rejections to `next(err)` automatically.
+In synchronous code you can `throw`. Express wraps the handler in try/catch and turns the throw into `next(err)`. In asynchronous code on Express 4, a rejected promise or an error inside a later callback is not caught by that try/catch, because the function has already returned. You call `next(err)` yourself. Express 5 awaits async handlers and forwards rejections for you.
 
 ![Diagram of middleware A then handler which throws with the normal middleware after it skipped and an arrow jumping straight to the four-argument error handler with a note that Express 4 does not catch async throws but Express 5 does](assets/i34_01_6ef3f077.svg)
 
-A thrown or forwarded error skips all remaining normal middleware and jumps straight to the four-argument error handler.
+A thrown or forwarded error skips the remaining normal middleware and jumps to the four-argument error handler.
 
-Two more pieces complete the picture. A **404 handler** is a normal middleware placed *after all routes* — if a request reaches it, nothing matched, so it responds with "Not Found". And a **centralized error handler** is a single four-argument middleware placed *last*, after everything, that catches every error the app produces and turns it into one consistent response shape (status + JSON message), logging the details server-side instead of leaking them to the client.
+Two more pieces finish the picture. A 404 handler is normal middleware placed after all routes. If a request reaches it, nothing matched, so it responds "Not Found" or forwards a 404 error. A centralized error handler is one four-argument middleware placed last. It turns every error into one response shape, a status plus a JSON message, and it logs details on the server instead of sending them to the client.
 
 ## How it works
 
-Express identifies error middleware purely by **arity — the function's parameter count**. A function declared with four parameters is an error handler; with three (or fewer) it is normal middleware. This has a sharp consequence: you must declare all four parameters, *including `next`*, even if you do not use it, or Express treats the function as normal middleware and never sends errors to it. Omitting the fourth parameter is a classic silent bug — the handler simply never fires.
+Express identifies error middleware by arity, the function's parameter count. Four parameters means an error handler. Three or fewer means normal middleware. You must declare all four, including `next`, even if you do not use `next`. Drop the fourth and Express treats the function as normal middleware. It never receives errors. That failure is silent.
 
-When an error enters the system (via `throw` in sync code or an explicit `next(err)`), Express advances its cursor past every remaining *normal* middleware and route — they are skipped entirely — and calls the next *error* middleware it finds. Inside that handler you can inspect the error, choose a status code, log it, and respond. If you call `next(err)` again from within an error handler, Express passes it to the *next* error handler down the stack; if there is none, it falls back to Express's built-in default error handler, which sends the status and, in development, the stack trace.
+When an error enters, from a sync `throw` or from `next(err)`, Express skips every remaining normal middleware and route, and calls the next error middleware. That handler picks a status, logs, and responds. If it calls `next(err)` again, Express passes the error to the next error handler. If there is none, Express's built-in default handler sends the status and, outside production, the stack.
 
-The synchronous-versus-asynchronous distinction is the heart of the topic. In Express 4, a route like `(req, res) => { throw new Error() }` is caught because Express wrapped the call in try/catch. But `async (req, res) => { await thatRejects() }` is *not* caught in Express 4: by the time the promise rejects, the synchronous part of the function has returned and the try/catch has already exited. The rejection becomes an unhandled promise rejection, and what happens next is decided by Node, not Express. By default (since Node 15, `--unhandled-rejections=throw`) an unhandled rejection is raised as an uncaught exception: the error is printed and **the whole process crashes with exit code 1**, dropping this request and every other in-flight request. The request only **hangs** — no response, no crash, the client eventually times out — when something swallows the rejection, such as a `process.on('unhandledRejection')` handler that only logs, an APM agent, or a non-default `--unhandled-rejections` mode. Neither outcome sends the client a proper error response. The fixes are: wrap async handlers in try/catch and call `next(err)`, use a small wrapper that attaches `.catch(next)` to the returned promise, or upgrade to Express 5 where this is handled for you.
+The sync versus async split is the heart of the lesson. Express 4 wraps the handler call in try/catch, so `(req, res) => { throw new Error() }` is caught. `async (req, res) => { await thatRejects() }` is not caught on Express 4. The async function returns a promise immediately, the try/catch has already finished, and the rejection happens later. The rejection becomes an unhandled promise rejection, and Node decides what happens, not Express. Since Node 15 the default is `--unhandled-rejections=throw`, so the process prints the error and crashes with exit code 1. That drops this request and every other in-flight request. The request only hangs, with no response and no crash, when something swallows the rejection: a `process.on('unhandledRejection')` handler that only logs, an APM agent, or a non-default `--unhandled-rejections` mode. Neither outcome sends the client a proper error. Fix it by try/catch plus `next(err)`, by a wrapper that attaches `.catch(next)` to the returned promise, or by Express 5, which forwards the rejection for you.
 
-The **default error handler** is always present at the very end of the stack, even if you write none. It sets the response status from `err.status`/`err.statusCode` (or 500), and in non-production it includes the stack. Because it runs last, your own centralized handler — placed after all routes but before Express's default takes over — is where you impose your own JSON shape and logging. Order still rules: the 404 middleware and the error handler are the last two things you register, in that order.
+The default error handler is always at the end of the stack, even if you write none. It sets the status from `err.status` or `err.statusCode`, or 500, and in non-production it includes the stack. Your own handler goes after all routes, and after the 404 middleware, so you can impose your JSON shape and your logging before that default runs.
 
 ## Code examples
 
@@ -149,57 +153,55 @@ app.use((err, req, res, next) => {
 
 ## Common mistakes & gotchas
 
-- **Writing an error handler with three parameters.** Express identifies error middleware by its four-parameter arity; drop `next` and it is treated as normal middleware and never receives errors. Declare all four even if unused.
-- **Relying on `throw` inside an async handler on Express 4.** The rejection is not caught and no response is sent. On default Node settings the process crashes (exit code 1); if an `unhandledRejection` handler or agent swallows the rejection, the request hangs instead. Use try/catch + `next(err)`, an `asyncHandler` wrapper, or Express 5.
-- **Placing the error handler before the routes.** It must be registered last, after all routes and the 404 handler, or the errors never reach it.
-- **Leaking internals to clients.** Returning `err.message` and stack traces for 500s exposes implementation details. Log them server-side; send a generic message for 5xx.
-- **Responding twice.** Handling an error and then also calling `next(err)`, or responding in both the handler and the error middleware → "headers already sent". Respond once.
-- **Forgetting a 404 handler.** Without one, unmatched routes fall to Express's default, which returns a bare HTML "Cannot GET /x" — jarring for a JSON API.
+- **An error handler with three parameters.** Express uses the parameter count. Drop `next` and the function never receives errors. Declare all four even if you do not use `next`.
+- **`throw` inside an async handler on Express 4.** The rejection is not caught and no response is sent. Default Node crashes the process with exit code 1. If something swallows unhandled rejections, the request hangs instead. Use try/catch and `next(err)`, an `asyncHandler` wrapper, or Express 5.
+- **Registering the error handler before the routes.** It must be last, after the routes and the 404 handler, or errors never reach it.
+- **Leaking internals.** Sending `err.message` and the stack for a 500 exposes implementation details. Log them on the server. Send a generic message for 5xx.
+- **Responding twice.** Handling the error and also calling `next(err)`, or responding in both the route and the error middleware, throws "headers already sent". Respond once.
+- **No 404 handler.** Unmatched routes fall through to Express's default, which returns HTML "Cannot GET /x". That is a poor body for a JSON API.
 
 ## Best practices
 
-- **Use one centralized error handler** at the end of the stack that maps errors to a consistent JSON shape and status, and logs 5xx server-side.
-- **Create a custom error class** (e.g. `AppError` with a `status`) so handlers can `throw new AppError('...', 404)` and the central handler reads the status.
-- **Wrap async handlers** with an `asyncHandler` helper (or use `express-async-errors`, or Express 5) so no rejection ever slips past.
-- **Register a 404 handler after all routes**, forwarding a 404 error into the same central handler for one uniform response shape.
-- **Distinguish operational from programmer errors** — expected failures (bad input, missing record) get clean 4xx responses; unexpected bugs get a logged 500 and a generic message.
-- **Never send stack traces in production;** gate verbose details behind `NODE_ENV !== 'production'`.
+- One error handler at the end of the stack. It maps errors to one JSON shape and logs 5xx on the server.
+- A small `AppError` class with a `status`, so a handler can `throw new AppError('...', 404)` and the central handler reads the status.
+- Wrap async handlers with an `asyncHandler`, or use `express-async-errors`, or run Express 5, so a rejection cannot skip the pipeline.
+- A 404 handler after all routes, forwarding a 404 into that same central handler.
+- Expected failures, such as bad input or a missing record, get a clean 4xx. Unexpected bugs get a logged 500 and a generic message.
+- Do not send stack traces in production. Gate verbose detail on `NODE_ENV !== 'production'`.
 
 ## ⭐ Interview lens
 
 > **Q: "How does Express know a middleware is an error handler?"**  
-> A: By its arity — it has four parameters, `(err, req, res, next)`, instead of three. Express inspects the function's parameter count. If you write only three, it is treated as normal middleware and never receives errors, even if you name the first parameter `err`.
+> A: Express looks at the function's parameter count, not at the parameter names. A function declared as `(err, req, res, next)` is an error handler. A function with three parameters or fewer is normal middleware. You do not register it with a special method. You `app.use` it like anything else, and Express routes errors to it because it has four parameters. For example, `app.use((err, req, res, next) => res.status(err.status || 500).json({ error: err.message }))` catches a `next(err)` from a route above it. The limit is silent. If you omit `next` and write only `(err, req, res)`, Express treats it as normal middleware and never passes it an error, even though the first parameter is named `err`.
 
 > **Q: "Why doesn't Express 4 catch errors thrown in an async route handler?"**  
-> A: Express 4 wraps handler calls in a synchronous try/catch. An async function returns a promise immediately, so by the time the promise rejects the try/catch has already exited — the rejection escapes as an unhandled rejection and no response is sent (on default Node settings that crashes the process; if something swallows it, the request hangs). You must call `next(err)` yourself, or use a wrapper, or Express 5 which awaits and forwards rejections automatically.
-
-> **Q: "How do you handle async errors cleanly across many routes?"**  
-> A: A tiny wrapper: `const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req,res,next)).catch(next);`. Wrap each async handler with it so any rejection is forwarded to the error middleware. Alternatives are the `express-async-errors` package or upgrading to Express 5.
+> A: Express 4 wraps the call to your handler in a synchronous try/catch. An async function returns a promise immediately and does the `await` later. By the time that promise rejects, the try/catch has already exited, so the rejection is an unhandled rejection and no response is written. Since Node 15 the default `--unhandled-rejections=throw` prints the error and crashes the process with exit code 1. The request hangs with no log only when something swallows the rejection, such as a log-only `unhandledRejection` listener. You fix the route by calling `next(err)` from a catch, or with a wrapper that does `.catch(next)`. Express 5 awaits the handler and forwards the rejection itself, so the same async route reaches the error middleware.
 
 > **Q: "Where do the 404 handler and the error handler go?"**  
-> A: Both go last. The 404 handler is normal middleware after all routes — if a request reaches it, nothing matched. The error handler (four params) goes after that, dead last, so it catches everything, including the 404 you forward into it.
+> A: Both go last, in this order. Routes first. Then a normal middleware 404 handler. If a request reaches it, no route responded, so it sends 404 or calls `next` with a 404 error. Then the four-parameter error handler, dead last, so it can format that 404 and every other error the same way. Express also has a built-in handler after yours. It uses `err.status` or `err.statusCode`, otherwise 500, and outside production it includes the stack. Put yours before that default takes over. The limit of putting the error handler above the routes is that it never sees them. Express only walks forward.
 
 > **Q: "What does `next(err)` do differently from `next()`?"**  
-> A: `next()` continues to the next normal middleware. `next(err)` — any argument makes it an error — causes Express to skip all remaining normal middleware and route handlers and jump straight to the next four-argument error handler.
-
-> **Q (trap): "Your async route occasionally hangs with no response and no error logged. Cause?"**  
-> A: Classic Express 4 async-error leak: an `await` rejected, nothing caught it, so `next(err)` was never called and no response was sent. On modern Node that would normally crash the process (an unhandled rejection is fatal by default since Node 15), so "hangs with no error logged" also tells you something is swallowing unhandled rejections — a log-only `process.on('unhandledRejection')` handler, an agent, or a non-default `--unhandled-rejections` mode. Fix the route (try/catch or asyncHandler, or move to Express 5) and remove the swallowing handler.
+> A: `next()` with no argument continues to the next normal middleware. `next(err)`, meaning `next` called with any argument, marks an error. Express skips every remaining normal middleware and route and jumps to the next four-argument error handler. A route that catches a database failure calls `next(err)` instead of sending its own one-off JSON, so the central handler picks the status and the shape. The limit is what you pass. The string `'route'` is reserved and means "try the next matching route", not "this failed". Any other value, including a string that is not exactly `'route'`, is treated as the error.
 
 ## Cheat-card
 
-- Error handler = **four params** `(err, req, res, next)`. Fewer = normal middleware.
-- Sync `throw` is caught automatically (Express 4 & 5).
-- Async rejection is **NOT** caught in Express 4 → process crashes by default (Node 15+), or the request hangs if the rejection is swallowed. Use `next(err)`, an `asyncHandler`, or Express 5.
-- `asyncHandler`: `fn => (req,res,next) => Promise.resolve(fn(req,res,next)).catch(next)`.
-- `next(err)` skips all normal middleware → jumps to error handler.
-- Order: routes → **404 handler** → **error handler** (both last).
-- Centralize: one handler, consistent JSON shape, log 5xx, no stack traces in prod.
-- Custom `AppError` with a `status` field → central handler reads it.
-- **`res.headersSent` is true** (streaming started) → don't respond. Call `next(err)`, and the default handler destroys the socket (curl exit 18).
-- **Router-level error handler** (`router.use((err, …) => …)`): sees only errors raised inside that router. `next(err)` passes the error up to the app's handler.
-- **Default handler:** status from `err.status` → `err.statusCode` (400–599 only) → an error status already on `res` → 500. Copies `err.headers`. Body is `err.stack` unless `env === 'production'`. `err.expose` is ignored. No log when `env === 'test'`.
+- An error handler has four parameters: `(err, req, res, next)`. Fewer than four means normal middleware.
+- A synchronous `throw` is caught on Express 4 and Express 5.
+- An async rejection is not caught on Express 4. Default Node, since Node 15, crashes the process with exit code 1. The request hangs only if something swallows the rejection. Use `next(err)`, an `asyncHandler`, or Express 5.
+- `asyncHandler` is `fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)`.
+- `next(err)` skips normal middleware and jumps to the error handler.
+- Order: routes, then the 404 handler, then the error handler. Both of those are last.
+- One handler, one JSON shape, log 5xx, no stack traces in production.
+- A custom `AppError` carries `status`. The central handler reads it.
+- If `res.headersSent` is already true, do not write another response. Call `next(err)`. The default handler then destroys the socket. curl reports exit 18.
+- A router-level error handler, `router.use((err, req, res, next) => ...)`, sees only errors raised inside that router. `next(err)` passes the error up to the app handler.
+- The default handler picks a status from `err.status`, then `err.statusCode`, but only if the number is from 400 to 599, then an error status already on `res`, then 500. It copies `err.headers`. The body is `err.stack` unless `env` is `'production'`. `err.expose` is ignored. It does not log when `env` is `'test'`.
 
----
+## Good to know
+
+- Handle async errors across many routes with `const asyncHandler = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)`, or with the `express-async-errors` package, or by upgrading to Express 5 where the wrapper is unnecessary.
+- An async route that sometimes hangs with no response and no log is the Express 4 leak plus something swallowing the rejection. On default Node since Node 15 the unhandled rejection crashes the process with exit code 1. A hang means a log-only `unhandledRejection` handler, an agent, or a non-default `--unhandled-rejections` mode. Fix the route and remove the swallower.
+- Earlier versions of this topic said an unhandled rejection only hangs. That was Node 14 and earlier, which warned and kept running. Since Node 15 the default is to throw.
 
 ## Learn More
 

@@ -13,30 +13,30 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A cookie is a name and a value the server asks the browser to store and send back on later requests. Express writes that with `res.cookie`, which adds one Set-Cookie header, and `res.clearCookie` asks the browser to drop it. The cookie-parser package reads the Cookie header into `req.cookies`, and into `req.signedCookies` when you give it a secret. You use this for preferences, a "remember this device" token, or a short-lived step in a flow. The trade-off is that the browser only deletes a cookie when the name, the domain, and the path all match, and a signed cookie can still be read by the client. Signing detects edits. It does not hide the value.
+
 ## Why it matters
 
-Lesson [50 — Sessions & Cookies](84-sessions-cookies.md) explains what the cookie flags defend against and how `express-session` keeps state on the server. This lesson covers the layer under it: the Express API that writes `Set-Cookie` headers (`res.cookie`, `res.clearCookie`) and the `cookie-parser` middleware that reads the `Cookie` header back. You use them directly for preference cookies, "remember this device" tokens, CSRF double-submit tokens, A/B test buckets and short-lived flow state. `express-session` also produces its cookie through the same machinery.
+Lesson 84 explains what the cookie flags defend against, and how `express-session` keeps state on the server. This lesson is the layer under that. Express writes `Set-Cookie` with `res.cookie` and `res.clearCookie`. The `cookie-parser` middleware reads the `Cookie` header back. You use them directly for preference cookies, "remember this device" tokens, CSRF double-submit tokens, A/B buckets, and short-lived flow state. `express-session` builds its cookie with the same machinery.
 
-These bugs show up when the API is used without knowing the details:
+The bugs show up when the details are skipped.
 
-- **Logout that doesn't log out.** `res.clearCookie('token')` sends `Path=/`. If the cookie was set with `Path=/admin`, the browser keeps it (Example 5).
-- **An Express 4 "clear" that sets a 24-hour cookie.** Reusing the original options object, with its `maxAge`, in `clearCookie` sends an empty cookie with `Max-Age=86400` on Express 4. Express 5 ignores `maxAge` and `expires` in `clearCookie` (Example 6).
-- **Trusting a cookie the user edited.** Plain cookies are just text the client sends. Signed cookies detect edits, but only if you read `req.signedCookies` and treat `false` as "tampered" (Example 2).
-- **Rotating the signing secret logs everybody out**, unless you know that cookie-parser signs with the first secret and verifies with all of them (Example 4).
+- **Logout that does not log out.** `res.clearCookie('token')` sends `Path=/`. If the cookie was set with `Path=/admin`, the browser keeps it. Example 5 shows it.
+- **An Express 4 "clear" that sets a 24-hour cookie.** Reusing the original options, including `maxAge`, makes `clearCookie` send an empty cookie with `Max-Age=86400` on Express 4. Express 5 ignores `maxAge` and `expires` in `clearCookie`. Example 6 shows it.
+- **Trusting a cookie the user edited.** A plain cookie is text the client sends. A signed cookie detects edits, but only if you read `req.signedCookies` and treat `false` as tampered. Example 2 shows it.
+- **Rotating the signing secret logs everybody out**, unless you know cookie-parser signs with the first secret and verifies with all of them. Example 4 shows it.
 
 ## The concept, simply
 
-A **cookie** is a name=value pair that a server asks the client to store and send back. The server sends one `Set-Cookie` response header per cookie, made of the pair followed by **attributes** (`Path`, `Domain`, `Expires`, `Max-Age`, `HttpOnly`, `Secure`, `SameSite`, `Partitioned`, `Priority`). The client keeps a **cookie jar**. On each later request it picks the cookies whose domain, path, `Secure` and `SameSite` rules match that request and sends them all in a single `Cookie` request header, as `name=value` pairs only. The attributes never come back to the server.
+A cookie is a name=value pair the server asks the client to store and send back. The server sends one `Set-Cookie` response header per cookie: the pair, then attributes such as `Path`, `Domain`, `Expires`, `Max-Age`, `HttpOnly`, `Secure`, `SameSite`, `Partitioned`, and `Priority`. The client keeps a cookie jar. On a later request it sends the cookies whose domain, path, `Secure`, and `SameSite` rules match, all in one `Cookie` header, as name=value pairs only. The attributes never come back.
 
-In Express:
+In Express, `res.cookie(name, value, options)` builds one `Set-Cookie` line and appends it. It is built in. It calls the `cookie` package's `serialize`. The version here is cookie 0.7.2. `res.clearCookie(name, options)` sends the same name with an empty value and `Expires` set to `Thu, 01 Jan 1970 00:00:00 GMT`. The client deletes a cookie only when the new line matches the stored name, domain, and path. `cookie-parser`, version 1.4.7 here, parses the `Cookie` header into `req.cookies`. With a secret it also verifies signed cookies and moves them to `req.signedCookies`. Express itself has no `req.cookies`. Example 1 shows that.
 
-- **`res.cookie(name, value, options)`** builds one `Set-Cookie` line and appends it to the response. It is built into Express (it calls the `cookie` package's `serialize`; `cookie` 0.7.2 here).
-- **`res.clearCookie(name, options)`** sends the same name with an empty value and `Expires=Thu, 01 Jan 1970 00:00:00 GMT`. A client deletes a cookie only when the new line matches the stored cookie's name, domain and path.
-- **`cookie-parser`** (a separate package, 1.4.7 here) parses the `Cookie` header into `req.cookies`. With a secret, it also verifies **signed cookies** and moves them into `req.signedCookies`. Express itself has no `req.cookies` (Example 1).
+A signed cookie is the prefix `s:`, the value, a dot, and an HMAC-SHA256 of the value keyed by your secret. The HMAC is base64 with the `=` padding removed. That is the `cookie-signature` package. The client can still read the value. It is not encrypted. The client cannot change it without the secret. If the client must not see the value, keep it on the server in a session.
 
-A **signed cookie** is `s:` + value + `.` + an HMAC-SHA256 of the value keyed by your secret, base64-encoded with the `=` padding removed (the `cookie-signature` package). The client can still read the value, since it is not encrypted, but cannot change it without the secret. If you need the client not to see the value, keep it on the server (a session) instead.
-
-The full cycle, as text (no SVG in the kit shows it; `i47_01` is about server-side session lookup):
+The cycle looks like this. No SVG in the kit shows it. `i47_01` is about server-side session lookup.
 
 text
 
@@ -64,24 +64,24 @@ text
 
 ## How it works
 
-What `res.cookie('uid', '42', { signed: true, maxAge: 60_000 })` does in Express 5.3.0 (`lib/response.js`):
+What `res.cookie('uid', '42', { signed: true, maxAge: 60000 })` does in Express 5.3.0, in `lib/response.js`:
 
-1. **Copy the options** so your object is not modified.
-2. **Check for a secret.** With `signed: true` and no `req.secret` (set by `cookieParser(secret)`), it throws `cookieParser("secret") required for signed cookies`.
-3. **Turn the value into a string.** An object becomes `'j:' + JSON.stringify(value)`; anything else goes through `String()`.
-4. **Sign it.** With `signed`, the value becomes `'s:' + sign(value, req.secret)`, which is `s:42.<base64 HMAC-SHA256>`.
-5. **Convert `maxAge`.** Express takes milliseconds, sets `expires = now + maxAge` and `maxAge = Math.floor(maxAge / 1000)`, so both `Max-Age` (seconds) and `Expires` are sent.
-6. **Default the path** to `/` when you gave none.
-7. **Serialize and append.** `cookie.serialize(name, value, opts)` encodes the value with `encode` (default `encodeURIComponent`), checks that the result contains only legal cookie characters, and adds the attributes. `res.append('Set-Cookie', …)` adds a new header line, so several `res.cookie` calls give several lines.
+1. Copy the options so your object is not modified.
+2. With `signed: true` and no `req.secret`, which `cookieParser(secret)` sets, throw `cookieParser("secret") required for signed cookies`.
+3. Turn the value into a string. An object becomes `'j:'` plus `JSON.stringify`. Anything else goes through `String()`.
+4. If `signed`, the value becomes `'s:'` plus `sign(value, req.secret)`, which looks like `s:42.<base64 HMAC-SHA256>`.
+5. Convert `maxAge`. Express takes milliseconds, sets `expires` to now plus that many milliseconds, and sets `maxAge` to `Math.floor(maxAge / 1000)`, so both `Max-Age` in seconds and `Expires` are sent.
+6. Default the path to `/` when you gave none.
+7. `cookie.serialize` encodes the value with `encodeURIComponent` unless you pass `encode`. The result must be legal cookie characters, or serialize throws `argument val is invalid`. `res.append('Set-Cookie', ...)` adds a new header line, so several `res.cookie` calls give several lines.
 
-What `cookieParser(secret)` does on each request (`cookie-parser/index.js`):
+What `cookieParser(secret)` does on each request:
 
-1. **Normalise the secrets.** A string becomes a one-element array; an array is used as is. `req.secret = secrets[0]`, which is the secret `res.cookie` will sign with.
-2. **Parse the header.** `cookie.parse(req.headers.cookie)` splits on `;` and `=` and URL-decodes each value. If the same name appears twice, the first one is kept.
-3. **Separate signed cookies.** Each value that starts with `s:` is checked against every secret in order. The first match gives the original value; no match gives `false`. Signed cookies are **removed** from `req.cookies` and put in `req.signedCookies`.
-4. **Decode JSON cookies.** Values that start with `j:` are `JSON.parse`d, in both objects. A `j:` value that is not valid JSON is left as the raw string.
+1. A string secret becomes a one-element array. An array is used as given. `req.secret` is `secrets[0]`, and that is what `res.cookie` signs with.
+2. `cookie.parse` splits the header on `;` and `=` and URL-decodes each value. If the same name appears twice, the first one is kept.
+3. Each value that starts with `s:` is checked against every secret, in order. The first match gives the original value. No match gives `false`. Signed cookies are removed from `req.cookies` and put in `req.signedCookies`.
+4. Values that start with `j:` are `JSON.parse`d, in both objects. A `j:` value that is not valid JSON is left as the raw string.
 
-**Every `res.cookie` option.** This is the list in the Express 5 response API (https://expressjs.com/en/5x/api/response; the old `api.html#res.cookie` address now opens an index page), checked against what `cookie` 0.7.2 serializes. Example 3 shows the real header for each.
+**Every `res.cookie` option.** This is the Express 5 response API list, checked against what cookie 0.7.2 serializes. Example 3 prints the real header for each.
 
 | Option | Type | Header produced | Notes |
 | --- | --- | --- | --- |
@@ -97,11 +97,11 @@ What `cookieParser(secret)` does on each request (`cookie-parser/index.js`):
 | `signed` | Boolean | value becomes `s:…` | Needs `cookieParser(secret)`. Read it from `req.signedCookies`. |
 | `sameSite` | Boolean or String | `SameSite=Strict/Lax/None` | `true` → `Strict`, `false` → attribute not sent, `'lax'`, `'strict'`, `'none'`. MDN: `None` also needs `Secure`. |
 
-**Clearing a cookie.** A client identifies a stored cookie by name, domain and path (RFC 6265 §5.3, step 11). `res.clearCookie(name, options)` sets `{ path: '/', ...options, expires: new Date(1) }` and deletes `maxAge` before calling `res.cookie`. To delete a cookie you must therefore pass the same `path` and `domain` it was set with. `httpOnly`, `secure` and `sameSite` don't identify the cookie, but passing the same options object (minus lifetime) is the simplest habit. In Express 4.22.3, `clearCookie` merged your options on top of `{ expires: new Date(1), path: '/' }`, so your `maxAge` or `expires` won, and Express printed a deprecation warning. Express 5 forces the 1970 date and drops `maxAge` (changed in v5.0.0; listed in the migration guide).
+**Clearing.** The client identifies a stored cookie by name, domain, and path. `res.clearCookie` sets path `/` unless you override it, forces `expires` to a date of 1 millisecond, deletes `maxAge`, and calls `res.cookie`. To delete a cookie you must pass the same `path` and `domain` it was set with. `httpOnly`, `secure`, and `sameSite` do not identify the cookie, but passing the same options minus the lifetime is the safe habit. On Express 4.22.3, `clearCookie` merged your options on top of the expired date, so your `maxAge` or `expires` won, and Express printed a deprecation warning. Express 5 forces the 1970 date and drops `maxAge`. That changed in v5.0.0.
 
-**Secret rotation.** `cookieParser(['new', 'old'])` signs new cookies with `'new'` (`req.secret = secrets[0]`) and accepts cookies signed with either. To rotate: put the new secret first and keep the old one second for as long as old cookies can live (their longest `maxAge`), then remove it. Putting the new secret *second* keeps signing with the old one, which defeats the rotation (Example 4).
+**Secret rotation.** `cookieParser(['new', 'old'])` signs new cookies with `'new'`, because `req.secret` is `secrets[0]`, and accepts cookies signed with either. Put the new secret first and keep the old one for as long as old cookies can live, their longest `maxAge`, then remove it. Putting the new secret second keeps signing with the old one. Example 4 shows that.
 
-**How this relates to sessions.** `express-session` writes its cookie (`connect.sid` by default) with the same `cookie` serializer and the same `s:` + HMAC signing. It holds only the session id, and the data stays in the store. Since express-session 1.5.0 it parses cookies itself, so it does not need cookie-parser. If you use both, the express-session README says to give them the same secret. Lesson [50](84-sessions-cookies.md) covers stores, fixation and logout; Example 7 shows the cookie it sends.
+**Sessions.** `express-session` writes its cookie, `connect.sid` by default, with the same serializer and the same `s:` plus HMAC. The cookie holds only the session id. The data stays in the store. Since express-session 1.5.0 it parses cookies itself, so it does not need cookie-parser. If you use both, give them the same secret. Lesson 84 covers stores, fixation, and logout. Example 7 shows the cookie it sends.
 
 ## Code examples
 
@@ -434,55 +434,59 @@ cookie-parser, given the same secret, unsigned `connect.sid` into exactly `req.s
 
 ## Common mistakes & gotchas
 
-- **Reading `req.cookies` with no parser.** Express has no `req.cookies`; it is `undefined` until `cookie-parser` runs (Example 1).
-- **Reading a signed cookie from `req.cookies`.** Signed cookies are moved to `req.signedCookies`. A same-named cookie in `req.cookies` is an unsigned one the client made up (Example 2).
-- **Treating `false` like "missing".** `req.signedCookies.x === false` means the signature did not match. Log it if you want to spot tampering.
+- **Reading `req.cookies` with no parser.** Express has no `req.cookies`. It is `undefined` until cookie-parser runs. Example 1 shows it.
+- **Reading a signed cookie from `req.cookies`.** Signed cookies move to `req.signedCookies`. A same-named value still in `req.cookies` is an unsigned cookie the client made up. Example 2 shows it.
+- **Treating `false` like "missing".** `req.signedCookies.x === false` means the signature did not match.
 - **Expecting signing to hide the value.** `s:42.<hmac>` shows `42` to anyone who looks. Signing only detects changes.
-- **Clearing with a different `path` or `domain`.** The client keeps the original (Example 5). The response still says 200, so nothing tells you it failed.
-- **Passing `maxAge`/`expires` to `clearCookie` on Express 4.** The "cleared" cookie lives on (Example 6). Express 5 ignores them.
-- **A custom `encode` that produces illegal characters.** `serialize` throws `argument val is invalid` and the response becomes an error (Example 3).
-- **Rotating secrets in the wrong order.** `[old, new]` keeps signing with the old secret (Example 4). Removing the old secret too early turns every existing signed cookie into `false`.
-- **`sameSite: 'none'` or `partitioned` without `secure`.** Express sends what you ask for, but MDN documents that both require `Secure`.
-- **Assuming `maxAge` is seconds.** `res.cookie` takes milliseconds and writes seconds. `maxAge: 3600` is 3.6 seconds (`Max-Age=3`).
-- **Trusting the Express docs' note that object cookies are "parsed by bodyParser()".** It is cookie-parser that decodes `j:` values (`JSONCookies`), not a body parser.
+- **Clearing with a different `path` or `domain`.** The client keeps the original. Example 5 shows it. The response can still be 200.
+- **Passing `maxAge` or `expires` to `clearCookie` on Express 4.** The cleared cookie lives on. Example 6 shows a 24-hour empty cookie, `Max-Age=86400`. Express 5 ignores those two options.
+- **A custom `encode` that produces illegal characters.** `serialize` throws `argument val is invalid`, and the response becomes an error. Example 3 shows a space.
+- **Rotating secrets in the wrong order.** `['old', 'new']` keeps signing with the old secret. Removing the old secret too early turns every existing signed cookie into `false`.
+- **`sameSite: 'none'` or `partitioned` without `secure`.** Express sends what you ask. Both are documented to require `Secure`.
+- **Assuming `maxAge` is seconds.** `res.cookie` takes milliseconds and writes seconds. `maxAge: 3600` is 3.6 seconds, so `Max-Age=3`.
+- **Trusting a docs note that object cookies are parsed by bodyParser.** cookie-parser decodes `j:` values. A body parser does not.
 
 ## Best practices
 
-- **Mount `cookieParser(secrets)` once, early,** and read cookies only after it.
-- **Sign any cookie whose value you act on** (user id, plan, role, bucket). Better still, keep the value on the server and put only a random id in the cookie (a session).
-- **Use `HttpOnly`, `Secure` and an explicit `SameSite`** on anything security-relevant. Lesson [50](84-sessions-cookies.md) explains why each one matters.
-- **Keep one options object per cookie** and pass it, minus `maxAge`/`expires`, to `clearCookie`. Then path and domain always match.
-- **Leave `domain` unset** unless subdomains really need the cookie. Host-only is the narrower scope.
-- **Rotate secrets as `[new, old]`,** keep `old` for the longest cookie lifetime, then drop it. Load them from configuration, not source code.
-- **Keep cookies small.** Every matching request carries every matching cookie in its `Cookie` header.
-- **Test with a real cookie jar** (`curl -c/-b`, or supertest's `agent()`), not just by reading `Set-Cookie`. That is the only way to catch path and domain mistakes.
+- Mount `cookieParser(secrets)` once, early, and read cookies only after it.
+- Sign any cookie whose value you act on, such as a user id, a plan, or a role. Better, keep the value on the server and put only a random id in the cookie.
+- Use `HttpOnly`, `Secure`, and an explicit `SameSite` on anything that matters for security. Lesson 84 explains each flag.
+- Keep one options object per cookie, and pass it to `clearCookie` without `maxAge` and `expires`, so path and domain match.
+- Leave `domain` unset unless subdomains really need the cookie. Host-only is the narrower scope.
+- Rotate secrets as `['new', 'old']`. Keep `old` for the longest cookie lifetime, then drop it. Load the secrets from configuration, not from source.
+- Keep cookies small. Every matching request carries every matching cookie.
+- Test with a real cookie jar, `curl -c` and `-b`, or supertest's `agent()`. Reading `Set-Cookie` alone misses a path or domain mistake.
 
 ## ⭐ Interview lens
 
 > **Q: “What does `res.cookie('uid', '42', { signed: true, maxAge: 60000 })` actually send?”**  
-> A: One `Set-Cookie` header line: `uid=s%3A42.<HMAC-SHA256 base64>; Max-Age=60; Path=/; Expires=<now + 60 s>`. Express converts `maxAge` from milliseconds to seconds, sends both `Max-Age` and `Expires`, defaults `Path` to `/`, and signs with `req.secret`, the first secret given to cookie-parser. The value is URL-encoded, so `s:` appears as `s%3A`. *Trap:* without `cookieParser(secret)` it throws.
+> A: It sends one `Set-Cookie` line. The value is signed and then URL-encoded, so it looks like `uid=s%3A42.<HMAC-SHA256 in base64>; Max-Age=60; Path=/; Expires=<now plus 60 seconds>`. Express copies your options, requires `req.secret` from `cookieParser(secret)`, turns the value into `s:` plus the value plus a dot plus the HMAC, converts `maxAge` from milliseconds to seconds, and also sends `Expires` at now plus that delay. Path defaults to `/` when you omit it. The HMAC is base64 with the padding `=` removed, from the cookie-signature package. The trap is a missing parser. `signed: true` with no `req.secret` throws `cookieParser("secret") required for signed cookies`. Signing does not encrypt. Anyone who looks can read `42`.
 
 > **Q: “A user edits their signed cookie. What does your route see?”**  
-> A: cookie-parser checks the HMAC against each secret. None match, so `req.signedCookies.uid` is `false`, and the cookie is removed from `req.cookies`. If the user removes the `s:` prefix entirely, it is a plain cookie and shows up in `req.cookies.uid`. That is why you read only `req.signedCookies` for signed values. *Trap:* signing is not encryption; the value is readable.
+> A: cookie-parser checks the HMAC against each secret you gave it. If none match, `req.signedCookies.uid` is `false`, not `undefined`, and the cookie is removed from `req.cookies`. `false` means tampered. A missing cookie is just absent. If the user strips the `s:` prefix entirely, it is no longer a signed cookie. It shows up as a plain value in `req.cookies.uid`. That is why code that does `req.cookies.uid ?? req.signedCookies.uid` accepts a forged `1`. Read only `req.signedCookies` for a value you signed. The limit of signing is that it is not encryption. The value sits in the cookie in the clear, and the signature only detects a change.
 
 > **Q: “Logout calls `res.clearCookie('token')` but the user stays logged in. Why?”**  
-> A: The client identifies a cookie by name, domain and path. If `token` was set with `path: '/admin'` or a `domain`, a clear with the default `Path=/` and no `Domain` targets a different cookie, so the original survives. Pass the same `path` and `domain`. On Express 4 there is a second cause: passing the original `maxAge` makes the clear set a cookie that lives on. Express 5 ignores `maxAge` and `expires` there.
+> A: The browser identifies a stored cookie by name, domain, and path. `res.clearCookie('token')` with no options sends an empty value, `Path=/`, and `Expires` in 1970. If `token` was set with `path: '/admin'` or a `domain`, that clear targets a different cookie, the original stays, and your handler can still return 200. Pass the same `path` and `domain`. On Express 4 there is a second cause. `clearCookie` merged your options on top of the expired date, so passing the original `maxAge` set an empty cookie that lives on. Example 6 shows `Max-Age=86400`, a day, from a 24-hour `maxAge`. Express 5 ignores `maxAge` and `expires` inside `clearCookie` and forces the 1970 date.
 
 > **Q: “How do you rotate the cookie-signing secret without logging everyone out?”**  
-> A: Use `cookieParser(['new', 'old'])`. The first secret signs and all of them are tried for verification, so old cookies keep working while new ones get the new signature. Remove `'old'` after the longest cookie lifetime has passed. Order matters: `['old', 'new']` keeps signing with the old secret.
+> A: Pass an array to cookie-parser, new secret first: `cookieParser(['new', 'old'])`. `req.secret` is the first secret, and that is what `res.cookie` signs with. Verification tries every secret in order, so a cookie signed with `old` still parses while new cookies get the new signature. Keep `old` until the longest `maxAge` you issued has passed, then remove it. Order matters. `['old', 'new']` keeps signing with the old secret, so you never rotate. Do not log `req.secret` or pass it to a template. Removing the old secret too early turns every existing signed cookie into `false`, which looks like tampering and logs people out.
 
 ## Cheat-card
 
-- **Write:** `res.cookie(name, value, opts)` → one `Set-Cookie` line; objects become `j:` + JSON; `signed` → `s:` + value + `.` + HMAC-SHA256 (base64, no `=`).
-- **Options (Express 5 docs):** `domain`, `encode`, `expires`, `httpOnly`, `maxAge` (ms → `Max-Age` s + `Expires`), `path` (default `/`), `partitioned`, `priority`, `secure`, `signed`, `sameSite` (`true` = Strict).
-- **Read:** `cookie-parser` 1.4.7 → `req.cookies` (plain + `j:` decoded) and `req.signedCookies` (verified; `false` = bad signature). No parser → no `req.cookies`.
-- **Secrets:** `cookieParser([new, old])`: `secrets[0]` signs (`req.secret`), all verify, in order.
-- **Clear:** `res.clearCookie(name, { path, domain })` must match name + domain + path. Express 5 ignores `maxAge`/`expires` there (changed in v5.0.0); Express 4 honoured them.
-- **Host-only:** no `domain` → no `Domain` attribute → exact host only.
-- **Illegal value:** custom `encode` producing a space → `argument val is invalid`.
-- **Sessions:** express-session's `connect.sid` is the same signed-cookie format with only an id; see lesson 84.
+- `res.cookie(name, value, opts)` writes one `Set-Cookie` line. An object becomes `j:` plus JSON. `signed` becomes `s:` plus the value plus a dot plus HMAC-SHA256, base64, with no `=`.
+- Options: `domain`, `encode`, `expires`, `httpOnly`, `maxAge` in milliseconds which becomes `Max-Age` in seconds plus `Expires`, `path` default `/`, `partitioned`, `priority`, `secure`, `signed`, and `sameSite` where `true` means Strict.
+- cookie-parser 1.4.7 fills `req.cookies` for plain values, with `j:` decoded, and `req.signedCookies` for verified ones. `false` means a bad signature. No parser means no `req.cookies`.
+- `cookieParser([new, old])`: the first secret signs, and every secret verifies, in order.
+- `res.clearCookie(name, { path, domain })` must match name, domain, and path. Express 5 ignores `maxAge` and `expires` there, changed in v5.0.0. Express 4 honored them.
+- No `domain` attribute means host-only, the exact host.
+- A custom `encode` that produces a space throws `argument val is invalid`.
+- express-session's `connect.sid` is the same signed-cookie format and holds only an id. Lesson 84 covers the store.
 
----
+## Good to know
+
+- `priority` sends `Priority=Low`, `Medium`, or `High`, from an expired IETF draft, draft-west-cookie-priority-00. Clients may ignore it.
+- `partitioned` sends `Partitioned`, for CHIPS, a cookie stored separately per top-level site. It is documented to require `Secure`, and so is `SameSite=None`.
+- cookie 0.7.2 serializes. cookie-parser 1.4.7 parses. express-session has parsed its own cookie since 1.5.0 and does not need cookie-parser, but if you use both, use the same secret.
 
 ## Learn More
 

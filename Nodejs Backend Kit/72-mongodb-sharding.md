@@ -13,25 +13,29 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Sharding splits one MongoDB collection across several replica sets, called shards, by a field you choose, the shard key. Your app still talks to one router, mongos, which sends each query to the shards that could hold a match and merges the replies. You do it when the data or the writes no longer fit on one primary. The trade-off is the key: a key that only grows puts every new write on one shard, and a query that does not include the key has to ask every shard.
+
 ## Why it matters
 
-A replica set copies the same data to every member. It protects you from losing a server, but every member still holds all the data and the primary takes every write. When the data no longer fits on one machine's disks or in its RAM, or one primary cannot keep up with the writes, a bigger machine is the only option left inside a replica set.
+A replica set copies the same data to every member. It protects you from losing a server. Every member still holds all the data, and the primary takes every write. When the data no longer fits on one machine, or one primary cannot keep up with the writes, a bigger machine is the only move left inside a replica set.
 
-Sharding splits one collection across several replica sets, called **shards**, by a field you choose, the **shard key**. Each shard holds part of the data and takes the writes for its part. Your application still connects to one address, a **mongos** router, and sends normal queries.
+Sharding splits one collection across several replica sets. Each shard holds part of the data and takes the writes for its part. The application still connects to one address, a mongos router, and sends normal queries.
 
-Sharding only helps if the shard key spreads both the data and the traffic. A bad key gives you the cost of a cluster with the throughput of one server: every new document lands on the same shard (a **hot shard**), or every query has to ask every shard (**scatter-gather**). This lesson runs a real two-shard cluster on one machine and shows both failures, with the real `explain()` output and per-shard counters.
+Sharding helps only if the shard key spreads both the data and the traffic. A bad key gives you the cost of a cluster and the throughput of one server. Every new document lands on the same shard, a hot shard, or every query has to ask every shard, which is scatter-gather. This lesson runs a real two-shard cluster and shows both failures.
 
-For the single-server basics see lessons [43](67-mongodb-amp-mongoose.md) and [44](68-schema-design-amp-data-modeling.md). Lesson [97](71-mongodb-aggregation-pipeline.md) covers the aggregation pipeline that mongos splits across shards in Example 5.
+Lessons 67 and 68 are the single-server basics. Lesson 71 is the aggregation pipeline that mongos splits across shards.
 
 ## The concept, simply
 
-A sharded cluster has three kinds of processes:
+A sharded cluster has three kinds of processes.
 
 - **Shards.** Each shard is a replica set that stores a subset of each sharded collection.
-- **Config servers.** A replica set that stores the cluster metadata: which collections are sharded, on which key, and which shard owns which key range (`config.collections`, `config.chunks`).
-- **mongos.** A stateless router. It caches the routing table from the config servers, sends each operation to the shards that can hold matching documents, and merges their replies.
+- **Config servers.** A replica set that stores the metadata: which collections are sharded, on which key, and which shard owns which range of key values (`config.collections`, `config.chunks`).
+- **mongos.** A router with no data of its own. It caches the routing table from the config servers, sends each operation to the shards that can hold matching documents, and merges their replies.
 
-The shard key's value space, from `MinKey` to `MaxKey`, is cut into contiguous ranges called **chunks**. Each chunk lives on exactly one shard. This is the topology built in Example 2, after Example 4 split the ranged collection at `customerId: 26`:
+The shard key's values, from `MinKey` to `MaxKey`, are cut into contiguous ranges called **chunks**. Each chunk lives on exactly one shard. This is the topology from Example 2, after Example 4 split the ranged collection at `customerId` 26:
 
 text
 
@@ -55,34 +59,34 @@ text
 
 Two kinds of shard key:
 
-- **Ranged.** Chunks are ranges of the key values themselves. Nearby values sit together, so a range query (`customerId` 1–9, "the last hour") can go to one shard. A key that only grows (a counter, a timestamp, an ObjectId) sends every new document to the chunk that ends at `MaxKey`, which is one shard.
-- **Hashed.** MongoDB hashes the value and makes chunks of hash ranges. Consecutive values land on different shards, so inserts spread out, but a range of values is scattered over every chunk, so range queries go to every shard.
+- **Ranged.** Chunks are ranges of the key values. Nearby values sit together, so a range query such as customer ids 1 through 9 can go to one shard. A key that only grows, a counter, a timestamp, or an ObjectId, sends every new document to the chunk that ends at `MaxKey`, which is one shard.
+- **Hashed.** MongoDB hashes the value and cuts chunks on hash ranges. Consecutive values land on different shards, so inserts spread out. A range of original values is scattered, so range queries go to every shard.
 
 ## How it works
 
 What happens to a query sent through mongos:
 
-1. The Node driver sends the operation to mongos, exactly as it would to a single server.
-2. mongos looks at the filter. If the filter pins the shard key (an equality, or a range on a ranged key), mongos works out which chunks can hold matches and which shards own those chunks.
-3. **Targeted**: if those chunks are all on one shard, the operation goes only to that shard. `explain()` reports `SINGLE_SHARD`.
-4. **Scatter-gather (broadcast)**: if the filter does not contain the shard key, or the matching chunks are on several shards, mongos sends the operation to every relevant shard. `explain()` reports `SHARD_MERGE`, or `SHARD_MERGE_SORT` when mongos must merge sorted streams.
-5. Each shard runs the operation on its own data, with its own indexes, and drops any **orphaned** documents (documents left over from a migration that this shard no longer owns) with a `SHARDING_FILTER` stage.
-6. mongos merges the replies and returns one cursor. For an aggregation, it splits the pipeline: a `shardsPart` runs on every shard and a `mergerPart` combines the partial results (Example 5).
+1. The Node driver sends the operation to mongos, the same way it would send it to one server.
+2. mongos looks at the filter. If the filter pins the shard key, an equality or a range on a ranged key, mongos works out which chunks can hold matches and which shards own those chunks.
+3. **Targeted.** If those chunks are all on one shard, the operation goes only there. `explain()` reports `SINGLE_SHARD`.
+4. **Scatter-gather.** If the filter does not contain the shard key, or the matching chunks are on several shards, mongos sends the operation to every relevant shard. `explain()` reports `SHARD_MERGE`, or `SHARD_MERGE_SORT` when mongos must merge sorted streams.
+5. Each shard runs the operation on its own data and its own indexes, and drops orphaned documents with a `SHARDING_FILTER` stage. An orphan is a copy left behind after a chunk moved.
+6. mongos merges the replies and returns one cursor. For an aggregation it splits the pipeline: a `shardsPart` runs on every shard and a `mergerPart` combines the partial results (Example 5).
 
-What happens on an insert: mongos reads the document's shard key, finds the chunk whose `[min, max)` range contains it, and sends the insert to the shard that owns that chunk. One insert always goes to one shard. So which shard takes the write load depends only on how the key values are distributed.
+An insert goes to exactly one shard. mongos reads the document's shard key, finds the chunk whose range contains it, and sends the insert there. Which shard takes the write load depends only on how the key values are spread.
 
-**Chunks and the balancer.** When you shard an empty collection on a ranged key, MongoDB creates one chunk `[MinKey, MaxKey)` on the database's primary shard (Example 3). A hashed key on an empty collection started with one chunk per shard on 8.2.6. The **balancer**, a background process on the config server primary, moves ranges between shards when a collection's data is uneven. The documented threshold is a data-size difference between shards of at least three times the range size (chunk size). The default range size is 128 MB, so two shards must differ by 384 MB before a migration happens. A test collection of a few thousand documents is never balanced on its own. Examples 4 and 6 therefore move a range by hand (`split` + `moveRange`), and Example 7 lowers the range size to 1 MB, which is only for a lab.
+**Chunks and the balancer.** Sharding an empty collection on a ranged key creates one chunk from `MinKey` to `MaxKey` on the database's primary shard (Example 3). A hashed key on an empty collection started with one chunk per shard on 8.2.6. The balancer, a background process on the config server primary, moves ranges when a collection's data is uneven. The documented threshold is a size difference of at least three times the range size. The default range size is 128 MB, so two shards must differ by 384 MB before a migration. A few thousand test documents never balance on their own. Examples 4 and 6 move a range by hand. Example 7 lowers the range size to 1 MB, which is only for a lab.
 
-**A migration in steps.** The donor shard copies the documents of a range to the recipient. The recipient commits ownership in the config servers. Only later does the donor delete its copies. Until then, the donor still holds the documents as **orphans**. On 8.2.6 `orphanCleanupDelaySecs` is 3600 (one hour) by default (changed in v8.2). Queries through mongos filter orphans out, but a query sent directly to a shard's mongod does not (Example 7).
+**A migration.** The donor copies the documents of a range to the recipient. The recipient commits ownership in the config servers. The donor deletes its copies later. Until then the donor still holds them as orphans. Queries through mongos filter orphans out. A query sent straight to a shard's `mongod` does not (Example 7).
 
-**Choosing a shard key** comes down to four questions, in this order:
+**Choosing a key,** in this order:
 
 - **Cardinality.** How many distinct values are there? A key with 50 values can never be split into more than 50 chunks.
-- **Frequency.** Is any single value very common? All documents with the same key value stay in one chunk.
-- **Monotonicity.** Do new values always grow? Then a ranged key sends all new writes to one shard.
-- **Query pattern.** Do the hot queries filter on the key? If not, they are all scatter-gather.
+- **Frequency.** Is one value very common? Every document with that value stays in one chunk.
+- **Monotonicity.** Do new values always grow? A ranged key then sends all new writes to one shard.
+- **Query pattern.** Do the hot queries filter on the key? If they do not, they are all scatter-gather.
 
-A compound key such as `{ customerId: 1, createdAt: 1 }` answers several of these at once. MongoDB can also refine a key by adding suffix fields (`refineCollectionShardKey`) or reshard a collection onto a new key (`reshardCollection`), but resharding clones the whole collection onto the recipient shards, so choose carefully up front.
+A compound key such as `{ customerId: 1, createdAt: 1 }` answers several of these at once. You can add suffix fields later with `refineCollectionShardKey`, or move the collection onto a new key with `reshardCollection`. Resharding copies the whole collection, so choose carefully up front.
 
 ## Code examples
 
@@ -555,54 +559,59 @@ sys	0m0.200s
 
 ## Common mistakes & gotchas
 
-- **A monotonically increasing ranged key** (timestamp, counter, ObjectId `_id`) sends every insert to the shard that owns `[x, MaxKey)` (Example 6: 0 vs 4,000). Hash it, or lead with a field that has many values arriving in no order.
-- **A low-cardinality key.** Hashing 50 customer ids gave a 1,240 / 760 split (Example 4). All documents with the same key value stay in one chunk forever, and that chunk cannot be split.
-- **Range queries on a hashed key.** They go to every shard, and the hashed index cannot serve them, so each shard scans everything unless another index matches (Example 5).
-- **Queries that do not include the shard key.** Every such query asks every shard. That is acceptable for rare reports, but a hot request path should filter on the key.
+- **A ranged key that only grows,** such as a timestamp, a counter, or an ObjectId `_id`. Every insert goes to the shard that owns the open top chunk (Example 6: 0 versus 4,000). Hash the field, or lead with a field whose new values arrive in no particular order.
+- **A low-cardinality key.** Hashing 50 customer ids still gave a 1,240 / 760 split (Example 4). Documents that share a key value stay in one chunk, and that chunk cannot be split.
+- **A range query on a hashed key.** It goes to every shard, and the hashed index cannot serve it, so each shard scans unless another index matches (Example 5).
+- **A hot query that does not include the shard key.** Every such query asks every shard. That is acceptable for a rare report. It is not acceptable for a hot path.
 - **Counting on a shard directly.** A direct count includes orphans: 12,000 on a shard that owns 6,970 (Example 7). Count through mongos, and use `$shardedDataDistribution` for per-shard numbers.
-- **Unique indexes on other fields.** `createIndex({ email: 1 }, { unique: true })` fails with `CannotCreateIndex` (67) when the shard key is `{ customerId: 1 }` (Example 3). A unique index must start with the shard key.
-- **Expecting the balancer to act on small data.** With the default 128 MB range size, nothing moves until shards differ by 384 MB. Do not "test" balancing with a few MB unless you lower `chunksize`, and do not leave a 1 MB `chunksize` in production: it means many more migrations.
-- **Looking for `sh.*` in the driver.** `sh.shardCollection`, `sh.splitAt`, `sh.moveRange` and `db.collection.getShardDistribution()` are `mongosh` helpers. From Node, call the commands (`shardCollection`, `split`, `moveRange`) with `db.admin().command(...)`, and use the `$shardedDataDistribution` stage.
-- **Slow shutdown surprises.** A SIGTERM to mongos waits about 15 s by default (Example 8). Allow for that in deploy scripts.
+- **A unique index that does not start with the shard key.** `createIndex({ email: 1 }, { unique: true })` fails with `CannotCreateIndex` (code 67) when the shard key is `{ customerId: 1 }` (Example 3). No shard can check uniqueness of values another shard holds.
+- **Expecting the balancer to move a small collection.** With the default 128 MB range, nothing moves until shards differ by 384 MB. Do not leave a 1 MB range size in production. It means many more migrations.
+- **Looking for `sh.*` helpers in the driver.** `sh.shardCollection` and `sh.moveRange` are mongosh helpers. From Node, run `shardCollection`, `split`, and `moveRange` through `db.admin().command(...)`.
+- **A slow mongos shutdown.** A SIGTERM waits on the order of 15 seconds by default (Example 8). Allow for that in deploy scripts.
 
 ## Best practices
 
-- **Shard only when you must.** First use indexes, schema changes and a bigger replica set. Sharding adds a router, config servers and a shard key that is expensive to change.
-- **Choose the key from the workload.** List the top queries and the write pattern, then pick a key with high cardinality, low frequency, no single growing direction, and that the hot queries filter on.
-- **Prefer compound keys** like `{ tenantId: 1, createdAt: 1 }` or `{ customerId: 1, _id: 1 }`. The first field targets queries; the second keeps chunks splittable.
-- **Check targeting with `explain()`** for each hot query: you want `SINGLE_SHARD`, or `SHARD_MERGE` over only the shards you expect.
-- **Watch distribution with `$shardedDataDistribution`,** and check `numOrphanedDocs` after migrations.
-- **Always connect applications to mongos** (several mongos for availability), never to individual shards.
-- **Run three-member replica sets** for every shard and for the config servers in production. The one-member sets here exist only to make the protocol runnable on a laptop.
+- Shard when you must. First use indexes, schema changes, and a larger replica set. A shard key is expensive to change.
+- List the top queries and the write pattern, then pick a key with high cardinality, no single huge value, no single growing direction, and that the hot queries filter on.
+- Prefer a compound key such as `{ tenantId: 1, createdAt: 1 }` or `{ customerId: 1, _id: 1 }`. The first field targets queries. The second keeps chunks splittable.
+- Check each hot query with `explain()`. You want `SINGLE_SHARD`, or `SHARD_MERGE` over only the shards you expect.
+- Watch `$shardedDataDistribution`, including `numOrphanedDocs` after migrations.
+- Applications connect only to mongos, several of them for availability, never to a shard directly.
+- In production, run three-member replica sets for every shard and for the config servers. The one-member sets in the examples exist so the protocol can run on a laptop.
 
 ## ⭐ Interview lens
 
-> **Q: “How do you choose a shard key?”**
-> A: Start from the workload. Pick a key with high cardinality and low frequency, so data can be split into many chunks. Avoid a key that only grows, so writes do not all go to one chunk. And use the field that the hot queries filter on, so those queries are targeted to one shard. A compound key often satisfies all three, for example a tenant or customer id first, then a time or id field. Then verify targeting with `explain()` (`SINGLE_SHARD`). *Trap:* answering "use `_id`". A default ObjectId `_id` grows over time, so a ranged `_id` key creates a hot shard.
+> **Q: “How do you choose a shard key?”**  
+> Start from the workload, not from a default field. The key needs high cardinality, so the data can be split into many chunks, and low frequency, so one value does not pin a huge share of documents in a single chunk. It should not be a value that only grows, or every insert lands on the chunk that ends at `MaxKey`. And the hot queries have to filter on it, or mongos cannot target a shard. A compound key often does all of this: a tenant or customer id first, then a time or id field so chunks stay splittable. For example, `{ customerId: 1, createdAt: 1 }` targets "this customer's recent orders" and still splits when one customer is huge. Then check `explain()` for `SINGLE_SHARD`. The limit of choosing `_id` is that a default ObjectId grows over time, so a ranged `_id` key is a hot shard. You can reshard later, and resharding copies the whole collection.
 
-> **Q: “Hashed or ranged sharding?”**
-> A: Ranged keeps nearby values together, which makes range queries targeted but gives a hot shard for monotonic keys. Hashed spreads consecutive values, which balances inserts (2,005 / 1,995 in Example 6) but turns every range query into scatter-gather, and the hashed index cannot serve the range. Hashing does not fix low cardinality: 50 values still gave a 1,240 / 760 split.
+> **Q: “Hashed or ranged sharding?”**  
+> Ranged sharding cuts the real key values into ranges. Nearby values sit on the same shard, so a query for customer ids 1 through 9 can be `SINGLE_SHARD`. A key that only increases, a counter or a timestamp, sends every new insert to one shard. Hashed sharding stores ranges of the hash. Consecutive values spread out, which is what balanced the inserts in Example 6 at 2,005 and 1,995. A range of the original values is scattered across every chunk, and the hashed index cannot serve that range, so each shard scans unless another index matches. Hashing does not fix a key with few distinct values: 50 customer ids still split 1,240 / 760, because every document with the same key stays in one chunk. The limit is picking hashed for a workload whose hot queries are ranges. You balanced the writes and made every read a scatter-gather.
 
-> **Q: “What is a scatter-gather query and why does it matter?”**
-> A: A query mongos cannot route to one shard, because it lacks the shard key or spans chunks on several shards. mongos sends it to every relevant shard and merges the results (`SHARD_MERGE`, or `SHARD_MERGE_SORT` when sorted). Every shard does work for it, so its cost grows with the number of shards, and its latency is set by the slowest shard.
+> **Q: “What is a scatter-gather query and why does it matter?”**  
+> A scatter-gather query is one mongos cannot send to a single shard. The filter has no shard key, or the matching chunks live on more than one shard. mongos broadcasts it and merges the replies. `explain()` shows `SHARD_MERGE`, or `SHARD_MERGE_SORT` when the streams are sorted and mongos has to merge them in order. Every shard does work, so the cost grows with the number of shards, and the latency is the slowest shard. For example, `find({ status: 'paid' })` on a collection sharded by `customerId` asks every shard, while `find({ customerId: 7 })` asks one. The limit of "it still returns the right answer" is capacity. A rare report can scatter. A hot request path that scatters means you added shards and did not add throughput.
 
-> **Q: “What are orphaned documents?”**
-> A: Copies of documents a shard no longer owns, left behind after a range migration until the range deleter removes them, by default after `orphanCleanupDelaySecs` (3,600 s on 8.2). Queries through mongos filter them out with a `SHARDING_FILTER` stage. Queries sent directly to a shard's mongod include them, which is why you never count on a shard directly.
+> **Q: “What are orphaned documents?”**  
+> An orphan is a copy of a document a shard no longer owns. During a migration the donor copies the range to the recipient, ownership moves in the config servers, and the donor deletes its copies later. Until that delete, the donor still has the documents. Queries through mongos drop them with a `SHARDING_FILTER` stage, so application reads stay correct. A query or a count sent directly to a shard's `mongod` includes them. Example 7 counted 12,000 on a shard that owned 6,970. The limit is any admin script, backup, or metric that connects to a shard instead of to mongos. Use `$shardedDataDistribution` for per-shard counts. On the 8.2.6 server in this lesson the donor keeps those copies for `orphanCleanupDelaySecs`, which is 3600 seconds, and only then deletes them.
 
 ## Cheat-card
 
-- **Topology:** shards (replica sets) + config server replica set (metadata, `config.chunks`) + mongos (router). Apps connect only to mongos.
-- **Chunk:** a contiguous `[min, max)` range of shard-key values on one shard. Default range size 128 MB; balancing starts at a 3× range-size difference.
-- **Ranged key:** range queries targeted; monotonic key → hot shard (0 vs 4,000 inserts here).
-- **Hashed key:** inserts spread (2,005 / 1,995 here); range queries scatter and cannot use the hashed index.
-- **Cardinality:** all documents with one key value share a chunk; 50 values hashed → 1,240 / 760.
-- **Targeted:** equality or in-chunk range on the shard key → `SINGLE_SHARD`.
-- **Scatter-gather:** no shard key or a range spanning shards → `SHARD_MERGE` / `SHARD_MERGE_SORT`.
-- **Aggregation on mongos:** `splitPipeline.shardsPart` on shards, `mergerPart` on mongos (`mergeType: router`).
-- **Commands from Node:** `addShard`, `shardCollection`, `split`, `moveRange` (v6.0+); distribution with `$shardedDataDistribution` (v6.0.3+, `admin` db).
-- **Orphans:** kept for `orphanCleanupDelaySecs` (3,600 s on 8.2); count via mongos, never directly on a shard.
-- **Unique index:** must be prefixed by the shard key (error 67 otherwise).
-- **Versions used:** Node v24.19.0, `mongodb` driver 7.7.0, MongoDB 8.2.6 (`mongod` + `mongos`, ubuntu2404 x86_64 build).
+- Topology: shards, a config-server replica set (`config.chunks`), and mongos. Apps connect only to mongos.
+- A chunk is a `[min, max)` range of shard-key values on one shard. Default range size is 128 MB. Balancing starts at a 3 times difference, 384 MB.
+- A ranged key keeps range queries targeted. A monotonic key produced a hot shard here: 0 versus 4,000 inserts.
+- A hashed key spread inserts here, 2,005 and 1,995. Range queries scatter, and the hashed index cannot serve them.
+- All documents with one key value share a chunk. 50 hashed values split 1,240 / 760.
+- Equality or an in-chunk range on the shard key is `SINGLE_SHARD`. No shard key, or a range across shards, is `SHARD_MERGE` or `SHARD_MERGE_SORT`.
+- Aggregation on mongos: `splitPipeline.shardsPart` on the shards, `mergerPart` on mongos.
+- A unique index must start with the shard key. Otherwise the error is code 67.
+- Count through mongos. A direct count includes orphans.
+
+## Good to know
+
+- `moveRange` was added in MongoDB 6.0. `$shardedDataDistribution` was added in 6.0.3 and runs on mongos against the `admin` database.
+- On 8.2.6, `orphanCleanupDelaySecs` is 3600, changed in v8.2. Queries through mongos filter orphans. A direct count on the shard does not.
+- Example 8: mongos spent about 15 seconds in quiesce mode (`"quiesceModeMillis":15023`), the default of `mongosShutdownTimeoutMillisForSignaledShutdown` at 15,000 ms.
+- Commands from Node are `addShard`, `shardCollection`, `split`, and `moveRange`. Distribution uses `$shardedDataDistribution`.
+- Versions used: Node v24.19.0, `mongodb` driver 7.7.0, MongoDB 8.2.6, `mongod` and `mongos`, the ubuntu2404 x86_64 build.
 
 ---
 

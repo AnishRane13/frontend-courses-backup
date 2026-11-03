@@ -13,55 +13,55 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`http.createServer` builds a long-running server that listens on a TCP port, parses each request's start line and headers, and calls your function with a readable `req` and a writable `res`. Express, Fastify, Koa, and Nest sit on this module. They add routing. They do not replace it. The trade-off is that one thread runs every callback, the body is not in memory when the callback starts, and forgetting `res.end()` leaves the client hanging.
+
 ## Why it matters
 
-Every web framework you have ever used in Node — Express, Fastify, Koa, Next.js, NestJS — is, at the bottom, a thin wrapper around one built-in module: `node:http`. When a request lands on your server, it is `http.Server` that accepted the TCP connection, parsed the bytes, and handed your code a `req` and a `res`. Frameworks add routing, middleware, and ergonomics, but they never replace this layer; they sit on top of it.
+Every web framework you use in Node is a wrapper around `node:http`. When a request arrives, `http.Server` accepted the TCP connection, parsed the bytes, and handed you `req` and `res`. Frameworks add routing and middleware on top of that.
 
-Understanding the raw module pays off in three concrete ways. First, **debugging**: when a request hangs, a socket leaks, or a response never flushes, the symptoms surface at the `http` layer, and you cannot reason about them if it is a black box. Second, **performance**: keep-alive, header size limits, and streaming all live here, and the defaults matter under load. Third, **interviews**: “build an HTTP server without Express” is one of the most common Node screening questions precisely because it reveals whether you understand the platform or just an abstraction over it.
-
-This topic strips everything away. No `npm install`, no framework — just the module that ships with Node, the `createServer` factory, and the lifecycle of a single request from socket to response.
+The raw module is where a hung request, a leaked socket, or a response that never flushes actually shows up. Keep-alive, header limits, and streaming live here. "Build an HTTP server without Express" is a common screening question because it shows whether you know the platform.
 
 ## The concept, simply
 
-An HTTP server is a long-running process that listens on a TCP port. When a client opens a connection and sends an HTTP request, the server runs a function you supplied, giving it two objects: a *request* (what the client sent) and a *response* (a handle you write the reply into). You never poll or block waiting for requests — Node's event loop calls your function each time one arrives.
+An HTTP server listens on a TCP port. When a client sends a request, Node calls a function you supplied with two objects: the request, and a response you write the reply into. You do not poll. The event loop calls you each time a request arrives.
 
-Two ideas make this click. The server is an **EventEmitter**: the callback you pass to `createServer` is registered as a listener for the `'request'` event. And `req` / `res` are **streams** — `req` is readable (the incoming body arrives in chunks) and `res` is writable (you push bytes back out). Once you see the request/response pair as “an event carrying two streams,” the rest of the module stops being magic.
+The server is an EventEmitter. The callback you pass to `createServer` is a listener for `'request'`. `req` and `res` are streams. `req` is readable, so the body arrives in chunks. `res` is writable, so you push bytes out. One event, two streams.
 
 ![Diagram of a request travelling from client to http.Server to your handler and a response travelling back](assets/i27_01_9768f8c5.svg)
 
-The request/response lifecycle: one TCP socket, req is readable, res is writable.
 
 ## How it works
 
-`http.createServer([options][, requestListener])` returns an `http.Server` instance. Calling `server.listen(port)` binds a listening socket and, from then on, the OS hands new TCP connections to Node. For each connection Node reads bytes off the socket and feeds them into an internal C++ HTTP parser (llhttp). The parser recognises the request line and headers, and the moment it has a complete header block it constructs an `http.IncomingMessage` (your `req`) and an `http.ServerResponse` (your `res`) and emits `'request'`.
+`http.createServer(requestListener)` returns an `http.Server`. `server.listen(port)` binds a socket. The OS hands new TCP connections to Node. Node reads bytes and feeds them to llhttp, the HTTP parser. When the start line and headers are complete, Node builds an `IncomingMessage` (`req`) and a `ServerResponse` (`res`) and emits `'request'`.
 
-Crucially, the `'request'` event fires **after headers are parsed but before the body is read**. The body may still be arriving. That is why `req` is a readable stream: you subscribe to its `'data'` and `'end'` events (or pipe it) to consume the payload. For a `GET` with no body, `'end'` fires almost immediately.
+That event fires after the headers and before the body is read. The body may still be arriving. You listen for `'data'` and `'end'` on `req`, or you pipe it. A GET with no body fires `'end'` almost immediately.
 
-The `res` object is a writable stream with HTTP semantics layered on. Writing works in three logical phases: (1) the **status line and headers** — set with `res.statusCode`, `res.setHeader()`, or all at once with `res.writeHead()`; (2) the **body** — `res.write(chunk)`, callable many times to stream; (3) **termination** — `res.end([chunk])`, which flushes and closes the response. Headers can only be set before the first byte of body is written; after that they are “sent” and mutating them throws `ERR_HTTP_HEADERS_SENT`.
+Writing the response has three steps. Set the status and headers with `res.statusCode`, `res.setHeader`, or `res.writeHead`. Write the body with `res.write`, as many times as you need. Finish with `res.end`. Headers can only be set before the first body byte. After that they are on the wire, and changing them throws `ERR_HTTP_HEADERS_SENT`.
 
-The server itself emits more than `'request'`. It emits `'connection'` for each new TCP socket, `'close'` when it stops, `'clientError'` when a malformed request cannot be parsed, and `'listening'` once the port is bound. Because it is an EventEmitter, `createServer(fn)` is literally sugar for `new http.Server().on('request', fn)`.
+The server also emits `'connection'` for each new TCP socket, `'listening'` when the port is bound, `'close'` when it stops, and `'clientError'` when a request cannot be parsed. `createServer(fn)` is `new http.Server().on('request', fn)`.
 
 ![Diagram showing createServer emitting request, connection, close and error events](assets/i27_02_74703027.svg)
 
-The server is an EventEmitter; your callback is just a 'request' listener.
 
-One more mental model that avoids bugs: the callback runs **once per request**, and there is no global “current request” — every request has its own `req`/`res` closure. State you want to share across requests lives in module scope; state for a single request lives in that invocation.
+The callback runs once per request. There is no global "current request". Each call has its own `req` and `res`. Share state across requests in module scope. Keep one request's state inside that call.
 
-It also helps to know that one TCP socket can carry **many** requests. Because HTTP/1.1 keep-alive is on by default, after you call `res.end()` Node keeps the connection open and the llhttp parser simply resets to await the next request line on the same socket, emitting `'request'` again with a brand-new `req`/`res` pair. So the `'connection'` event fires once per socket, but `'request'` can fire repeatedly on that same socket. This is why you attach per-request logic in the `'request'` listener and per-connection logic (rate-limiting by IP, socket timeouts) in `'connection'`. The pairing between a request and its response is positional: HTTP/1.1 has no request IDs, so responses must be written back in the exact order the requests arrived, which is precisely the head-of-line constraint that HTTP/2 later removed.
+HTTP/1.1 keep-alive is on by default, so one TCP socket can carry many requests. After `res.end()`, Node keeps the connection and the parser waits for the next start line on the same socket, then emits `'request'` again with a new pair. `'connection'` fires once per socket. `'request'` can fire many times on it. Put per-request work in `'request'`. Put per-connection work, such as a socket timeout, in `'connection'`. HTTP/1.1 has no request ids, so responses go back in the order the requests arrived. That is the head-of-line limit HTTP/2 removes.
 
-Finally, the server exposes a set of timeouts that are your first line of defence against slow or abusive clients. Node v18+ ships with safe defaults, but you should still set them deliberately for a production service. The table below summarises the ones that matter most:
+Timeouts are the first defence against a slow client:
 
 | Property | Default (v20/22) | What it guards |
 | --- | --- | --- |
-| `server.headersTimeout` | 60000 ms | Max time to receive the complete header block — stops slow-loris header dribbling. |
-| `server.requestTimeout` | 300000 ms | Max time to receive the entire request (headers + body). |
-| `server.keepAliveTimeout` | 5000 ms | How long an idle keep-alive socket waits for the next request before closing. |
-| `server.timeout` | 0 (off) | Inactivity timeout on the socket once a request is in flight. |
-| `server.maxHeadersCount` | 2000 | Caps the number of headers to bound parser memory. |
+| `server.headersTimeout` | 60000 ms | Time to receive the whole header block. Stops a client that dribbles headers. |
+| `server.requestTimeout` | 300000 ms | Time to receive the entire request, headers and body. |
+| `server.keepAliveTimeout` | 5000 ms | How long an idle keep-alive socket waits for the next request. |
+| `server.timeout` | 0 (off) | Inactivity on the socket once a request is in flight. |
+| `server.maxHeadersCount` | 2000 | How many headers the parser will accept. |
 
 ## Code examples
 
-The smallest complete server. It answers every request with plain text.
+The smallest server answers every request with plain text.
 
 javascript
 
@@ -80,7 +80,7 @@ server.listen(3000, () => {
 });
 ```
 
-The same server written to show that the callback is just an event listener, plus lifecycle hooks you will use in production (graceful logging, error handling):
+The same server, written so you can see the callback is just an event listener, plus the hooks you use in production:
 
 javascript
 
@@ -106,7 +106,7 @@ server.on('listening', () => console.log('up'));
 server.listen(3000);
 ```
 
-Streaming a response instead of buffering it — this is where `res` being a writable stream earns its keep. We send a large body in chunks without ever holding it all in memory:
+Streaming a response. `res` is a writable stream, so a large body goes out in chunks and is never held all at once:
 
 javascript
 
@@ -131,7 +131,7 @@ http.createServer((req, res) => {
 }).listen(3000);
 ```
 
-Graceful shutdown — a real service must stop accepting new connections but let in-flight requests finish. `server.close()` does exactly that:
+Graceful shutdown. `server.close()` stops new connections and lets in-flight requests finish:
 
 javascript
 
@@ -150,57 +150,53 @@ process.on('SIGTERM', () => {
 
 ## Common mistakes & gotchas
 
-- **Forgetting `res.end()`.** If you never call `end()`, the response never finishes, the client hangs until timeout, and the socket is held open. Every code path — including error branches — must terminate the response exactly once.
-- **Setting headers after the body.** `res.setHeader()` or `writeHead()` after the first `res.write()` throws `ERR_HTTP_HEADERS_SENT`. Decide status and headers first.
-- **Assuming the body is available in the callback.** The `'request'` event fires before the body arrives. Reading `req.body` gives `undefined` — there is no such property on the raw object; you must consume the stream.
-- **Blocking the event loop.** A synchronous CPU-heavy loop or `fs.readFileSync` inside the handler stalls *every* concurrent request, because one thread services them all.
-- **Ignoring backpressure.** `res.write()` returns `false` when the kernel buffer is full; ignoring it while pumping a fast source balloons memory. Use `pipe()` or honour the return value.
-- **Leaking the port in tests.** Forgetting `server.close()` keeps the process alive and the port bound, causing `EADDRINUSE` on the next run.
+- **Forgetting `res.end()`.** The client hangs until timeout and the socket stays open. Every path, including errors, ends the response once.
+- **Setting headers after the body.** `setHeader` or `writeHead` after the first `write` throws `ERR_HTTP_HEADERS_SENT`.
+- **Expecting the body inside the callback.** `'request'` fires before the body arrives. There is no `req.body` on the raw object. Read the stream.
+- **Blocking the event loop.** A synchronous loop or `readFileSync` in the handler stalls every other request. One thread serves them all.
+- **Ignoring backpressure.** `res.write()` returns `false` when the kernel buffer is full. Use `pipeline` or wait for `'drain'`.
+- **Leaving the port open in tests.** Skip `server.close()` and the next run gets `EADDRINUSE`.
 
 ## Best practices
 
-- **Import with the `node:` prefix** (`require('node:http')`) so it is unambiguous that you mean the builtin, not an npm package.
-- **Always attach a `'clientError'` handler** and an `'error'` handler on the server — unhandled server errors crash the process.
-- **Set explicit timeouts** (`server.requestTimeout`, `server.headersTimeout`, `server.keepAliveTimeout`) to defend against slow-loris style attacks; the defaults are safer in v20 but still worth setting deliberately.
-- **Terminate the response in a `finally`-style single exit** so no branch forgets `res.end()`.
-- **Implement graceful shutdown** with `server.close()` on `SIGTERM` for zero-downtime deploys.
-- **Never trust request input** at this layer — size-limit the body and validate headers before acting on them.
+- **Import `node:http`** so the name cannot collide with an npm package.
+- **Attach `'clientError'` and `'error'`** on the server. An unhandled server error crashes the process.
+- **Set `requestTimeout`, `headersTimeout`, and `keepAliveTimeout`** on purpose, even where the defaults are already safer.
+- **End the response on every branch**, including the error path.
+- **Call `server.close()` on `SIGTERM`** so deploys finish in-flight work.
+- **Cap the body and check headers** before you act on them.
 
 ## ⭐ Interview lens
 
 > **Q: What does `http.createServer(fn)` actually do with `fn`?**  
-> It constructs an `http.Server` (an EventEmitter) and registers `fn` as a listener for the `'request'` event. It is equivalent to `new http.Server().on('request', fn)`. The function is invoked once per incoming HTTP request with a fresh `req`/`res` pair.
+A: `http.createServer(fn)` builds an `http.Server`, which is an EventEmitter, and registers `fn` as the listener for `'request'`. That is the same as `new http.Server().on('request', fn)`. Each incoming HTTP request calls `fn` with a new `req` and `res`. `req` is an `IncomingMessage`, a readable stream. `res` is a `ServerResponse`, a writable stream. The server has already parsed the start line and headers with llhttp before it calls you. The limit is the body. It is not sitting in a property when `fn` runs. You still have to read the stream, and you still have to call `res.end()` or the client waits.
 
 > **Q: When exactly does the request callback fire — before or after the body arrives?**  
-> After the request line and headers are parsed, but generally *before* the body is fully received. That is why `req` is a readable stream and you must listen for `'data'`/`'end'` (or pipe it) to get the body. A common trap answer is “when the whole request is in” — wrong.
+A: The callback runs after the request line and the headers are parsed, and generally before the body has all arrived. llhttp emits `'request'` as soon as the header block is complete, then the rest of the socket is the body. That is why `req` is a readable stream and you listen for `'data'` and `'end'`, or pipe it, to get the bytes. A GET with no body fires `'end'` almost at once, which hides the rule until the first POST. The limit of the wrong answer, "when the whole request is in memory", is a large upload. Waiting for the whole body before your function ran would buffer it for you, and Node refuses to do that.
 
 > **Q: Why can't you call `res.setHeader()` after `res.write()`?**  
-> Because `write()` flushes the status line and headers to the socket first; once sent, they are immutable on the wire. Node enforces this by throwing `ERR_HTTP_HEADERS_SENT`. Headers must be finalised before any body byte.
-
-> **Q: Is `req` a stream? What kind?**  
-> Yes — `req` (an `IncomingMessage`) is a *readable* stream; `res` (a `ServerResponse`) is a *writable* stream. This is the single most important fact about the module and unlocks streaming uploads/downloads.
+A: `res.write()` sends the status line and the headers first, then the chunk. Once those bytes are on the socket they cannot be changed. Node enforces that by throwing `ERR_HTTP_HEADERS_SENT` if you call `setHeader` or `writeHead` after the first `write` or after `writeHead`. You set `statusCode` and headers, then you write the body, then you `end`. The same lock applies if you stream a file with `pipeline` into `res`: the headers go out with the first chunk. The limit is a value you only know at the end, such as a checksum. That is a trailer, declared up front, not a header you set after `write`.
 
 > **Q: Trap — if a request handler runs a 2-second synchronous loop, what happens to other clients?**  
-> They all wait. Node handles requests on one event-loop thread; a synchronous block freezes the entire process, so every concurrent request is delayed by 2 seconds. The fix is to make the work async or offload it (worker thread / child process).
-
-> **Q: How do you shut a server down without dropping in-flight requests?**  
-> Call `server.close(callback)`: it stops accepting new connections and invokes the callback once existing ones drain. Pair it with a forced-exit timeout so a stuck keep-alive connection cannot block shutdown forever.
+A: Every other client waits. Node runs your request callbacks on one event-loop thread. A two-second synchronous loop, or `fs.readFileSync`, does not let the loop reach the next connection, the next timer, or the next `'request'`. Ten clients that arrived during those two seconds all see the delay. The work has to be async, or it has to move to a worker thread or another process. The limit is easy to miss in a test with one request. The handler returns a correct response, and the stall only shows up when someone else is waiting on the same process.
 
 ## Cheat-card
 
-- `const http = require('node:http')` — builtin, no install.
-- `http.createServer(fn)` = `new http.Server().on('request', fn)`.
-- `server.listen(port[, cb])` binds the port; `'listening'` fires when ready.
-- `req` = `IncomingMessage` (readable); `res` = `ServerResponse` (writable).
-- Callback fires after headers, before body. Body via `'data'`/`'end'`.
-- Order: status + headers → `res.write()` → `res.end()`. End exactly once.
-- Headers are immutable after first body byte (`ERR_HTTP_HEADERS_SENT`).
-- Graceful stop: `server.close()` on `SIGTERM`.
-- One thread services all requests — never block it.
-- **Client side:** `http.request`/`http.get` (Writable `ClientRequest`, Readable `IncomingMessage`) or the global `fetch` (bundled undici, `process.versions.undici`); details in lesson 44.
-- **Same connection?** Compare `req.socket.remotePort`; back-to-back `fetch` calls can alternate between two sockets.
+- `require('node:http')` or `import http from 'node:http'`. Nothing to install.
+- `http.createServer(fn)` is `new http.Server().on('request', fn)`.
+- `server.listen(port)` binds. `'listening'` fires when the port is ready.
+- `req` is an `IncomingMessage` and a readable stream. `res` is a `ServerResponse` and a writable stream.
+- The callback runs after headers, before the body. Read the body with `'data'` and `'end'`.
+- Order: status and headers, then `res.write`, then `res.end`, exactly once.
+- Headers are frozen after the first body byte (`ERR_HTTP_HEADERS_SENT`).
+- Stop cleanly with `server.close()` on `SIGTERM`.
+- One thread serves every request. Do not block it.
 
----
+## Good to know
+
+- Is `req` a stream, and what kind? Yes. `req` is readable. `res` is writable. That is what makes an upload and a download stream instead of buffer.
+- How do you shut a server down without dropping in-flight requests? `server.close(callback)` stops accepting new connections and runs the callback when existing ones drain. Pair it with a forced-exit timer so one stuck keep-alive socket cannot hold the process.
+- `http.request` and `http.get` are the client in this same module: a writable `ClientRequest` and a readable `IncomingMessage`. Global `fetch` is bundled undici (`process.versions.undici`), not `http.request`. Lesson 44 covers both. Two requests shared a connection when `req.socket.remotePort` matches.
 
 ## Learn More
 
@@ -217,17 +213,15 @@ process.on('SIGTERM', () => {
 
 ### The client side: outbound requests
 
-This lesson covers the server half of HTTP. The other half is your process acting as a *client*: it opens a TCP connection to another server, writes a request and reads the response. Node has two built-in clients. `http.request()` / `http.get()` live in this same `node:http` module. They return a `ClientRequest` (a Writable you write the body into) and hand you the response as an `IncomingMessage` (a Readable), the mirror image of the server's `req`/`res`. The global `fetch()` (unflagged in v18.0.0, stable since v21.0.0) is implemented by undici, a separate HTTP client bundled inside Node (`process.versions.undici` is `7.29.0` on v24.19.0), not by `http.request`. Both keep connections alive and reuse them, so the server side sees one `'connection'` and then several `'request'` events on the same socket. Timeouts, retries, streaming, uploads, redirects, proxies and client error codes are covered in [Outbound HTTP: fetch, undici and http.request](44-outbound-http-fetch-undici-and-http-request.md).
+This lesson is the server half. The client half is your process opening a TCP connection, writing a request, and reading the response. `http.request` and `http.get` return a writable `ClientRequest` and give you the response as a readable `IncomingMessage`. Global `fetch` is the WHATWG API, implemented by undici bundled in Node, not by `http.request`. On v24.19.0, `process.versions.undici` is `7.29.0`. Both keep sockets and reuse them, so the server sees one `'connection'` and then several `'request'` events. Timeouts, retries, and the error codes are in lesson 44.
 
-How it works:
+1. `fetch(url)` uses undici's global agent, one pool per origin, meaning scheme, host, and port.
+2. With no idle socket, it opens a TCP connection. Your server emits `'connection'`, then `'request'`. `req.socket.remotePort` is the client's port for that connection.
+3. `fetch` resolves when the headers arrive. `res.text()` resolves when the body is done.
+4. The response carries `Connection: keep-alive` and `Keep-Alive: timeout=5`, from `server.keepAliveTimeout`, 5000 ms by default. The client puts the socket back in the pool.
+5. `server.close()` stops accepting connections and, since v19.0.0, also closes idle keep-alive connections.
 
-1. `fetch(url)` hands the request to undici's global `Agent`, which keeps one connection pool per origin (scheme + host + port).
-2. With no idle socket in the pool, it opens a new TCP connection. Your server emits `'connection'`, then `'request'`. `req.socket.remotePort` is the client's side of that connection.
-3. The server writes headers and `res.end()`s the body. `fetch` resolves as soon as the headers arrive, and `res.text()` resolves when the body is complete.
-4. The server's response carries `Connection: keep-alive` and `Keep-Alive: timeout=5` (from `server.keepAliveTimeout`, 5000 ms by default). The client returns the socket to its pool for the next request to the same origin.
-5. `server.close()` stops accepting connections and, since v19.0.0, also closes idle keep-alive connections, so a script that serves and calls itself can exit.
-
-**Example — this lesson's server, called by `fetch`.**
+**Example: this lesson's server, called by `fetch`.**
 
 javascript
 
@@ -259,17 +253,17 @@ server.listen(4830, async () => {
 //   client: 200 text/plain; charset=utf-8 | keep-alive timeout=5 | "Hello from raw Node\n"
 ```
 
-The two requests arrived from two different client ports, so `fetch` opened a second connection even though the first one was kept alive. The edge case below shows why. Client port numbers change on every run.
+The two requests came from two client ports, so `fetch` opened a second connection even though the first was kept alive. Client ports change every run.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **Expecting `fetch` to reject on a 404 or 500.** It resolves with `res.ok === false`. Only network failures reject, as `TypeError: fetch failed` with the reason in `err.cause.code`.
-- **Not reading the response body.** An unread body keeps its connection busy, so the next request to that host waits or opens another socket (lesson 44, Example 16). Read it, or call `res.body.cancel()`.
-- **Expecting `http.Agent` settings to limit `fetch`.** They are separate clients with separate pools. With `http.globalAgent.maxSockets = 1`, two concurrent `http.get` calls shared one client port, while two concurrent `fetch` calls arrived on two (checked in a separate run).
+- **Expecting `fetch` to reject on a 404 or 500.** It resolves with `res.ok === false`. Only a network failure rejects, as `TypeError: fetch failed`, with the reason on `err.cause.code`.
+- **Not reading the response body.** An unread body keeps the connection busy, so the next request waits or opens another socket. Read it, or call `res.body.cancel()`.
+- **Expecting `http.Agent` settings to limit `fetch`.** They are separate pools. With `http.globalAgent.maxSockets = 1`, two concurrent `http.get` calls shared one client port, and two concurrent `fetch` calls used two.
 
 ### Edge case worked through: back-to-back `fetch` calls open a second connection
 
-You would expect sequential requests (each `await`ed to the end) to use one keep-alive socket. The server's `req.socket.remotePort` shows they do not:
+You would expect sequential requests, each awaited to the end, to reuse one keep-alive socket. `req.socket.remotePort` shows they do not:
 
 javascript
 
@@ -309,12 +303,12 @@ server.listen(4831, async () => {
 //     /b3 on connection #1
 ```
 
-When `await res.text()` resolves, the body has been delivered, but the client has not yet put the socket back in its pool; that happens a moment later. The next `fetch` starts in between, finds no idle socket and opens connection #2. After that the two sockets alternate. One `setImmediate` turn between requests is enough for the socket to return, and all three `/b` requests reused connection #1. (`undici.request()` from the npm package, 7.30.0, showed the same alternating pattern in a separate run.) It is harmless for a script, but a loop of sequential calls to one upstream holds two sockets where you expected one.
+When `await res.text()` resolves, the body is delivered and the client has not yet returned the socket to the pool. The next `fetch` starts in that gap, finds no idle socket, and opens connection 2. After that the two sockets alternate. One `setImmediate` between requests is enough for the socket to return, and then the requests reuse connection 1. The same alternating pattern showed up with `undici.request()` from the npm package at 7.30.0. Harmless in a script. A loop of sequential calls holds two sockets where you expected one.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “What is the difference between `http.request` and `fetch` in Node?”**  
-> A: `http.request` is the core client in `node:http`. It gives you a writable `ClientRequest`, a readable `IncomingMessage` response, and an `http.Agent` for socket reuse, and it has no promise API. `fetch` is the WHATWG Fetch API, implemented by Node's bundled undici: promise-based, web streams for bodies, its own pool. Neither treats a 4xx or 5xx as an error. *Trap:* `fetch` is not a wrapper around `http.request`; they have separate pools and separate error codes.
+A: `http.request` is the client built into `node:http`. You get a writable `ClientRequest`, you read a readable `IncomingMessage`, and an `http.Agent` reuses sockets. It has no promise API. `fetch` is the WHATWG function, implemented by undici that ships inside Node, with its own pool, promises, and web-stream bodies. On v24.19.0 that copy is undici 7.29.0. Neither treats 404 or 500 as a thrown error. `fetch` resolves and you check `res.ok`. `http.request` gives you the status on the response object. The limit is thinking `fetch` is a wrapper over `http.request`. They do not share a pool, and a setting on `http.globalAgent` does not cap `fetch`.
 
 > **Q: “How can a server tell that two requests came over the same connection?”**  
-> A: Compare `req.socket.remotePort` (or keep a `WeakMap` keyed by `req.socket`). Same socket object and port means the same keep-alive connection; `'connection'` fires once per socket, `'request'` once per request.
+A: Compare `req.socket.remotePort`, or keep a `WeakMap` keyed by `req.socket`. The same socket object and the same remote port mean the same keep-alive connection. `'connection'` fires once when that socket is accepted. `'request'` fires once per HTTP request on it, which is how one TCP connection carries many requests under HTTP/1.1. The lesson's `fetch` demo is the counterexample to "sequential awaits always reuse one socket". The body promise resolves a moment before the socket goes back to the pool, so the next call can open a second port. The limit is reading the port from the server and assuming it is the server's listen port. `remotePort` is the client's port.

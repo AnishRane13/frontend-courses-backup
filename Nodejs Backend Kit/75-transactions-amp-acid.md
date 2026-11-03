@@ -13,35 +13,39 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A transaction groups several database writes so they all become permanent together, a commit, or they all disappear, a rollback. ACID names the four guarantees: all or nothing, a valid state, hidden from other work until commit, and still there after a crash. You use one when one action touches more than one row or document and a half-finished result would be wrong, such as a debit with no matching credit. The trade-off is locks and retries, and a single-row or single-document write is already all or nothing, so a transaction there is extra cost.
+
 ## Why it matters
 
-Some operations must happen all-or-nothing. Transfer money between two accounts: debit one, credit the other. If the process crashes after the debit but before the credit, money has vanished into thin air and your users (and regulators) will not forgive you. Place an order: decrement inventory, create the order, charge the card — if any step fails, none should stick. The mechanism that makes "all-or-nothing" real is a **transaction**, and the guarantees it provides are summarised by the acronym **ACID**. This is bedrock backend knowledge and one of the most reliably asked interview topics, because getting it wrong causes the most damaging class of bugs: silent data corruption.
+Some operations have to be all or nothing. Transfer money: debit one account, credit the other. If the process dies after the debit, the money is gone. Place an order: decrement stock, insert the order, record the charge. If any step fails, none of them should remain. A transaction is the mechanism. ACID is the name of its guarantees. Getting this wrong is silent data corruption.
 
-What makes this topic sharp for interviews is the modern twist: transactions are not just a SQL thing anymore. MongoDB has supported **multi-document ACID transactions** since 4.0 (via sessions), so "does NoSQL have transactions?" is a live question with a nuanced answer. Knowing when you actually need a transaction — and, just as importantly, when a good document model means you do not — is what distinguishes solid engineers.
+The modern twist is that this is not only a SQL topic. MongoDB has multi-document transactions, through a session, since version 4.0. "Does a document database have transactions?" has a real answer. The other half is knowing when a good document model means you do not need one.
 
 ## The concept, simply
 
-A **transaction** groups several database operations into a single unit that either *fully commits* or *fully rolls back*. You mark a beginning, do your writes, and then either `COMMIT` (make them all permanent together) or, if anything goes wrong, `ROLLBACK` (undo everything as if none of it happened). The database guarantees no in-between state is ever visible or persisted.
+A transaction is a unit of work that either commits, making every write permanent together, or rolls back, undoing them so none of the writes remain. Callers never see a half-applied unit.
 
 ![Four panels defining Atomicity, Consistency, Isolation, and Durability](assets/i44_01_e052008d.svg)
 
-ACID is the four-part promise a transaction upholds: all-or-nothing, valid state, isolated from other transactions, and durable once committed.
+ACID is the four-part promise: all or nothing, a valid state, isolated from other transactions, and durable after commit.
 
-**ACID** names the four guarantees. *Atomicity*: all steps or none. *Consistency*: the database moves from one valid state to another, never breaking its rules. *Isolation*: concurrent transactions do not see each other's half-finished work. *Durability*: once committed, the data survives a crash or power loss.
+**Atomicity** means all steps or none. **Consistency** means the database moves from one valid state to another and does not break its rules. **Isolation** means concurrent transactions do not see each other's half-finished work. **Durability** means that once the database has acknowledged the commit, the data survives a crash.
 
 ## How it works (deep)
 
-Under the hood, a relational database implements atomicity and durability with a **write-ahead log (WAL)**: changes are recorded to a durable log before being applied, so on crash recovery the database can replay committed transactions and discard uncommitted ones. A `COMMIT` is not acknowledged until the log is safely on disk — that is durability. A `ROLLBACK` (or a crash) discards the pending changes — that is atomicity.
+A relational database implements atomicity and durability with a **write-ahead log**. Changes are recorded in a durable log before they are applied as the live pages. On recovery the database replays committed transactions and discards ones that never committed. A commit is not acknowledged until that log is on disk. That is durability. A rollback, or a crash before commit, discards the pending changes. That is atomicity.
 
 ![A vertical flow from BEGIN through two writes to COMMIT, with a branch to ROLLBACK when an error occurs before commit](assets/i44_02_e440b57b.svg)
 
-Either both writes commit together, or an error before commit triggers a rollback that undoes everything.
+Either both writes commit, or an error before commit rolls both of them back.
 
-**Isolation** is the subtle one, because letting transactions run concurrently invites anomalies: a *dirty read* (seeing another transaction's uncommitted change), a *non-repeatable read* (a row changes value between two reads in the same transaction), and a *phantom read* (new rows appear matching your `WHERE` between reads). SQL defines **isolation levels** — Read Uncommitted, Read Committed, Repeatable Read, Serializable — that trade performance for stronger guarantees, each ruling out more anomalies. Most databases default to Read Committed (Postgres) or Repeatable Read (MySQL InnoDB); Serializable is the strictest, behaving as if transactions ran one at a time. Naming an anomaly and the level that prevents it is a strong interview answer.
+**Isolation** is the subtle guarantee, because concurrent transactions can see anomalies. A **dirty read** sees another transaction's uncommitted change. A **non-repeatable read** sees a row change value between two reads in the same transaction. A **phantom read** sees new rows appear that match your `WHERE` between two reads. SQL defines isolation levels that trade throughput for fewer anomalies. **Read uncommitted** allows dirty reads. **Read committed** prevents dirty reads. Postgres uses it by default. **Repeatable read** also prevents non-repeatable reads. MySQL InnoDB uses it by default. **Serializable** also prevents phantoms and behaves as if the transactions ran one at a time. It is the strictest and the most expensive.
 
-In **MongoDB**, a single-document write is *already atomic* — an update to one document, including its nested arrays and sub-documents, either fully applies or not at all. This is a big deal: if you model well and keep data that changes together in one document, **you often do not need a multi-document transaction at all**. When you genuinely must update several documents atomically (money moving between two separate account documents), Mongo provides multi-document transactions through a **session**: you `startSession()`, `startTransaction()`, do your writes passing the session, then `commitTransaction()` or `abortTransaction()`. These require a replica set or sharded cluster (not a standalone `mongod`), and they carry more overhead than single-document writes, so you reach for them deliberately.
+In **MongoDB**, a write to one document is already atomic, including nested arrays and subdocuments. If the data that changes together lives in one document, you often do not need a multi-document transaction. When you do, money moving between two account documents, you open a **session**, call `startTransaction()`, pass `{ session }` on every write, then `commitTransaction()` or `abortTransaction()`. This requires a replica set or a sharded cluster. A standalone `mongod` errors. It costs more than a single-document write, so you use it on purpose.
 
-**When do you actually need a transaction?** When a single logical operation spans multiple rows/documents and a partial result would be invalid or unsafe: financial transfers, inventory-plus-order, anything with an invariant across records ("total debits equal total credits"). When it is a single-document or single-row change, the database already gives you atomicity for free. Over-using transactions adds locking and contention; under-using them corrupts data. Knowing the line is the skill.
+You need a transaction when one logical action spans multiple rows or documents and a partial result would break an invariant, such as "debits equal credits." You do not need one for a single-row or single-document change. Over-using transactions adds locking. Under-using them corrupts data.
 
 ## Code examples
 
@@ -129,58 +133,58 @@ WHERE id = 42 AND stock >= 3;
 
 ## Common mistakes & gotchas
 
-- **Assuming multiple separate writes are atomic.** Two back-to-back `updateOne`/`UPDATE` calls without a transaction can partially fail, leaving inconsistent data. Wrap them or model them into one document/row.
-- **Forgetting to pass the session/transaction handle.** In Mongo, a write without `{ session }` runs *outside* the transaction and is not rolled back. In pg, running on `pool` instead of the checked-out `client` escapes the BEGIN.
-- **Running Mongo transactions on a standalone server.** Multi-document transactions require a replica set or sharded cluster; on a standalone `mongod` they error.
-- **Check-then-act race conditions.** Reading a balance, then updating in a separate step, lets two concurrent requests both pass the check. Use a single conditional update or lock the row with `SELECT ... FOR UPDATE`.
-- **Long-running transactions.** Holding a transaction open across slow work (HTTP calls, user think-time) holds locks and starves the database. Keep transactions short.
-- **Not handling transient/write-conflict errors.** Under Serializable/high contention, transactions can be aborted by the database and must be *retried*. Not retrying surfaces spurious failures.
-- **Using a transaction when one document/row would do.** Adds locking and overhead for no benefit; single-document/row writes are already atomic.
+- **Two separate writes treated as one.** Two `updateOne` or `UPDATE` calls with no transaction can leave the first applied and the second lost. Wrap them, or put the change in one document or one row.
+- **Forgetting the session or the client.** In Mongo, a write without `{ session }` runs outside the transaction and will not roll back. In `pg`, a query on the pool instead of the checked-out client is outside the `BEGIN`.
+- **A Mongo transaction on a standalone server.** Multi-document transactions need a replica set or a sharded cluster.
+- **Check, then act, as two steps.** Two requests can both read "stock is enough" and both decrement. Use one conditional update, or lock the row with `SELECT ... FOR UPDATE`.
+- **A long transaction.** Holding it open across an HTTP call or user think-time holds locks and blocks everyone else. Keep it short.
+- **No retry.** Under serializable isolation, or under contention, the database can abort your transaction. The caller has to run the whole unit again.
+- **A transaction around one document or one row.** That write is already atomic. The transaction only adds overhead.
 
 ## Best practices
 
-- Reach for a transaction only when a single logical operation spans multiple rows/documents with an invariant between them; otherwise rely on built-in single-record atomicity.
-- Keep transactions **short** — acquire, write, commit — and never do slow external I/O while one is open.
-- Always pass the session/client to every operation inside the transaction, and clean up in `finally` (`release()` / `endSession()`).
-- Prefer a single conditional atomic update (`$inc` with a guard, `UPDATE ... WHERE`) over read-then-write to avoid races cheaply.
-- For genuine contention, lock explicitly (`SELECT ... FOR UPDATE`) or pick the right isolation level, and implement **retry** on transient conflicts.
-- Choose the isolation level consciously: stronger levels prevent more anomalies at the cost of throughput.
-- In MongoDB, model so that data changing together lives together — the best transaction is the one you did not need.
+- Use a transaction when one action spans rows or documents and a partial result would be invalid. Otherwise rely on single-record atomicity.
+- Keep it short: begin, write, commit. Do not do slow external I/O while it is open.
+- Pass the session or the checked-out client on every operation inside it. Release the client, or end the session, in `finally`.
+- Prefer one conditional update, `$inc` with a filter, or `UPDATE ... WHERE`, over a read followed by a write.
+- When contention is real, lock with `SELECT ... FOR UPDATE` or choose the isolation level on purpose, and retry transient conflicts.
+- In MongoDB, put data that changes together in one document. The cheapest transaction is the one you do not open.
 
 ## ⭐ Interview lens
 
 > **Q: What does ACID stand for, concretely?**  
-> Atomicity (all operations commit or none do), Consistency (the DB moves between valid states honouring its constraints), Isolation (concurrent transactions do not see each other's uncommitted work), Durability (once committed, data survives crashes). The bank-transfer example ties them together: the debit and credit are atomic, the "sum stays constant" invariant is consistency, other transactions do not see a half-done transfer (isolation), and once committed it is on disk forever (durability).
+> ACID is the four guarantees of a transaction. Atomicity means every write in the unit commits or none of them remain. Consistency means the database moves from one valid state to another, honouring constraints such as "the two balances still sum to the same total." Isolation means another transaction does not see the half-finished unit. Durability means that after the database acknowledges the commit, a crash does not lose it, because the change was in the write-ahead log on disk before the ack. For example, a transfer debits account A and credits account B inside one transaction. A crash after the debit and before the commit rolls the debit back. Another transfer never observes A debited and B not yet credited. The limit is the word consistency. It is the database's rules, keys and checks, not your application's idea of a valid order. If you never declared the invariant, the transaction will not invent it.
 
 > **Q: Does MongoDB support transactions?**  
-> Yes — single-document writes have always been atomic, and since 4.0 MongoDB supports multi-document ACID transactions via sessions (4.2 extended them to sharded clusters). The nuanced point: they require a replica set/cluster and carry overhead, and good document modeling often removes the need for them because related data lives in one atomically-updated document.
+> A write to a single document has always been atomic, including nested arrays and subdocuments. Since MongoDB 4.0 you can also wrap several documents in one ACID transaction, using a session: `startTransaction()`, pass `{ session }` on every read and write, then `commitTransaction()` or `abortTransaction()`. Version 4.2 extended that to sharded clusters. You need a replica set or a sharded cluster. A standalone `mongod` returns an error. For example, moving money between two account documents is a session transaction, while updating stock and the embedded line items on one order document does not need one. The limit is cost and the foot-gun of a missing session. Writes without `{ session }` commit immediately and will not roll back with the rest, and multi-document transactions add overhead you should not pay when the model already keeps the change in one document.
 
 > **Q: What are isolation levels and what anomalies do they prevent?**  
-> They control how much concurrent transactions are shielded from each other. Read Uncommitted allows dirty reads; Read Committed prevents dirty reads; Repeatable Read also prevents non-repeatable reads; Serializable prevents phantom reads too and behaves as if transactions ran sequentially. Higher levels cost throughput. Naming an anomaly (dirty/non-repeatable/phantom read) and the level that stops it is the strong answer.
+> An isolation level is how much concurrent transactions are shielded from each other. A dirty read sees another transaction's uncommitted write. A non-repeatable read sees a committed change to a row you already read. A phantom read sees new rows appear that match a `WHERE` you already ran. Read uncommitted allows dirty reads. Read committed prevents them, and it is Postgres's default. Repeatable read also prevents non-repeatable reads, and it is MySQL InnoDB's default. Serializable also prevents phantoms and behaves as if the transactions ran one by one. For example, two reports that sum the same accounts can disagree under read committed if a transfer commits between their reads, and serializable refuses that schedule. The limit is throughput. Stronger levels abort more transactions under contention, and the application has to retry the whole unit. Naming the anomaly and the level that stops it is the answer. "Use serializable everywhere" is not.
 
 > **Q: When do you actually need a transaction?**  
-> When one logical operation spans multiple rows/documents and a partial result would be invalid — money transfers, order-plus-inventory, any cross-record invariant. When the change touches a single row/document, the database already guarantees atomicity, so a transaction is unnecessary overhead. The skill is recognising which case you are in.
-
-> **Q: How do you avoid a race condition like overselling inventory?**  
-> Do not read-then-write in two steps — that lets two requests both pass the check. Use a single atomic conditional update: in Mongo `updateOne({ _id, stock: { $gte: qty } }, { $inc: { stock: -qty } })`, in SQL `UPDATE ... SET stock = stock - $1 WHERE id = $2 AND stock >= $1`, or lock the row with `SELECT ... FOR UPDATE` inside a transaction. The guard and the mutation must be one atomic operation.
-
-> **Q: Why keep transactions short, and what is a write conflict?**  
-> An open transaction holds locks (or an MVCC snapshot) and blocks other work, so long transactions cause contention, lock waits, and blocked connections. Under high contention or Serializable isolation, the database may abort a transaction with a write-conflict/serialization error rather than allow an inconsistency — the correct response is to catch it and retry the whole transaction, which is why transaction code is often wrapped in a bounded retry loop.
+> You need one when a single logical action writes more than one row or document and a partial result would break an invariant. A transfer, an order plus its stock decrement, and any "these totals must match" rule are that case. You do not need one when the change is a single row or a single document, because that write is already atomic. For example, `$inc` on one product's `stock`, with a filter that stock is at least the quantity, cannot oversell, and it does not open a transaction. The same decrement spread across a stock document and an orders document does. The limit of reaching for a transaction by habit is lock time. A transaction held open across an HTTP call to a card processor blocks other work. Do the external call outside, and keep the database unit to the writes that must commit together.
 
 ## Cheat-card
 
-- **Transaction:** group of writes that all commit or all rollback.
-- **ACID:** Atomicity, Consistency, Isolation, Durability.
-- **SQL:** `BEGIN` → writes on the checked-out client → `COMMIT`/`ROLLBACK`.
-- **Mongo:** `startSession` → `startTransaction` → pass `{ session }` → commit/abort; needs a replica set.
-- **Single doc/row writes are already atomic** — often no transaction needed.
-- **Avoid races** with one conditional atomic update or `SELECT ... FOR UPDATE`.
-- **Isolation levels** trade throughput for fewer anomalies; retry on write conflicts; keep transactions short.
-- **`withTransaction()`:** commits, aborts on throw, reruns the callback on `TransientTransactionError` (e.g. `WriteConflict`, code 112); keep side effects out and always rethrow.
-- **Mongoose `__v`:** by default guards only positional array edits; `optimisticConcurrency: true` makes a stale `save()` throw `VersionError`; query updates must add `$inc: { __v: 1 }`.
-- **Deadlock:** rows locked in opposite order → cycle → after `deadlock_timeout` (1s) one transaction gets 40P01; fix with one lock order plus a bounded retry on 40P01/40001.
-- **Savepoints:** after an error the transaction is aborted (25P02) and `COMMIT` answers `ROLLBACK`; `SAVEPOINT` / `ROLLBACK TO SAVEPOINT` / `RELEASE` keeps the earlier work.
-- **DB work queue:** claim with `FOR UPDATE SKIP LOCKED` plus a lease and commit, work outside the transaction, mark done only as the claim's owner (lesson 114's pattern).
+- A transaction commits all of its writes or rolls all of them back.
+- ACID: atomicity, consistency, isolation, durability.
+- SQL: `BEGIN`, writes on the checked-out client, then `COMMIT` or `ROLLBACK`.
+- Mongo: `startSession`, `startTransaction`, pass `{ session }`, then commit or abort. Needs a replica set.
+- A single document or a single row is already atomic.
+- Avoid a race with one conditional update, or with `SELECT ... FOR UPDATE`.
+- Stronger isolation prevents more anomalies and costs throughput. Retry conflicts. Keep the transaction short.
+
+## Good to know
+
+- `withTransaction()` commits, aborts on a throw, and reruns the callback on `TransientTransactionError` such as `WriteConflict` code 112. Keep side effects out of the callback and rethrow anything that is not transient. The driver sleeps a random backoff of up to 5 ms times 1.5 to the attempt, capped at 500 ms, and stops after 120 seconds.
+- Mongoose `__v` guards positional array edits by default. `optimisticConcurrency: true` makes a stale `save()` throw `VersionError`. A query update must `$inc` `__v`.
+- A deadlock is two transactions locking rows in opposite orders. After `deadlock_timeout` (1 second) one of them gets SQLSTATE 40P01. Lock in one order, and retry 40P01 and 40001 a bounded number of times.
+- After an error the transaction is aborted (25P02) and a later `COMMIT` is reported as a rollback. `SAVEPOINT`, `ROLLBACK TO SAVEPOINT`, and `RELEASE` keep the work from before the savepoint.
+- A work queue claims with `FOR UPDATE SKIP LOCKED`, a lease, and a commit, does the work outside the transaction, and marks done only as the claim's owner (lesson 114).
+- Q: How do you avoid overselling inventory? Do not read the stock and then write it in a second step. Both requests can pass the check. Use one atomic conditional update: in Mongo, `updateOne({ _id, stock: { $gte: qty } }, { $inc: { stock: -qty } })`. In SQL, `UPDATE ... SET stock = stock - $1 WHERE id = $2 AND stock >= $1`. Or lock the row with `SELECT ... FOR UPDATE` inside a transaction. The guard and the mutation have to be one operation.
+- Q: Why keep transactions short, and what is a write conflict? An open transaction holds locks or a snapshot and blocks other work. Under contention, or under serializable isolation, the database aborts one transaction with a write-conflict or serialization error instead of allowing a bad interleaving. Catch it and retry the whole unit, with a bounded number of attempts.
+- Q: Two transfers between the same accounts run together and one fails with `deadlock detected`. Why? Each transaction locked its own "from" row first, then waited for the other's row, which is a cycle. After `deadlock_timeout` (1 second by default) Postgres cancels one of them with SQLSTATE 40P01. Which one is not predictable. Lock rows in one global order, for example `SELECT ... WHERE id = ANY($1) ORDER BY id FOR UPDATE`, so the second transfer waits instead of cycling. Also retry 40P01 and 40001. Raising `deadlock_timeout` only delays detection.
+- Q: How would you build a job queue on PostgreSQL so two workers never take the same job? Claim with one short statement: update a queued job, or a processing job whose lease has expired, using `FOR UPDATE SKIP LOCKED` and `LIMIT 1`, and return the row. `SKIP LOCKED` lets other workers take different rows instead of waiting. Do the work outside any transaction. Mark it done with `WHERE id = $1 AND claimed_by = $token`. The lease makes delivery at least once, so the job must be idempotent. Holding `FOR UPDATE` open during the work ties up a pooled connection per job and, without `SKIP LOCKED`, runs the workers one at a time.
 
 ---
 
@@ -849,8 +853,4 @@ Six 30 ms jobs took 84 ms with `SKIP LOCKED` (two rounds of three jobs, plus ove
 
 ### ⭐ Interview lens (additional topics)
 
-> **Q: “Two transfers between the same pair of accounts run at the same moment and one fails with `deadlock detected`. Why, and what do you change?”**  
-> A: Each transaction updated its *from* row first, so A locked row 1 and B locked row 2. Then each waited for the other's row, which is a cycle. After `deadlock_timeout` (1 s by default), PostgreSQL's deadlock check cancelled one of them with SQLSTATE 40P01; which one is not predictable. Fix the cause by locking rows in one global order (`SELECT … WHERE id = ANY($1) ORDER BY id FOR UPDATE` first), so the second transfer just waits. Also wrap transactions in a bounded retry on 40P01 and 40001 that rolls back and reruns the whole transaction. *Trap:* raising `deadlock_timeout` does not prevent deadlocks; it only delays detecting them.
-
-> **Q: “How would you build a job queue on PostgreSQL so that several workers never process the same job?”**  
-> A: Claim with one short statement: `UPDATE jobs SET status = 'processing', claimed_by = $token, claimed_at = now() WHERE id = (SELECT id FROM jobs WHERE status = 'queued' OR (status = 'processing' AND claimed_at < now() - lease) ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING *`. `SKIP LOCKED` lets concurrent claimers take different rows without waiting. Do the work outside any transaction, then mark it done with `WHERE id = $1 AND claimed_by = $token`. The lease lets another worker take over from a crashed one, which makes delivery at-least-once, so the job must be idempotent. *Trap:* holding a `FOR UPDATE` transaction open during the work ties up a connection per job and, without `SKIP LOCKED`, serializes the workers.
+The questions from this section are under Good to know, one line each.

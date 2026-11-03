@@ -13,54 +13,48 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+The event loop is a scheduler inside Node, provided by the C library libuv, that runs your callbacks one at a time in a fixed order of phases. A phase is one inbox: timers, then a few deferred system callbacks, then poll where I/O is collected, then check where `setImmediate` runs, then close handlers, and then it starts again.
+
+It exists so one JavaScript thread can serve many connections. The thread sleeps in the kernel until a timer or a socket is ready, then runs that callback. The trade-off is cooperation. A callback that does not return blocks every other inbox until it does.
+
 ## Why it matters
 
-Node.js can serve thousands of simultaneous connections on a single thread, and the reason is the **event loop**. It is the scheduler at the heart of the runtime: a C-level loop, provided by the `libuv` library, that decides *which callback runs next*. Every timer that fires, every file that finishes reading, every HTTP request that lands on your server is a callback that the event loop picks up and hands to V8 to execute.
-
-If you do not understand the phases of this loop, three categories of bug become impossible to reason about. First, **ordering bugs**: "why did my `setTimeout` callback run before my `setImmediate` callback here, but after it over there?" Second, **latency bugs**: "why does my server occasionally stall for 400ms even though every handler looks fast?" Third, **starvation bugs**: "why does this recursive callback freeze the whole process?" All three trace back to the same source of truth — the order in which the loop drains its queues.
-
-This is also the single most reliably asked Node.js interview topic. Interviewers love it precisely because it separates people who have memorised "Node is non-blocking" from people who can predict the exact output of a snippet and explain *why*. That "why" is what this topic gives you.
+Every timer, finished file read, and incoming HTTP request is a callback this loop hands to V8. If you cannot name the phases, three bugs stay mysterious. Ordering bugs, such as `setTimeout` and `setImmediate` swapping places. Latency bugs, where the server stalls even though each handler looks small. Starvation bugs, where one recursive callback never lets the loop move. All three are the order in which the loop drains its queues.
 
 ## The concept, simply
 
-Think of the event loop as a person working through a set of inboxes, in a fixed order, over and over. Each inbox — Node calls them **phases** — holds a specific kind of pending callback. The worker opens the first inbox, handles everything of that type, closes it, moves to the next inbox, and so on. When they reach the last inbox they loop back to the first. That full trip around the inboxes is one **tick** (more precisely, one iteration of the loop).
+Picture one person and six inboxes, always in the same order. One full trip is one iteration of the loop. People often call that a tick, but `process.nextTick` is a different queue and the name is historical.
 
-There are six phases, and their order never changes:
+1. **timers.** Callbacks from `setTimeout` and `setInterval` whose delay has elapsed.
+2. **pending callbacks.** A few system callbacks deferred from the previous trip, such as some TCP errors like `ECONNREFUSED`.
+3. **idle, prepare.** Internal to libuv. You never schedule work here.
+4. **poll.** Collects new I/O events and runs their callbacks. If nothing else is due, the loop blocks here and waits.
+5. **check.** Runs `setImmediate` callbacks.
+6. **close callbacks.** Runs `'close'` handlers, such as `socket.on('close', ...)`.
 
-1. **timers** — runs callbacks scheduled by `setTimeout` and `setInterval` whose delay has elapsed.
-2. **pending callbacks** — runs a small set of system-level callbacks deferred from a previous loop (e.g. certain TCP errors like `ECONNREFUSED`).
-3. **idle, prepare** — internal to libuv only; you never schedule work here.
-4. **poll** — the heart of the loop. Retrieves new I/O events and runs their callbacks (incoming data, completed file reads). This is the phase where the loop will *block and wait* if there is nothing else to do.
-5. **check** — runs `setImmediate` callbacks.
-6. **close callbacks** — runs `'close'` handlers, e.g. `socket.on('close', ...)`.
-
-People usually shorten this to five that you actually schedule into: **timers → pending → poll → check → close**. The diagram below shows the ring the loop walks.
+In practice you schedule into timers, poll, check, and close.
 
 ![Circular diagram of the six event loop phases: timers, pending callbacks, idle/prepare, poll, check, and close callbacks](assets/i03_01_d58df36e.svg)
 
-The event loop is a fixed ring of phases. Each phase drains its own queue before the loop advances to the next.
+Each phase drains its own queue before the loop advances.
 
 ## How it works
 
-Each phase owns a **FIFO queue** of callbacks. When the loop enters a phase, it executes callbacks from that phase's queue *one by one* until either the queue is empty or a system-dependent maximum number of callbacks has run. Then it moves to the next phase. Callbacks you schedule while inside a phase do not necessarily run in that same phase — they land in the appropriate phase's queue and are picked up when the loop next reaches it.
+A phase owns a first-in, first-out queue. The loop runs callbacks from that queue one by one until the queue is empty or a system limit is hit, then moves on. A callback you schedule during a phase does not run in that same visit. It waits in the queue for the phase it belongs to.
 
 ![A phase box containing several queued I/O callbacks that drain left to right until empty, then hand off to the next phase](assets/i03_02_f6f7cf00.svg)
 
-Within a phase the loop drains the queue callback by callback; when it empties, control passes to the next phase.
+**Poll is the phase that can sleep.** If poll's queue has callbacks, they run. If the queue is empty and `setImmediate` callbacks are waiting, poll ends and the loop goes to check. If nothing is pending anywhere, the loop blocks in poll until the operating system delivers I/O, or until the nearest timer is due. An idle server uses almost no CPU because it is asleep inside that kernel wait: `epoll_wait` on Linux, `kqueue` on macOS, IOCP on Windows.
 
-Two subtleties do most of the interview damage:
+**nextTick and promise microtasks are not phases.** After the current callback returns, and again at each phase boundary, Node drains the `process.nextTick` queue and then the promise microtask queue before it does anything else. That is why a promise `.then` beats a `setTimeout` of 0. The full rules are the microtask lesson. The rhythm is: run one phase callback, drain nextTick, drain microtasks, run the next callback.
 
-**1. The poll phase has special blocking behaviour.** When the loop reaches poll, it looks at the poll queue. If there are callbacks, it runs them. If the poll queue is empty, the loop does one of two things. If there are `setImmediate` callbacks waiting, it ends poll immediately and jumps to the check phase to run them. If there is no immediate work anywhere, it will *block* in poll, waiting for the operating system to deliver an I/O event — but only until the nearest timer is due. This is how an idle Node server uses ~0% CPU: it is parked in the poll phase inside a kernel call (`epoll_wait` on Linux), asleep until something happens.
-
-**2. Between operations, two special queues drain — and they are not phases.** After the currently executing callback returns (and again at each phase boundary), Node fully drains the `process.nextTick` queue, then fully drains the Promise **microtask** queue, before doing anything else. These queues do not belong to any phase; they interleave *between* callbacks. This is why a promise `.then` always beats a `setTimeout(…, 0)`: the microtask queue is emptied before the loop is even allowed to advance to the next macrotask. We cover this fully in the microtasks topic — but you must hold the picture that phases are the coarse structure and microtasks squeeze in between every callback.
-
-So the true rhythm of one turn is: run a phase callback → drain nextTick → drain microtasks → run the next phase callback → drain nextTick → drain microtasks → … → queue empty → advance phase. The phases give the skeleton; the microtask drains happen constantly in between.
-
-One more framing that helps: the loop keeps running as long as there is any pending work — an open handle (a listening server, an active timer, an open socket). When no handles or requests remain, `uv_run` returns and the Node process exits naturally. That is why a bare script with a `setInterval` never exits, and why an HTTP server stays alive: the listening socket is a ref'd handle that keeps the loop turning.
+The loop keeps turning while any ref'd handle is open: a listening server, an active timer, an open socket, or a pending request. When none remain, `uv_run` returns and the process exits. That is why `setInterval` keeps a script alive, and why `unref()` on a background timer lets the process exit.
 
 ## Code examples
 
-**Example 1 — timers vs immediate at the top level is not guaranteed.**
+**Example 1. Timers versus immediate at the top of a file is not guaranteed.**
 
 javascript
 
@@ -73,9 +67,9 @@ setImmediate(() => console.log('immediate'));
 //   immediate                 timeout
 ```
 
-At the top level the result is a race. `setTimeout(fn, 0)` is clamped to a 1ms minimum. Whether the loop reaches the timers phase and finds that 1ms already elapsed depends on how long process startup took — a few hundred microseconds of jitter decides the winner. Never rely on this ordering.
+`setTimeout` of 0 is clamped to at least 1 millisecond. Whether that millisecond has already elapsed when the loop first reaches timers depends on startup time. Do not rely on this order.
 
-**Example 2 — inside an I/O callback, the order becomes deterministic.**
+**Example 2. Inside an I/O callback, the order is fixed.**
 
 javascript
 
@@ -92,9 +86,9 @@ fs.readFile(__filename, () => {
 //   timeout
 ```
 
-The `readFile` callback runs in the **poll** phase. The very next phase is **check**, so the queued `setImmediate` fires first. The `setTimeout` has to wait for the loop to wrap all the way back around to the timers phase on the next iteration. This ordering is guaranteed, and it is a favourite interview question.
+The `readFile` callback runs in poll. The next phase is check, so `setImmediate` runs first. The timeout waits until the loop wraps back to timers. That order is guaranteed.
 
-**Example 3 — the loop stays alive because of a ref'd handle.**
+**Example 3. The loop stays alive because of a ref'd handle.**
 
 javascript
 
@@ -109,7 +103,8 @@ const t = setInterval(() => console.log('tick'), 1000);
 //   tick   (every second, forever)
 ```
 
-**Example 4 — microtasks jump the phase queue.**
+
+**Example 4. Microtasks jump the phase queue.**
 
 javascript
 
@@ -124,58 +119,58 @@ console.log('sync');
 //   timeout
 ```
 
-Synchronous code runs first. Before the loop advances to the timers phase, it drains the microtask queue, so `promise` prints before `timeout` even though the timer was scheduled first.
+Synchronous code runs first. Before the loop reaches timers, it drains microtasks, so the promise prints before the timeout even though the timer was scheduled first.
 
 ## Common mistakes & gotchas
 
-- **Assuming `setTimeout(fn, 0)` runs "immediately".** It runs in the next timers phase, after the current stack, after all microtasks, and after a 1ms minimum clamp — potentially much later under load.
-- **Believing phase order guarantees `setTimeout` before `setImmediate`.** Only true inside an I/O callback (and there it is the *reverse*). At the top level it is a race.
-- **Thinking a callback scheduled during a phase runs in that same phase.** It is queued for the next time the loop reaches the relevant phase, not appended to the phase you are currently in.
-- **Forgetting the poll phase can block.** If a timer is due in 200ms and there is no other work, the loop sleeps up to 200ms in poll — that is normal, not a hang.
-- **Confusing "tick" meanings.** A libuv loop *iteration* is one trip through the phases; `process.nextTick` is unrelated to that — its name is historical and misleading.
-- **Expecting `setInterval(fn, 100)` to run exactly every 100ms.** It fires no sooner than 100ms after the previous run *and* only when the loop reaches the timers phase; a busy loop makes intervals drift and coalesce.
+- **`setTimeout(fn, 0)` is not immediate.** It runs in a later timers phase, after the current stack, after microtasks, and after a 1 millisecond minimum. Under load it can be much later.
+- **Phase order does not mean timeout before immediate.** Inside an I/O callback the order is the reverse, and it is guaranteed. At the top of a file it is a race.
+- **A callback scheduled during a phase does not run in that same visit.** It waits until the loop reaches the phase it belongs to.
+- **Poll is allowed to block.** If the next timer is 200 milliseconds away and nothing else is pending, sleeping in poll is normal.
+- **Two meanings of tick.** One loop iteration is one trip through the phases. `process.nextTick` is not that trip.
+- **`setInterval(fn, 100)` is not a metronome.** It fires no sooner than 100 milliseconds after it was scheduled, and only when the loop reaches timers. A busy loop makes intervals drift and pile up.
 
 ## Best practices
 
-- **Never depend on top-level timer vs immediate ordering.** If you need "run after I/O", use `setImmediate` inside the I/O callback; if you need "defer to next loop iteration", use `setTimeout(fn, 0)` and document why.
-- **Use `setImmediate` to break up CPU work** so the loop can service I/O between chunks (see the blocking topic).
-- **Call `.unref()` on background timers** (heartbeats, metrics flushers) that should not keep the process alive on their own.
-- **Reason in terms of phases, not milliseconds.** "This runs in the check phase" is precise; "this runs in ~0ms" is a guess.
-- **Keep individual callbacks short.** The loop is cooperative — it cannot preempt a callback that refuses to return.
+- Do not depend on top-level timer versus immediate order. For "after I/O," use `setImmediate` inside the I/O callback.
+- Use `setImmediate` to split CPU work so the loop can serve I/O between chunks.
+- Call `.unref()` on background timers that should not keep the process alive by themselves.
+- Say which phase a callback runs in. "About 0 milliseconds" is a guess.
+- Keep each callback short. The loop cannot preempt a callback that will not return.
 
 ## ⭐ Interview lens
 
 > **Q: Name the phases of the event loop in order.**  
-> Timers → pending callbacks → idle/prepare (internal) → poll → check → close callbacks. In practice you schedule into timers (`setTimeout`/`setInterval`), poll (I/O), check (`setImmediate`), and close. Between every callback the nextTick and microtask queues drain.
+> The loop walks six phases, always in this order: timers, pending callbacks, idle and prepare, poll, check, then close callbacks. Timers runs `setTimeout` and `setInterval`. Pending callbacks is a small set of deferred system errors. Idle and prepare are internal. You do not schedule there. Poll collects I/O and can sleep. Check runs `setImmediate`. Close runs `'close'` handlers. Between callbacks, Node drains `process.nextTick` and then promise microtasks. Those two are not phases. The limit of reciting the list is that poll is not "run the queue and move on." If both the poll queue and the immediate queue are empty, the loop blocks there until I/O or the next timer.
 
 > **Q: What is the output?**  
 > `setTimeout(() => console.log('A'), 0); setImmediate(() => console.log('B'));`  
-> Indeterminate at the top level — could be A then B or B then A — because it depends on whether ~1ms has elapsed when the loop first reaches the timers phase. If you wrap both in an `fs.readFile` callback, it is always B then A, because the callback runs in poll and check comes next.
+> At the top of a file the output is not fixed. It can be A then B, or B then A. A timeout of 0 is clamped to about 1 millisecond, and the winner is whether that time has already passed when the loop first reaches timers. Put both calls inside an `fs.readFile` callback and the order is always B then A. The read callback runs in poll, and check is the next phase. The limit is that "always B then A" is only the I/O-callback case.
 
 > **Q: Why does an idle Node server use almost no CPU?**  
-> Because the loop parks in the poll phase inside a blocking kernel call (`epoll_wait`/`kqueue`/IOCP), sleeping until the OS delivers an I/O event or the next timer is due. It is not spinning.
+> The loop is asleep in the poll phase, inside one kernel call: `epoll_wait` on Linux, `kqueue` on macOS, or IOCP on Windows. It wakes when the operating system reports a socket event or when the nearest timer is due. It is not spinning. The limit of that picture is a callback that never returns. While your JavaScript runs, the loop is not in that wait, so one long synchronous function uses CPU and also stalls every connection.
 
 > **Q: What keeps the event loop — and the process — alive?**  
-> Pending work: active timers, open sockets, listening servers, pending thread-pool requests. These are "ref'd handles". When none remain, `uv_run` returns and the process exits. `unref()` marks a handle as not counting toward that.
-
-> **Q: In the poll phase, when does the loop decide to move on instead of waiting?**  
-> If the poll queue is non-empty it runs those callbacks. If it is empty but `setImmediate` callbacks exist, it ends poll and goes to check. If nothing is pending anywhere, it blocks in poll until an I/O event arrives or the nearest timer's threshold is reached.
-
-> **Q: Is the event loop the same as a thread?**  
-> No. The event loop is a scheduling algorithm running on the single main JS thread. libuv also manages a separate worker thread pool for certain blocking operations, but your JavaScript callbacks all execute on the one main thread, one at a time.
+> Ref'd handles. An active timer, an open socket, a listening server, or a pending thread-pool request counts. When none remain, `uv_run` returns and the process exits. `unref()` takes a handle out of that count, which is how a heartbeat timer can exist without pinning the process. The limit is signals and `process.exit()`. Those end the process even if handles are still open. `beforeExit` is a separate event for the moment the loop has already found nothing left.
 
 ## Cheat-card
 
-- **Order:** timers → pending → poll → check → close, then repeat.
-- **timers:** `setTimeout`/`setInterval`. **poll:** I/O callbacks (can block). **check:** `setImmediate`. **close:** `'close'` events.
-- Each phase drains its FIFO queue, then advances.
-- nextTick + microtasks drain *between every callback*, not as a phase.
-- Inside I/O callback: `setImmediate` beats `setTimeout(0)` — always.
-- Top level: timer vs immediate order is a race — never rely on it.
-- Loop lives while ref'd handles exist; `unref()` releases them.
-- **ELU:** `performance.eventLoopUtilization(prev)` = share of time outside `epoll_wait` in the window since `prev` (added in v14.10.0); capacity, not latency.
-- **ELU vs delay:** back-to-back short callbacks → ELU 1.0, delay fine; rare long block → ELU low, delay terrible. Watch both.
-- **ESM entry:** top-level promise runs before top-level nextTick; timeout vs immediate is still a race.
+- **Order:** timers, pending, poll, check, close, then repeat. Idle and prepare sit between pending and poll, and you do not schedule there.
+- **timers:** `setTimeout` and `setInterval`. **poll:** I/O, and it can block. **check:** `setImmediate`. **close:** `'close'` events.
+- Each phase drains its queue, then advances.
+- nextTick and microtasks drain between callbacks. They are not a phase.
+- Inside an I/O callback, `setImmediate` beats `setTimeout` of 0.
+- At the top of a file, timer versus immediate is a race.
+- The process lives while ref'd handles exist. `unref()` drops that hold.
+
+## Good to know
+
+- Q: In the poll phase, when does the loop decide to move on instead of waiting? If the poll queue has callbacks, it runs them. If the queue is empty but `setImmediate` callbacks exist, it ends poll and goes to check. If nothing is pending, it blocks until I/O arrives or the nearest timer is due.
+- Q: Is the event loop the same as a thread? No. It is a scheduler on the one JavaScript thread. libuv also has a worker thread pool for some blocking native calls. Your JavaScript callbacks still run one at a time on the main thread.
+- `performance.eventLoopUtilization()` was added in v14.10.0 and v12.19.0. The `perf_hooks.eventLoopUtilization` export was added in v24.12.0.
+- `import.meta.filename` was added in v21.2.0 and v20.11.0. Syntax detection treats a `.js` file with no `"type"` as an ES module when it contains `import`, on by default since v22.7.0 and v20.19.0.
+- Timeout versus immediate, 200 runs per batch on this machine: `immediate` usually won in both `.cjs` and `.mjs`. Sixteen parallel copies moved both formats to 249 immediate and 51 timeout out of 300. Two milliseconds of synchronous work after scheduling made `timeout` win 200 of 200 in both formats. Inside `fs.readFile`, the order was immediate then timeout, 200 of 200.
+- The four-line nextTick versus promise file did not vary in 50 runs of each format. Only the top-level pair flips between CommonJS and ES modules.
 
 ---
 
@@ -189,28 +184,24 @@ Synchronous code runs first. Before the loop advances to the timers phase, it dr
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### `performance.eventLoopUtilization()`: how busy the loop is
 
-**What it is.** Event Loop Utilization (ELU) is the share of wall-clock time the loop spent *outside* the kernel's event wait (`epoll_wait` on Linux), so it covers running callbacks, draining microtasks and Node's own work between phases. libuv records how long each poll-phase wait lasted (Node turns that bookkeeping on with libuv's `UV_METRICS_IDLE_TIME` loop option). `performance.eventLoopUtilization()` (added in v14.10.0 and v12.19.0; also exported as `perf_hooks.eventLoopUtilization`, added in v24.12.0) returns three numbers:
+Event loop utilization, ELU, is the share of wall-clock time the loop spent outside the kernel wait (`epoll_wait` on Linux). That includes your callbacks, microtask drains, and Node's own work between phases. libuv records each poll wait because Node turns on `UV_METRICS_IDLE_TIME`. `performance.eventLoopUtilization()` returns `idle` (milliseconds inside the wait), `active` (milliseconds anywhere else since the loop started), and `utilization` (`active / (idle + active)`, from 0 to 1).
 
-- `idle`: total milliseconds spent waiting inside the event provider;
-- `active`: total milliseconds spent anywhere else since the loop started;
-- `utilization`: `active / (idle + active)`, from 0 to 1.
+CPU cannot answer this. A process blocked in `spawnSync('sleep')` uses almost no CPU and still serves nothing. Event-loop delay, lesson 10, tells you how late timers fired. ELU tells you how close the loop is to having no spare time, which is the number you want before you shed load or add instances.
 
-**Why it exists.** CPU usage cannot tell you if the loop is saturated: a process that blocks in `spawnSync('sleep')` uses almost no CPU, but its loop serves nothing. Event-loop delay (lesson 10's `monitorEventLoopDelay`) only tells you how late timers fired. ELU answers a third question, "how close is this loop to having no spare time?", which is the number you want for load-shedding or autoscaling decisions.
+1. With no arguments, you get totals since the loop started. They are all zero if bootstrap has not finished.
+2. `eventLoopUtilization(prev)` is the delta since `prev`, with `utilization` for that window only. Use this for "the last N seconds."
+3. `eventLoopUtilization(later, earlier)` is the delta between two saved readings. Do not subtract two `utilization` ratios. They cover different windows.
+4. Idle time grows only while the loop is parked in poll. Any callback, microtask drain, or synchronous block adds to `active`.
 
-How it works:
-
-1. Called with no arguments, it returns cumulative totals since the loop started (all zeros if bootstrap has not finished).
-2. Called as `eventLoopUtilization(prev)`, it returns the **delta** between `prev` and now, with `utilization` worked out for that window only. This is the form you use for "ELU over the last N seconds".
-3. Called as `eventLoopUtilization(later, earlier)`, it returns the delta between two saved readings. You need this helper because ELU is a ratio, so you cannot subtract two `utilization` values directly.
-4. The idle time only grows while the loop is parked in poll. Any callback, microtask drain or synchronous block adds to `active`.
-
-**Example — an idle window, a busy window and the delta forms.**
+**Example. An idle window, a busy window, and the delta forms.**
 
 javascript
 
@@ -243,9 +234,9 @@ setImmediate(() => {              // bootstrap is done once the loop runs
 //   since start : idle=501ms active=507ms utilization=0.50
 ```
 
-The busy window shows 507 ms instead of 500 because the `console.log` calls and the trip to the check phase also count as active time. Three runs gave the same three lines to within 1 ms.
+The busy window shows 507 milliseconds instead of 500 because the `console.log` calls and the trip to check also count as active. Three runs matched these three lines within 1 millisecond.
 
-**Example — ELU and event-loop delay measure different things.** Two workloads, each measured for 2 s: (A) 2 ms chunks of work back to back, each yielding with `setImmediate`; (B) a mostly idle loop with one 300 ms block every second.
+**Example. ELU and event-loop delay measure different things.** Two workloads, each measured for 2 seconds. A is 2 millisecond chunks back to back, each yielding with `setImmediate`. B is a mostly idle loop with one 300 millisecond block every second.
 
 javascript
 
@@ -294,20 +285,18 @@ function measure(name, scenario) {
 //   B: one 300 ms block per 1 s  ELU=0.15  delay p50=10.1ms max=305.4ms
 ```
 
-Read it like this. The histogram samples every 10 ms, and on v24.19.0 each sample includes that 10 ms interval, so ~10 ms means "on time". Workload A has **no spare capacity** (ELU 1.00), yet every timer fires on time because no single callback runs long. Workload B has 85% spare capacity (ELU 0.15), yet one request in the wrong second waits 300 ms. Use ELU to answer "can this process take more load?" and delay to answer "are callbacks waiting too long?". A healthy service needs both numbers to look good.
+The histogram samples every 10 milliseconds, and on v24.19.0 each sample includes that 10 millisecond interval, so about 10 milliseconds means "on time." Workload A has no spare capacity (ELU 1.00) and every timer still fires on time, because no single callback runs long. Workload B has about 85 percent spare capacity (ELU 0.15) and one request in the wrong second waits 300 milliseconds. Use ELU for "can this process take more load?" and delay for "are callbacks waiting too long?"
 
 ### Ordering when the entry file is an ES module
 
-**What changes.** The phases do not change. What changes is *where the entry file's top-level code runs*. A CommonJS entry is compiled and called as a plain function. When it returns, Node drains the `process.nextTick` queue and then the promise queue. An ES module entry is evaluated from inside Node's promise-based ESM loader, so the module body runs while V8 is already draining microtasks. Promise jobs queued by the body run in that same drain, and Node gets back to its nextTick queue only after the drain ends. The same rule appears in lesson 08: a nextTick scheduled inside a promise callback runs after the promises queued later.
+The phases do not change. What changes is where the entry file's top-level code runs. A CommonJS entry is called as a plain function. When it returns, Node drains nextTick, then promises. An ES module entry is evaluated inside Node's promise-based loader, so the body runs while V8 is already draining microtasks. Promise jobs the body queued run in that same drain. Node reaches nextTick only after that drain ends. Lesson 08 has the same rule for a nextTick scheduled inside a promise callback.
 
-How it works:
+1. CommonJS entry: body, then nextTick, then promises, then the loop, timers first.
+2. ES module entry: the loader awaits evaluation, the body runs inside a promise job, V8 keeps draining promise jobs, then Node drains nextTick, then the loop.
+3. The timers versus check race is decided later, in the first iteration, by whether 1 millisecond has passed. It exists in both module systems.
+4. Inside a macrotask callback (timer, I/O, or `setImmediate`), both systems agree: nextTick, then promises.
 
-1. **CJS entry:** run the body → drain nextTick → drain promises → enter the loop (timers phase first).
-2. **ESM entry:** the loader awaits the module's evaluation → the body runs inside a promise job → V8 keeps draining promise jobs (including ones the body queued) → Node drains nextTick → enter the loop.
-3. **The timers vs check race** at the top level is decided later, in the first loop iteration. It depends only on whether 1 ms has passed between `setTimeout` being called and the timers phase checking the clock. So the race exists in both module systems.
-4. Inside any macrotask callback (a timer, I/O, `setImmediate`), both module systems behave the same: nextTick first, then promises.
-
-**Example — the same four lines as `.cjs` and `.mjs`.**
+**Example. The same four lines as `.cjs` and `.mjs`.**
 
 javascript
 
@@ -320,6 +309,7 @@ setTimeout(() => {
   Promise.resolve().then(() => console.log('timer: promise'));
 }, 0);
 ```
+
 
 bash
 
@@ -336,9 +326,9 @@ timer: nextTick
 timer: promise
 ```
 
-Only the top-level pair flips. A `.js` file under a `package.json` with `"type": "module"` gave the `.mjs` output. 50 runs of each file never varied.
+Only the top-level nextTick versus promise pair flips. A `.js` file under `"type": "module"` matched the `.mjs` output.
 
-**Example — timeout vs immediate: still a race in ESM.** The two-line file from Example 1 (`setTimeout(…, 0)` and `setImmediate(…)`), saved as `tvi.cjs` and `tvi.mjs`, run 200 times per batch:
+**Example. Timeout versus immediate is still a race in an ES module.**
 
 bash
 
@@ -352,20 +342,20 @@ batch 3 tvi.cjs:     183 immediate timeout      17 timeout immediate
 batch 3 tvi.mjs:     191 immediate timeout       9 timeout immediate
 ```
 
-On this machine `immediate` usually won, in both formats. The counts change from batch to batch, and running 16 copies in parallel (`xargs -P16`) moved both formats to 249/51 out of 300. ESM does not make the order deterministic. Two things do. Add 2 ms of synchronous work after scheduling (`timeout` won 200/200 in both formats). Or schedule from inside an I/O callback: `fs.readFile(import.meta.filename, …)` in an `.mjs` file gave `immediate timeout` 200/200, the same as the CJS Example 2 above (`import.meta.filename` was added in v21.2.0 and v20.11.0).
+ESM does not make that order deterministic. Two things do. Add 2 milliseconds of synchronous work after scheduling, and timeout won every run in both formats. Or schedule from inside an I/O callback. The run counts are in Good to know.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **Reading ELU as CPU usage.** ELU is time outside `epoll_wait`, not CPU time. A loop blocked in `spawnSync('sleep', …)` or `Atomics.wait(…, 300)` shows ELU 1.0 (the `Atomics.wait` case measured `1` on v24.19.0) while the CPU is idle.
-- **Subtracting two `utilization` values.** They are ratios over different windows. Pass the earlier reading back in, as `eventLoopUtilization(prev)` or `eventLoopUtilization(later, earlier)`.
-- **Measuring ELU at startup.** On the main thread the values are 0 until bootstrap finishes. Take the first reading inside the loop (for example in a `setImmediate`).
-- **Treating low ELU as "fast".** ELU 0.15 with a 300 ms block is still a 300 ms stall for whoever was waiting. Watch event-loop delay alongside it.
-- **Expecting ESM to fix the top-level timer race.** It doesn't. Whether `timeout` or `immediate` wins still depends on how many microseconds passed before the first timers phase.
-- **Porting ordering-sensitive code from `.cjs` to `.mjs`.** Top-level nextTick vs promise order flips. Code that "worked" because a nextTick ran first (for example, attaching a listener) can break silently.
+- **Reading ELU as CPU.** ELU is time outside `epoll_wait`, not CPU time. A loop blocked in `spawnSync('sleep')` or `Atomics.wait` for 300 milliseconds shows ELU 1.0 while the CPU is idle. The `Atomics.wait` case measured `1` on v24.19.0.
+- **Subtracting two `utilization` numbers.** Pass the earlier reading back in.
+- **Measuring ELU at startup.** On the main thread the values stay 0 until bootstrap finishes. Take the first reading inside the loop, for example in a `setImmediate`.
+- **Treating low ELU as fast.** ELU 0.15 with a 300 millisecond block is still a 300 millisecond stall. Watch delay too.
+- **Expecting an ES module to fix the top-level timer race.** It does not.
+- **Porting order-sensitive code from `.cjs` to `.mjs`.** Top-level nextTick versus promise order flips. A listener that "worked" because nextTick ran first can break quietly.
 
 ### Edge case worked through: one `import` line flips the order of a `.js` file
 
-Since v22.7.0 (and v20.19.0), syntax detection is on by default: a `.js` file with no `"type"` field in its `package.json` (or no `package.json` at all) is treated as an ES module if it contains ES module syntax. So adding an `import` to such a file changes the order of its top-level code:
+Since v22.7.0 and v20.19.0, syntax detection is on by default. A `.js` file with no `"type"` field, or with no `package.json`, is an ES module if it contains ES module syntax. Adding an `import` changes the order of the top-level callbacks.
 
 javascript
 
@@ -380,6 +370,7 @@ process.nextTick(() => console.log('nextTick'));
 Promise.resolve().then(() => console.log('promise'));
 ```
 
+
 bash
 
 ```
@@ -391,12 +382,12 @@ promise
 nextTick
 ```
 
-Nothing about the two callbacks changed. `b.js` was loaded by the ESM loader, so its body ran inside a promise job. If ordering matters, don't infer the module system from the extension. Check it (`typeof require === 'function'` is false in ESM), or remove the dependency on top-level order altogether.
+Nothing about the two callbacks changed. `b.js` was loaded by the ESM loader, so its body ran inside a promise job. If order matters, do not infer the module system from the extension. `typeof require === 'function'` is false in ESM. Or stop depending on top-level order.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “ELU is 0.2 but p99 latency is terrible. ELU is 1.0 on another service but latency is fine. How can both be true?”**  
-> A: ELU is the share of time the loop was not waiting in `epoll_wait`, and event-loop delay is how late callbacks ran. A mostly idle loop with an occasional 300 ms synchronous block has low ELU and a terrible tail. A loop doing many 2 ms callbacks back to back has ELU near 1.0 (no headroom left) but every timer runs on time. Use ELU for capacity decisions and delay for latency alerts. *Trap:* answering "ELU is CPU usage".
+> ELU is the share of time the loop was not waiting in `epoll_wait`. Event-loop delay is how late callbacks actually ran. A mostly idle loop with one 300 millisecond synchronous block has low ELU and a bad tail. A loop of many 2 millisecond callbacks back to back has ELU near 1, meaning no spare capacity, while every timer still runs on time. Use ELU to decide capacity. Use delay to alert on latency. The limit of ELU is that it is not CPU. A sleep in `spawnSync` also reports ELU 1 while the processor is idle.
 
 > **Q: “Does `setTimeout(0)` vs `setImmediate` at the top level become deterministic in an ES module?”**  
-> A: No. In both module systems it depends on whether 1 ms passed before the first timers phase. What ESM does change is the top-level nextTick vs promise order: the module body runs inside a promise job, so its promise callbacks run before its nextTick callbacks.
+> No. In both module systems it depends on whether 1 millisecond passed before the first timers phase. What an ES module changes is top-level nextTick versus promise order. The module body runs inside a promise job, so its promise callbacks run before its nextTick callbacks. Inside a timer, I/O, or `setImmediate` callback, nextTick still wins in both formats. The limit is assuming the extension tells you the system. One `import` in a `.js` file with no `"type"` is enough to flip that top-level pair.

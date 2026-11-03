@@ -13,27 +13,29 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A web stream is the browser-style queue of chunks that `fetch` gives you as `res.body`, with a reader or a writer that locks the stream while it runs. Node has it alongside the older `node:stream` classes because the same code now runs in browsers, Deno, Bun, and Node. The trade-off is backpressure. Nothing in this API refuses a chunk. You have to watch `desiredSize`, or await `writer.ready`, or the whole body queues in memory.
+
 ## Why it matters
 
-Node has two stream APIs. Lessons 35–38 cover the original one in `node:stream` (`Readable`, `Writable`, `Transform`, `pipeline`). The second is the WHATWG Streams Standard, the one browsers, Deno, Bun and edge runtimes use. Node ships it as globals (`ReadableStream`, `WritableStream`, `TransformStream`) and in `node:stream/web`.
+Node has two stream APIs. Lessons 35 to 38 cover `node:stream`: `Readable`, `Writable`, `Transform`, and `pipeline`. The second is the WHATWG Streams Standard, the one browsers and edge runtimes use. Node ships it as globals (`ReadableStream`, `WritableStream`, `TransformStream`) and from `node:stream/web`.
 
-You meet the second API as soon as you call `fetch`. On Node v24.19.0, `res.body` is a `ReadableStream`, not a `Readable`. It has no `.pipe()`, no `'data'` event and no `setEncoding()`. Code written for Node streams fails on it with `TypeError: res.body.pipe is not a function`. The same is true of `Response`, `Blob.stream()`, `CompressionStream` and `TextDecoderStream`, and of any library written to run in both browsers and Node.
+`fetch` is where you meet it. On Node v24.19.0, `res.body` is a `ReadableStream`, not a Node `Readable`. It has no `.pipe()`, no `'data'` event, and no `setEncoding()`. Code written for Node streams fails with `TypeError: res.body.pipe is not a function`. The same is true of `Blob.stream()`, `CompressionStream`, and `TextDecoderStream`.
 
-So a Node backend needs three things: the web API itself (readers, writers, queuing strategies), the converters between the two worlds (`Readable.toWeb`, `Readable.fromWeb` and friends), and an understanding of where their backpressure rules differ. Without the last one you write a loop that "works" and quietly queues the whole body in memory.
+You need the web API itself, the converters (`Readable.toWeb`, `Readable.fromWeb`, and the writable and duplex pairs), and the place their backpressure rules differ. Without that last piece a loop looks fine and quietly queues the whole body.
 
 ## The concept, simply
 
-A web stream is a queue of chunks plus a small object that feeds or drains it. There are three classes:
+A web stream is a queue of chunks plus a small object that feeds or drains it.
 
-- **`ReadableStream`** wraps an *underlying source*, an object you pass to the constructor with up to three methods: `start(controller)` runs once at creation, `pull(controller)` runs whenever the queue has room, and `cancel(reason)` runs when the consumer gives up. The source puts data in with `controller.enqueue(chunk)`, ends the stream with `controller.close()` and fails it with `controller.error(err)`. To read, you take a **reader** with `getReader()`. A reader *locks* the stream (`stream.locked === true`), so only one consumer reads at a time. `reader.read()` returns a promise for `{ value, done }`.
-- **`WritableStream`** wraps an *underlying sink* with `start`, `write(chunk, controller)`, `close()` and `abort(reason)`. To write, you take a **writer** with `getWriter()`, which also locks the stream. `writer.write(chunk)` returns a promise, `writer.desiredSize` says how much room is left, and `writer.ready` is a promise that settles when there is room again.
-- **`TransformStream`** is a pair `{ writable, readable }` joined by a *transformer* with `transform(chunk, controller)` and `flush(controller)`. What you write into `.writable` comes out of `.readable` after `transform()` has run on it.
+- A **ReadableStream** wraps an underlying source. `start(controller)` runs once. `pull(controller)` runs when the queue has room. `cancel(reason)` runs when the consumer gives up. The source calls `controller.enqueue(chunk)`, `controller.close()`, and `controller.error(err)`. `getReader()` locks the stream so only one consumer reads. `reader.read()` returns a promise of `{ value, done }`.
+- A **WritableStream** wraps a sink with `start`, `write(chunk, controller)`, `close`, and `abort`. `getWriter()` locks it. `writer.write(chunk)` returns a promise. `writer.desiredSize` is how much room is left. `writer.ready` resolves when there is room again.
+- A **TransformStream** is a pair, `writable` and `readable`, joined by `transform(chunk, controller)` and `flush(controller)`.
 
-Every queue has a **queuing strategy**: `{ highWaterMark, size(chunk) }`. `size()` measures one chunk and `highWaterMark` is the limit in those units. `desiredSize` is `highWaterMark` minus the total size queued. `CountQueuingStrategy` measures every chunk as 1; `ByteLengthQueuingStrategy` measures `chunk.byteLength`. With no strategy, a `ReadableStream` or `WritableStream` counts chunks with a limit of 1.
+A **queuing strategy** is `{ highWaterMark, size(chunk) }`. `size` measures one chunk. `highWaterMark` is the limit in those units. `desiredSize` is the limit minus what is queued. `CountQueuingStrategy` counts each chunk as 1. `ByteLengthQueuingStrategy` uses `chunk.byteLength`. With no strategy, a readable or writable counts chunks and the limit is 1.
 
-Nothing in the web API refuses data. `controller.enqueue()` and `writer.write()` always accept the chunk; when the queue is over its limit, `desiredSize` just goes to zero or below. Backpressure works only if the producer reads `desiredSize` or awaits `writer.ready`.
-
-The two APIs side by side, and the converters between them:
+Nothing refuses data. `enqueue` and `writer.write` always accept the chunk. Past the limit, `desiredSize` goes to zero or below. Backpressure works only if the producer reads `desiredSize` or awaits `writer.ready`.
 
 text
 
@@ -59,26 +61,24 @@ text
         Duplex.toWeb(d)    ─────────►  { readable, writable }   Duplex.fromWeb(pair) ◄─────
 ```
 
-**Versions.** The classes were added in v16.5.0 in `node:stream/web` and became globals in v18.0.0. The `node:stream/web` module is Stability 2 (Stable) and stopped being experimental in v21.0.0. The globals docs mark the global `ReadableStream`, `CompressionStream` and the rest stable in v23.11.0 and v22.15.0. `TextDecoderStream` and `TextEncoderStream` were added in v16.6.0, `CompressionStream` and `DecompressionStream` in v17.0.0 (`'deflate-raw'` added in v21.2.0 / v20.12.0, `'brotli'` in v24.7.0). `ReadableStream.from(iterable)` was added in v20.6.0. `fetch` was added in v17.5.0 / v16.15.0, lost its `--experimental-fetch` flag in v18.0.0 and stopped being experimental in v21.0.0.
-
 ## How it works
 
-1. **Construction.** `new ReadableStream(source, strategy)` calls `source.start(controller)` at once. After `start` finishes, the stream calls `pull(controller)` as long as `desiredSize > 0`. If `pull` returns a promise, the stream does not call it again until the promise settles.
-2. **Filling the queue.** Each `controller.enqueue(chunk)` adds the chunk to the queue and subtracts `size(chunk)` from `desiredSize`. When `desiredSize` reaches 0, the stream stops calling `pull`. A source that enqueues from `start` or from a timer (a *push source*) is not stopped by anything; it has to check `controller.desiredSize` itself.
-3. **Reading.** `getReader()` locks the stream. Each `reader.read()` takes the first chunk out of the queue and resolves `{ value: chunk, done: false }`. If the queue is empty, the promise waits. After `close()` and an empty queue, it resolves `{ value: undefined, done: true }`. Taking a chunk out raises `desiredSize`, so `pull` runs again.
-4. **Releasing.** `reader.releaseLock()` unlocks the stream so another reader, a `for await` loop or `pipeTo` can use it. `reader.cancel(reason)` or `stream.cancel(reason)` throws away the queue and calls `source.cancel(reason)`.
-5. **Writing.** `writer.write(chunk)` adds the chunk to the sink's queue and returns a promise that settles when `sink.write()` has finished with that chunk. The sink handles one chunk at a time; the chunk in progress still counts against `desiredSize`. When `desiredSize <= 0`, `writer.ready` is replaced with a new pending promise that resolves when the queue drops below the limit again.
-6. **Piping.** `readable.pipeTo(writable, options)` locks both ends, reads chunks and writes them, and waits on the writer's `ready` before each write. `readable.pipeThrough(transform)` pipes into `transform.writable` and returns `transform.readable`, so calls chain. An error at either end cancels the source or aborts the destination, unless `preventCancel`, `preventAbort` or `preventClose` say otherwise. `signal` stops the pipe.
+1. `new ReadableStream(source, strategy)` calls `start(controller)` at once, then `pull(controller)` while `desiredSize > 0`. If `pull` returns a promise, it is not called again until that promise settles.
+2. Each `enqueue` subtracts `size(chunk)` from `desiredSize`. At 0 the stream stops calling `pull`. A source that enqueues from `start` or from a timer is a push source. Nothing stops it. It has to read `controller.desiredSize` itself.
+3. `getReader()` locks the stream. `read()` takes the oldest chunk, or waits if the queue is empty. After `close()` and an empty queue, `read()` resolves `{ value: undefined, done: true }`. Taking a chunk raises `desiredSize`, so `pull` runs again.
+4. `releaseLock()` lets another reader, a `for await` loop, or `pipeTo` use the stream. `cancel(reason)` drops the queue and calls `source.cancel`.
+5. `writer.write(chunk)` queues the chunk and resolves when `sink.write` finishes that chunk. The sink handles one chunk at a time, and the chunk in progress still counts. When `desiredSize <= 0`, `writer.ready` is a new promise that resolves once the queue drops under the limit.
+6. `readable.pipeTo(writable)` locks both ends, reads, writes, and waits on `writer.ready`. `pipeThrough(transform)` writes into `transform.writable` and returns `transform.readable`. An error cancels the source or aborts the destination unless `preventCancel`, `preventAbort`, or `preventClose` says otherwise. `signal` stops the pipe.
 
-**Pull model vs push model.** In both APIs the stream asks the source for data when its buffer has room: Node calls `_read()`, the web API calls `pull()`. The difference is how the source answers. Node's `push(chunk)` returns `false` when the buffer is at its limit, so a push-style source gets a direct answer on every call. The web `controller.enqueue(chunk)` returns `undefined`; the source has to read `controller.desiredSize`. The web API also waits for the promise returned by an async `pull()`, so an async source does not get overlapping calls. Node calls `_read()` again only after a `push()`.
+Both APIs ask the source for data when the buffer has room. Node calls `_read()`. The web API calls `pull()`. Node's `push(chunk)` returns `false` at the limit. `controller.enqueue(chunk)` returns `undefined`, so you read `desiredSize`. An async `pull` does not overlap. Node calls `_read` again only after a `push`.
 
-**Units.** A Node byte stream measures its buffer in bytes, with a default limit of 64 KiB since v22 (16 objects in object mode). A web stream measures in whatever `size()` returns. The default is one unit per chunk with a limit of 1, so a web stream with no strategy holds one chunk, whether the chunk is 10 bytes or 10 MB. Pass `new ByteLengthQueuingStrategy({ highWaterMark: 65536 })` to get byte-based limits.
+A Node byte stream measures bytes, 64 KiB by default since v22, or 16 objects in object mode. A web stream measures whatever `size()` returns. The default is one unit per chunk with a limit of 1, so one chunk can be 10 bytes or 10 MB. Pass `new ByteLengthQueuingStrategy({ highWaterMark: 65536 })` for a byte limit.
 
-**Converters.** `Readable.toWeb`, `Readable.fromWeb`, `Writable.toWeb`, `Writable.fromWeb`, `Duplex.toWeb` and `Duplex.fromWeb` were added in v17.0.0 and marked stable (Stability 2) in v24.0.0. `Readable.toWeb(r, { strategy })` lets you set the web side's queue; with no strategy it uses `ByteLengthQueuingStrategy` with `r.readableHighWaterMark` (or `CountQueuingStrategy` in object mode), as the v24.19.0 source shows. `Readable.toWeb` got a `type: 'bytes'` option in v24.14.0, and `Duplex.toWeb` got `readableType` in v24.15.0. `Readable.fromWeb(rs, { encoding, highWaterMark, objectMode, signal })` and `Writable.fromWeb(ws, { decodeStrings, highWaterMark, objectMode, signal })` return ordinary Node streams. `pipeline()` has accepted web streams directly since v19.7.0 / v18.16.0, and `stream.finished()` since v19.5.0.
+`Readable.fromWeb` and `Writable.fromWeb` return ordinary Node streams. `pipeline()` has accepted web streams directly. Chunks from `fetch` and from `Readable.toWeb` on a byte stream are `Uint8Array`, not `Buffer`.
 
 ## Code examples
 
-**Example 1 — a pull source, a reader, `read()` results and `releaseLock()`.**
+**Example 1: a pull source, a reader, `read()` results, and `releaseLock()`.**
 
 javascript
 
@@ -130,9 +130,9 @@ console.log('locked after releaseLock():', stream.locked);
 //   locked after releaseLock(): false
 ```
 
-`pull()` runs once after `start()` to fill the one free slot, then once each time `read()` takes a chunk out. When `pull()` calls `close()`, the next `read()` resolves with `done: true` and `value: undefined`. `getReader()` locks the stream and `releaseLock()` unlocks it.
+`pull` runs once after `start` to fill the one free slot, then once each time `read` takes a chunk. `close()` makes the next `read` resolve with `done: true` and `value: undefined`. `getReader` locks the stream. `releaseLock` unlocks it.
 
-**Example 2 — writer backpressure: `desiredSize` goes negative and `writer.ready` waits.**
+**Example 2: writer backpressure. `desiredSize` goes negative and `writer.ready` waits.**
 
 javascript
 
@@ -185,9 +185,9 @@ console.log(`${at()}  closed`);
 //   350 ms  closed
 ```
 
-The sink allows 2 chunks. Five `write()` calls without `await` are all accepted: `desiredSize` goes to -3 and nothing throws. That is the web version of ignoring `write() === false` in Node. The second loop awaits `writer.ready`, which stays pending until the queue drops below the limit (at 200 ms only `e` is left, so `desiredSize` is 1). Awaiting `ready` before each write keeps at most 2 chunks queued.
+Five `write` calls without `await` are all accepted and `desiredSize` goes to -3. Nothing throws. That is the web version of ignoring `write() === false`. Awaiting `writer.ready` keeps at most the strategy's two chunks queued.
 
-**Example 3 — queuing strategies: chunks vs bytes, compared with a Node `Readable`.**
+**Example 3: queuing strategies, chunks versus bytes, next to a Node `Readable`.**
 
 javascript
 
@@ -221,9 +221,9 @@ console.log('Node Readable hwm 2500 push()    :', pushes.join(', '), '(returned/
 //   Node Readable hwm 2500 push()    : true/1000, true/2000, false/3000 (returned/bufferedBytes)
 ```
 
-The same three 1000-byte chunks give different `desiredSize` values depending on the strategy. With the default (count, limit 1), the stream is "full" after one chunk of any size. `ByteLengthQueuingStrategy` counts bytes, like Node. The Node `Readable` tells the source directly: its third `push()` returns `false`.
+The same three 1000-byte chunks fill a count strategy after one chunk. `ByteLengthQueuingStrategy` counts bytes, so the limit is a size, not a count.
 
-**Example 4 — `pull()` vs `_read()`: who asks for data, and when.**
+**Example 4: `pull()` versus `_read()`. Who asks for data, and when.**
 
 javascript
 
@@ -271,9 +271,9 @@ console.log(`after one read -> web pull() calls = ${webPulls}, node _read() call
 //   after one read -> web pull() calls = 4, node _read() calls = 4
 ```
 
-Both sources are asked for exactly three items while nobody reads, and once more after one read frees a slot. The difference is in the answer: Node's `push(3)` returns `false`, while the web `enqueue()` returns nothing and the source would have to look at `desiredSize` (0 here).
+Both sources are asked for three items while nobody reads, and once more after a read frees a slot. Node's `push` returns `false` at the limit. Web `enqueue` returns nothing, and you read `desiredSize`.
 
-**Example 5 — converting with `toWeb` and `fromWeb`.**
+**Example 5: converting with `toWeb` and `fromWeb`.**
 
 javascript
 
@@ -331,9 +331,9 @@ for await (const s of out) console.log('Duplex.toWeb readable side:', s);
 //   Duplex.toWeb readable side: DUPLEX
 ```
 
-`Readable.toWeb` on a byte-mode stream copies each `Buffer` into a plain `Uint8Array` (the adapter does this to detach the chunk from Node's buffer pool), so web code does not see `Buffer` methods. In object mode the chunks pass through as they are. `Readable.fromWeb` gives back a Node `Readable` with all of its methods. `Duplex.toWeb` returns the `{ readable, writable }` pair that `pipeThrough` expects.
+`Readable.toWeb` on a byte stream copies each `Buffer` into a `Uint8Array` so the chunk is detached from Node's buffer pool. Object mode passes the value through.
 
-**Example 6 — how much a `Readable.toWeb` adapter reads ahead.**
+**Example 6: how much a `Readable.toWeb` adapter reads ahead.**
 
 javascript
 
@@ -363,9 +363,9 @@ for (const [label, opts] of [
 //   toWeb() hwm 4 chunks   chunks pulled from node with no reader: 68
 ```
 
-With no strategy, the web side uses a byte-length strategy with the Node stream's own `highWaterMark` (64 KiB), and the Node side keeps its own 64 KiB buffer as well: 128 chunks of 1 KiB, 128 KiB in memory, before anyone reads. With a `CountQueuingStrategy` of 4, the web queue holds 4 chunks and the Node buffer still fills its 64 KiB (64 chunks): 68. The `strategy` option only sizes the web queue.
+With no strategy the web side uses a byte strategy sized to the Node `highWaterMark` (64 KiB), and the Node side keeps its own 64 KiB. That is 128 KiB before anyone reads. The strategy option does not cap the Node buffer underneath.
 
-**Example 7 — `fetch` bodies: reading `res.body`, saving it with `pipeline`, and a streamed upload with `duplex: 'half'` (local server).**
+**Example 7: `fetch` bodies, `pipeline`, and a streamed upload with `duplex: 'half'`.**
 
 javascript
 
@@ -431,9 +431,9 @@ server.close();
 //   with duplex: "half": server got 4000 bytes, transfer-encoding: chunked
 ```
 
-`res.body` is a `ReadableStream` of `Uint8Array` chunks. `pipeThrough(new TextDecoderStream())` turns it into text and decodes UTF-8 characters that are split across chunks correctly. To hand it to Node code, wrap it with `Readable.fromWeb`. To send a `ReadableStream` as a request body, `fetch` requires `duplex: 'half'`; without it, v24.19.0 throws the `TypeError` shown. The body goes out with `Transfer-Encoding: chunked`, because the length is not known in advance.
+`res.body` is a `ReadableStream` of `Uint8Array` chunks. `pipeThrough(new TextDecoderStream())` decodes UTF-8 that was split across chunks. `Readable.fromWeb` or passing the web stream straight to `pipeline` writes a file. A streamed request body needs `duplex: 'half'` or `fetch` throws.
 
-**Example 8 — async iteration: `for await`, `break`, and `values({ preventCancel: true })`.**
+**Example 8: `for await`, `break`, and `values({ preventCancel: true })`.**
 
 javascript
 
@@ -472,9 +472,9 @@ console.log('b remaining:', left);
 //   b remaining: [ 3, 4, 5 ]
 ```
 
-`for await` takes a reader for the length of the loop. Leaving the loop early with `break`, `return` or `throw` cancels the stream: `cancel()` runs and the remaining items are gone. `stream.values({ preventCancel: true })` returns an iterator that only releases the lock on early exit, so a second loop reads `3, 4, 5`.
+`for await` holds a reader for the loop. `break`, `return`, or `throw` cancels the stream and the rest of the data is gone. `stream.values({ preventCancel: true })` only releases the lock, so you can keep reading.
 
-**Example 9 — `pipeThrough`, `pipeTo`, `tee()`, `TextDecoderStream` and `CompressionStream`.**
+**Example 9: `pipeThrough`, `pipeTo`, `tee()`, `TextDecoderStream`, and `CompressionStream`.**
 
 javascript
 
@@ -530,9 +530,9 @@ console.log('DecompressionStream:', JSON.stringify(back));
 //   DecompressionStream: "Ada,1500\nZoë,2500\nLin,200"
 ```
 
-`lineSplitter()` is the web version of lesson 37's `createCsvParser()` approach: carry the incomplete tail into the next chunk and emit the last line in `flush()`. Here `TextDecoderStream` does the job of `StringDecoder`, which is why `Zoë` survives a chunk boundary in the middle of `ë`. `tee()` returns two branches that each get every chunk. `CompressionStream('gzip')` produces standard gzip that `zlib.gunzipSync` reads.
+Carry an incomplete line into the next chunk and emit the last line from `flush`. `TextDecoderStream` holds a split UTF-8 character the way `StringDecoder` does. `tee()` splits one stream into two branches.
 
-**Example 10 — one reader at a time, and stopping `pipeTo` with a signal.**
+**Example 10: one reader at a time, and stopping `pipeTo` with a signal.**
 
 javascript
 
@@ -569,11 +569,11 @@ try {
 //   pipeTo rejected: AbortError true true
 ```
 
-A second `getReader()` throws a `TypeError` with code `ERR_INVALID_STATE`. When the signal aborts, `pipeTo` aborts the destination (`sink.abort()` runs), cancels the source (`source.cancel()` runs) and rejects with `signal.reason`, here the default `DOMException` named `AbortError`. This is the web shape; Node's `pipeline()` rejects with Node's own `AbortError` instead (see lesson 22).
+A second `getReader()` throws `TypeError` with code `ERR_INVALID_STATE`. Aborting the signal aborts the sink, cancels the source, and rejects with `signal.reason`, here a `DOMException` named `AbortError`. Node's `pipeline` rejects with Node's own `AbortError` instead.
 
-**Example 11 — edge case: `tee()` with one slow branch keeps everything in memory.**
+**Example 11: `tee()` with one slow branch keeps everything in memory.**
 
-The task: send a download to two places, a fast one and a slow one. `tee()` looks like the answer. But a tee pulls from the source whenever *either* branch wants data, and a branch that is not read keeps every chunk in its queue:
+`tee()` pulls from the source when either branch wants data, and a branch you do not read keeps every chunk:
 
 javascript
 
@@ -604,9 +604,9 @@ console.log('chunks that sat in the slow branch queue:', waiting);
 //   chunks that sat in the slow branch queue: 1000
 ```
 
-The source has a limit of 1 chunk, yet the slow branch ended up holding all 1000 chunks (1000 KiB), because the fast branch kept pulling and the tee enqueued each chunk into both branches. The slow branch's queue does not slow the source down. With a real 2 GB download, that is 2 GB in memory.
+The source limit is 1 chunk, and the slow branch still held all 1000 chunks, because the fast branch kept pulling and each chunk was queued for both. The slow queue does not slow the source. A 2 GB download would sit in memory.
 
-Node's `pipe()` to two destinations behaves the other way: the source pauses whenever *any* destination's `write()` returns `false`, so the pair runs at the slower speed:
+Node's `pipe()` to two destinations pauses when any `write()` returns `false`, so the pair runs at the slower speed:
 
 javascript
 
@@ -630,64 +630,64 @@ setTimeout(() => {
 //   after 100 ms: chunks made = 74 | slow sink buffered = 1024 bytes
 ```
 
-After 100 ms the Node source has made only 74 chunks: its own 64 KiB buffer (64 chunks) plus the ten the slow sink has taken. So if one consumer can be much slower than the other, either fan out with Node streams (`Readable.fromWeb(body)` piped to both), or write the data to a file first and read the file twice. Use `tee()` only when both branches are read at about the same speed.
+After 100 ms the Node source had made 74 chunks: its 64 KiB buffer plus the ten the slow sink took. If one consumer is much slower, fan out with Node streams, or write a file and read it twice. Use `tee()` when both branches are read at about the same speed.
 
 ## Common mistakes & gotchas
 
-- **Calling `.pipe()` or `.on('data')` on `res.body`.** It is a `ReadableStream`. Use `for await`, `getReader()`, `pipeTo()`, or wrap it with `Readable.fromWeb(res.body)`.
-- **Ignoring `desiredSize` in a push source.** `controller.enqueue()` never refuses data. A source that enqueues from a timer or an event without checking `controller.desiredSize` fills memory, just like ignoring `write() === false` in Node.
-- **Not awaiting `writer.ready`.** `writer.write()` accepts every chunk; `desiredSize` going negative is the only sign (Example 2). Await `ready` before each write, or let `pipeTo` do it.
-- **Assuming `highWaterMark` means bytes.** In a web stream it means units of `size()`, and the default is one chunk. Use `ByteLengthQueuingStrategy` when chunk sizes vary.
-- **Expecting the `strategy` of `Readable.toWeb` to bound total memory.** It sizes only the web queue; the Node stream underneath keeps its own buffer (Example 6).
-- **Forgetting `releaseLock()`.** A stream with a live reader stays locked; `pipeTo`, `for await` and a second `getReader()` then fail with `ERR_INVALID_STATE`.
-- **Breaking out of `for await` and expecting to keep reading.** The default iterator cancels the stream. Use `stream.values({ preventCancel: true })`.
+- **Calling `.pipe()` or `.on('data')` on `res.body`.** It is a `ReadableStream`. Use `for await`, `getReader()`, `pipeTo()`, or `Readable.fromWeb(res.body)`.
+- **Ignoring `desiredSize` in a push source.** `enqueue` never refuses a chunk. A timer that enqueues without checking `desiredSize` fills memory.
+- **Not awaiting `writer.ready`.** `write` accepts every chunk. A negative `desiredSize` is the sign (Example 2).
+- **Assuming `highWaterMark` means bytes.** It means units of `size()`. The default is one chunk. Use `ByteLengthQueuingStrategy` when sizes vary.
+- **Expecting the strategy of `Readable.toWeb` to bound total memory.** It sizes the web queue. The Node stream keeps its own buffer (Example 6).
+- **Forgetting `releaseLock()`.** A live reader keeps the stream locked. `pipeTo`, `for await`, and a second `getReader()` then fail with `ERR_INVALID_STATE`.
+- **Breaking out of `for await` and expecting to keep reading.** The default iterator cancels. Use `stream.values({ preventCancel: true })`.
 - **Sending a `ReadableStream` body without `duplex: 'half'`.** `fetch` throws `TypeError: RequestInit: duplex option is required when sending a body.`
-- **Treating `tee()` as free.** The faster branch sets the pace and the slower one buffers the difference (Example 11). Node's `pipe()` to two destinations goes at the slower one's pace instead.
-- **Expecting a `Buffer`.** Chunks from `fetch` and from `Readable.toWeb` on a byte stream are `Uint8Array`. Wrap with `Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)` or use `TextDecoderStream` when you need text.
+- **Treating `tee()` as free.** The faster branch sets the pace and the slower one buffers the difference (Example 11).
+- **Expecting a `Buffer`.** `fetch` and `Readable.toWeb` on a byte stream give `Uint8Array`. Wrap with `Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)`, or use `TextDecoderStream` for text.
 
 ## Best practices
 
-- **Stay in one API per pipeline.** Convert once at the boundary (`Readable.fromWeb(res.body)` going in, `Readable.toWeb(fileStream)` going out) instead of mixing the two inside a chain.
-- **Let `pipeline()` handle mixed chains.** Since v19.7.0 / v18.16.0 it accepts `ReadableStream`, `TransformStream` and `WritableStream` stages next to Node streams. On error it destroys the Node streams, aborts a web destination and cancels a web source (a separate run on v24.19.0: a failing `Readable` made the `WritableStream`'s `abort()` run, and a failing `WritableStream` made the `ReadableStream`'s `cancel()` run).
-- **Give byte streams a byte strategy.** `new ByteLengthQueuingStrategy({ highWaterMark: 64 * 1024 })` makes a web stream's limit comparable to a Node stream's.
-- **Write sources as `pull()` sources.** A `pull()` that produces one chunk per call is throttled by the stream for you; a `start()` that enqueues everything is not.
-- **Decode with `TextDecoderStream`**, not with `new TextDecoder().decode(chunk)` per chunk, so UTF-8 characters split across chunks are decoded correctly.
-- **Pass an `AbortSignal` to `pipeTo`** (and to `fetch`) so a cancelled request stops the whole transfer.
+- **Stay in one API per pipeline.** Convert once at the edge: `Readable.fromWeb(res.body)` on the way in, `Readable.toWeb(fileStream)` on the way out.
+- **Let `pipeline()` handle a mixed chain.** It accepts web streams next to Node streams, destroys Node streams on error, aborts a web destination, and cancels a web source.
+- **Give byte streams a byte strategy.** `new ByteLengthQueuingStrategy({ highWaterMark: 64 * 1024 })` is comparable to a Node byte stream.
+- **Write sources as `pull` sources.** One chunk per `pull` is throttled for you. A `start` that enqueues everything is not.
+- **Decode with `TextDecoderStream`**, not `new TextDecoder().decode(chunk)` per chunk, so a character split across chunks stays intact.
+- **Pass an `AbortSignal` to `pipeTo` and to `fetch`** so a cancelled request stops the transfer.
 
 ## ⭐ Interview lens
 
 > **Q: “`fetch` gives you `res.body`. How do you stream it into a file with Node's `fs`?”**  
-> A: `res.body` is a web `ReadableStream`, so `pipe()` does not exist on it. Either `await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(path))`, or pass `res.body` straight to `pipeline()`, which has accepted web streams since v19.7.0. Both give Node's error handling and cleanup. *Trap:* `await res.arrayBuffer()` works too but loads the whole body into memory.
+A: `res.body` from `fetch` is a web `ReadableStream`, the WHATWG queue, not a Node `Readable`. It has no `.pipe()` and no `'data'` event. To write it to disk, convert once and let `pipeline` do backpressure and cleanup: `await pipeline(Readable.fromWeb(res.body), fs.createWriteStream(path))`. `pipeline` also accepts the web stream directly, so you can pass `res.body` as a stage. Either way an error destroys the file stream. The chunks are `Uint8Array`. The limit is `await res.arrayBuffer()` or `res.text()`. Those work, and they load the whole body into memory, which is the thing streaming was meant to avoid.
 
 > **Q: “How does backpressure differ between Node streams and web streams?”**  
-> A: In Node, `push()` and `write()` return `false` at the `highWaterMark`, and a writer waits for `'drain'`. In web streams nothing returns `false`: `enqueue()` and `writer.write()` always accept the chunk, and the signal is `desiredSize` (which can go negative) plus the `writer.ready` promise. Node measures byte streams in bytes; a web stream measures in units of the strategy's `size()`, one chunk by default.
+A: Backpressure is how a slow consumer tells a fast producer to pause so the queue stays bounded. In Node, `push()` and `write()` return `false` when the buffer hits `highWaterMark`, and the writer waits for `'drain'`. In web streams nothing returns false. `controller.enqueue()` and `writer.write()` always take the chunk, and the signal is `desiredSize`, which can go negative, plus the `writer.ready` promise. Example 2 queued five writes with a limit of two and `desiredSize` went to -3 without throwing. A Node byte stream counts bytes, 64 KiB by default. A web stream counts whatever `size()` returns, and the default is one chunk, however large. The limit is a push source that never reads `desiredSize`. The queue grows for as long as the timer keeps enqueueing.
 
 > **Q: “What is a queuing strategy?”**  
-> A: An object `{ highWaterMark, size(chunk) }`. `size` measures each chunk, `highWaterMark` is the limit in the same units, and `desiredSize = highWaterMark − total queued size`. `CountQueuingStrategy` counts chunks; `ByteLengthQueuingStrategy` sums `byteLength`.
+A: A queuing strategy is the object `{ highWaterMark, size(chunk) }` that tells a web stream how to measure its queue. `size` scores one chunk. `highWaterMark` is the limit in those same units. `desiredSize` is the limit minus the total already queued, and it is the number you watch for backpressure. `CountQueuingStrategy` scores every chunk as 1, so three 1000-byte chunks and three 10-byte chunks count the same. `ByteLengthQueuingStrategy` sums `byteLength`. With no strategy the default is a count of 1. The limit is the word `highWaterMark` itself. On a web stream it is not "64 KiB" unless you passed a byte strategy. It is "this many units of `size`".
 
 > **Q: “Why does a `ReadableStream` have readers and locks?”**  
-> A: So that only one consumer takes chunks out of the queue. `getReader()` locks the stream and `releaseLock()` unlocks it; `pipeTo`, `pipeThrough` and `for await` take the lock while they run. To give two consumers the same data you `tee()` it, and the slower branch then buffers the difference.
-
-> **Q: “You `break` out of `for await (const chunk of stream)`. What happens to the stream?”**  
-> A: The iterator's `return()` cancels it: the source's `cancel()` runs and the rest of the data is discarded. `stream.values({ preventCancel: true })` only releases the lock, so the stream can be read again.
+A: A reader exists so only one consumer takes chunks out of the queue. `getReader()` sets `locked` to true. `releaseLock()` clears it. `pipeTo`, `pipeThrough`, and `for await` take that lock while they run, and a second `getReader()` throws `ERR_INVALID_STATE`. You read with `reader.read()`, which resolves `{ value, done }`. To give two consumers the same bytes you call `tee()`, which returns two branches. The limit is the slow branch. `tee()` pulls when either side wants data, and the side you are not reading keeps every chunk, so a fast reader and an unread branch hold the whole body.
 
 ## Cheat-card
 
-- **Classes:** `ReadableStream`, `WritableStream`, `TransformStream` (globals since v18.0.0; `node:stream/web` since v16.5.0, stable since v21.0.0).
-- **Source:** `start` / `pull` / `cancel`; `controller.enqueue`, `close`, `error`, `desiredSize`.
-- **Read:** `getReader()` locks → `read()` → `{ value, done }` → `releaseLock()`.
-- **Write:** `getWriter()` locks → `await writer.ready` → `writer.write(chunk)` → `close()`; `desiredSize` can go negative.
-- **Strategy:** `{ highWaterMark, size }`; default = 1 chunk; `CountQueuingStrategy` (chunks), `ByteLengthQueuingStrategy` (bytes).
-- **Signal:** web = `desiredSize` + `ready`; Node = `push()`/`write()` → `false` + `'drain'`.
-- **Convert:** `Readable.toWeb/fromWeb`, `Writable.toWeb/fromWeb`, `Duplex.toWeb/fromWeb` (added v17.0.0, stable v24.0.0).
+- **Classes:** `ReadableStream`, `WritableStream`, `TransformStream`, as globals and from `node:stream/web`.
+- **Source:** `start`, `pull`, `cancel`. `controller.enqueue`, `close`, `error`, `desiredSize`.
+- **Read:** `getReader()` locks, `read()` returns `{ value, done }`, `releaseLock()` unlocks.
+- **Write:** `getWriter()` locks, `await writer.ready`, `writer.write(chunk)`, `close()`. `desiredSize` can go negative.
+- **Strategy:** `{ highWaterMark, size }`. Default is 1 chunk. `CountQueuingStrategy` counts chunks. `ByteLengthQueuingStrategy` sums bytes.
+- **Signal:** web uses `desiredSize` and `ready`. Node uses `push` or `write` returning `false`, then `'drain'`.
+- **Convert:** `Readable.toWeb` and `fromWeb`, and the same pair on `Writable` and `Duplex`.
 - **Pipe:** `rs.pipeThrough(ts).pipeTo(ws, { signal, preventClose, preventAbort, preventCancel })`.
-- **Iterate:** `for await (const c of rs)`; `break` cancels; `rs.values({ preventCancel: true })` does not.
-- **fetch:** `res.body` is a `ReadableStream`; streamed request body needs `duplex: 'half'`.
-- **Built-in transforms:** `TextDecoderStream`, `TextEncoderStream`, `CompressionStream` / `DecompressionStream` (`gzip`, `deflate`, `deflate-raw`, `brotli` since v24.7.0).
-- **`tee()`:** two branches; the slower one buffers everything the faster one has read.
+- **Iterate:** `for await (const c of rs)`. `break` cancels. `rs.values({ preventCancel: true })` does not.
+- **fetch:** `res.body` is a `ReadableStream`. A streamed request body needs `duplex: 'half'`.
+- **Built-in transforms:** `TextDecoderStream`, `TextEncoderStream`, `CompressionStream`, `DecompressionStream` (`gzip`, `deflate`, `deflate-raw`, `brotli`).
+- **`tee()`:** two branches. The slower one buffers everything the faster one has read.
 
----
+## Good to know
 
+- The classes were added in v16.5.0 in `node:stream/web` and became globals in v18.0.0. The module stopped being experimental in v21.0.0. The globals docs mark `ReadableStream`, `CompressionStream`, and the rest stable in v23.11.0 and v22.15.0. `TextDecoderStream` and `TextEncoderStream` were added in v16.6.0. `CompressionStream` and `DecompressionStream` were added in v17.0.0, `'deflate-raw'` in v21.2.0 and v20.12.0, `'brotli'` in v24.7.0. `ReadableStream.from(iterable)` was added in v20.6.0. `fetch` was added in v17.5.0 and v16.15.0, lost `--experimental-fetch` in v18.0.0, and stopped being experimental in v21.0.0.
+- Converters were added in v17.0.0 and marked stable in v24.0.0. `Readable.toWeb` with no strategy uses `ByteLengthQueuingStrategy` and `r.readableHighWaterMark`, or `CountQueuingStrategy` in object mode. `type: 'bytes'` on `Readable.toWeb` arrived in v24.14.0. `readableType` on `Duplex.toWeb` arrived in v24.15.0. `pipeline()` has accepted web streams since v19.7.0 and v18.16.0. `stream.finished()` has accepted them since v19.5.0.
+- You `break` out of `for await (const chunk of stream)`. What happens to the stream? The iterator's `return()` cancels it: `source.cancel()` runs and the rest is discarded. `stream.values({ preventCancel: true })` only releases the lock, so the stream can be read again.
 ## Learn More
 
 - [Web Streams API nodejs.org](https://nodejs.org/docs/latest-v24.x/api/webstreams.html)

@@ -13,35 +13,41 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+PM2 is a process manager that restarts your Node app, can run one process per CPU core, and reloads code without dropping the port, and Docker packages that app plus its exact runtime into an image you can run anywhere. They exist because `node server.js` dies with your shell, uses one core, and runs differently on every machine. The trade-off is overlap: on a VM you often want PM2, and on Kubernetes you usually want one process per container so the platform, not a second supervisor, owns restarts and scaling.
+
 ## Why it matters
 
-`node server.js` is how you run an app on your laptop. It is *not* how you run one in production. In production the process must survive crashes (restart automatically), use every CPU core, never lose your one running copy to an SSH disconnect, capture logs somewhere, and roll out new versions without dropping traffic. And it must run *the same way* on a teammate's machine, in CI, and on the server — no "works on my machine." The two tools that dominate this space in the Node world are **PM2** (a process manager) and **Docker** (containerization), and the discipline that ties them together is the **12-factor** methodology.
+`node server.js` is how you run an app on a laptop. In production the process must survive crashes, use every CPU core, survive an SSH disconnect, capture logs, and roll out new versions without dropping traffic. It must also run the same way on a teammate's machine, in CI, and on the server. PM2 is the process manager. Docker is the packaging. The 12-factor method is the discipline that ties them together: config in the environment, stateless processes, and logs as streams.
 
-These come up constantly in interviews because they're where "I can write an endpoint" becomes "I can operate a service." Being able to explain why config belongs in environment variables (not committed files), why you build a Docker image in multiple stages, why the container should run as a non-root user, and how PM2's cluster mode relates to the `cluster` module — that's the operational literacy senior backend roles screen for.
+Interviews ask why config belongs in environment variables, why a Docker image is built in stages, why the container should not run as root, and how PM2 cluster mode relates to Node's cluster module.
 
 ## The concept, simply
 
-**PM2** is a production process manager for Node. You hand it your app and it keeps it alive: it restarts the process if it crashes or runs out of memory, can run **one instance per CPU core in cluster mode** (wrapping the `cluster` module for you), aggregates logs, and reloads new code with zero downtime. It's the classic way to run Node directly on a VM.
+**PM2** keeps a Node app alive. It restarts the process if it crashes or runs out of memory, can run one instance per CPU core in cluster mode by wrapping the cluster module, aggregates logs, and reloads new code with zero downtime. It is the classic way to run Node on a VM.
 
-**Docker** packages your app *and* its entire runtime — the exact Node version, your dependencies, system libraries, everything — into an **image**: a portable, immutable artifact. A running instance of an image is a **container**. Because the image contains everything, it runs identically anywhere Docker runs. This solves "works on my machine" and makes your app deployable to any container platform (Kubernetes, ECS, Cloud Run).
+**Docker** packages the app and its runtime, the Node version, dependencies, and system libraries, into an image. An image is a portable, immutable artifact. A container is a running instance of an image. The same image runs anywhere Docker runs, which removes "works on my machine" and lets you deploy to Kubernetes, ECS, or Cloud Run.
 
-The key Docker technique for Node is the **multi-stage build**: use a full "builder" image (with compilers and dev dependencies) to install and build, then copy *only* the runtime artifacts into a small, clean final image. The result is a smaller, faster, more secure image with no build tools left inside.
+The Node technique is a **multi-stage build**. A builder image, with compilers and dev dependencies, installs and builds. The final image copies only the runtime artifacts. The result is smaller, with no build tools left inside.
 
 ![Two-stage Docker build where a builder stage installs deps and compiles then a slim runtime stage copies only the built output and runs as a non-root user](assets/i62_01_f49bfdf5.svg)
 
 Multi-stage build: a fat builder stage compiles and installs everything; the slim runtime stage copies only the built artifacts and production dependencies, drops to a non-root user, and runs the app.
 
-**12-factor** is the glue: a set of principles for building services that run well in these environments. The one you'll be asked about most is **config in the environment** — store deploy-specific settings (DB URLs, secrets, feature flags) in environment variables, never hard-coded or committed, so the *same* image runs in dev, staging, and prod with different env values. Other factors that matter here: treat processes as **stateless** (no local session/file state — put it in a backing service), **logs as event streams** to stdout/stderr (let the platform collect them), and **fast startup / graceful shutdown** so instances are disposable.
+**12-factor** is a set of rules for services that run in these environments. The one interviews ask most is config in the environment: database URLs, secrets, and feature flags live in environment variables, not in committed files, so the same image runs in dev, staging, and production. Processes stay stateless, so sessions and files live in a backing service. Logs go to stdout and stderr and the platform collects them. Startup is fast and shutdown is graceful, so instances are disposable.
 
 ## How it works
 
-**PM2** runs a background daemon that supervises your processes. `pm2 start app.js -i max` launches one worker per core in cluster mode; PM2 is the primary, forking workers exactly like the cluster module (it uses it internally), so you get multi-core scaling and automatic respawn without writing fork/exit logic yourself. An **ecosystem file** (`ecosystem.config.js`) declares apps, instance counts, env vars per environment, memory-restart thresholds, and log paths. `pm2 reload` does a rolling zero-downtime restart (new workers up before old ones retire); `pm2 startup` + `pm2 save` make it survive server reboots.
+PM2 runs a background daemon that supervises processes. `pm2 start app.js -i max` launches one worker per core in cluster mode. PM2 is the primary and forks workers the way the cluster module does, because it uses that module, so you get multi-core scaling and respawn without writing the fork logic. An ecosystem file, `ecosystem.config.js`, declares apps, instance counts, env vars per environment, a memory-restart threshold, and log paths. `pm2 reload` brings new workers up before old ones retire. `pm2 startup` and `pm2 save` bring the processes back after a reboot.
 
-**Docker builds** from a `Dockerfile` — an ordered list of instructions, each producing a cached *layer*. Layer caching is why instruction order matters: copy `package.json` and run `npm ci` *before* copying your source, so that changing a source file doesn't invalidate the (slow) dependency-install layer. `npm ci` (not `npm install`) is the production install: it installs exactly what's in the lockfile, deterministically, and is faster in CI. A multi-stage `Dockerfile` has multiple `FROM` lines; the final stage `COPY --from=builder` pulls only what it needs, leaving compilers and dev dependencies behind. A `.dockerignore` keeps `node_modules`, `.git`, and secrets out of the build context.
+A **Dockerfile** is an ordered list of instructions. Each instruction is a cached layer. Copy `package.json` and run `npm ci` before you copy source, so a source change does not rerun the slow install. `npm ci` installs exactly the lockfile. It is the production install. `npm install` can drift. A multi-stage file has more than one `FROM`. The final stage uses `COPY --from=builder` and leaves compilers and dev dependencies behind. A `.dockerignore` keeps `node_modules`, `.git`, and secrets out of the build context.
 
-**Security and correctness details** the diagram highlights: run as a **non-root user** (`USER node` — the official images ship a `node` user) so a container escape isn't automatically root; set `NODE_ENV=production` (many libraries, including Express, optimize on it, and it prunes dev dependencies); pick a slim base (`node:24-slim` or a distroless/Alpine variant) to shrink attack surface and size; and pin the Node major version rather than `latest`. Handle **PID 1 and signals**: a Node process running as PID 1 in a container doesn't get default signal handlers, so `SIGTERM` may be ignored — use `--init` (or `tini`) and implement graceful shutdown (next topic) so orchestrator stop/rolling-deploy signals are honored.
+Run as a non-root user. Official images ship a `node` user, so `USER node` means a container escape is not automatically root. Set `NODE_ENV=production`. Express and other libraries change behaviour on it, and dev dependencies stay out. Use a slim base such as `node:24-slim`, or a distroless or Alpine variant, and pin the Node major instead of `latest`.
 
-**PM2 vs Docker — do you need both?** They overlap on "keep it running and use all cores." A very common modern pattern is **one Node process per container** and let the orchestrator (Kubernetes) handle restarts and horizontal scaling with multiple container replicas — in that world you often *don't* run PM2 cluster mode inside the container, because the platform already supervises and scales. PM2 shines when you deploy straight onto VMs without an orchestrator. Knowing that trade-off is the senior answer.
+**PID 1.** A Node process that is PID 1 in the container does not get default signal handlers, so `SIGTERM` from `docker stop` may be ignored and the runtime later sends `SIGKILL`, cutting off in-flight requests. Use `--init` or tini, and implement graceful shutdown.
+
+You do not always need both tools. They overlap on "keep it running and use all the cores." One Node process per container, with Kubernetes restarting and scaling replicas, is the common pattern. PM2 cluster mode inside that container double-counts. PM2 fits a VM with no orchestrator.
 
 ## Code examples
 
@@ -149,59 +155,59 @@ module.exports = {
 
 ## Common mistakes & gotchas
 
-- **Hard-coding config or committing `.env`.** Secrets in the repo/image leak and can't vary per environment. Read config from env vars; inject secrets at deploy time.
-- **Single-stage images with dev tooling inside.** Shipping compilers, dev dependencies, and source bloats the image and widens the attack surface. Use multi-stage and copy only runtime artifacts.
-- **Running as root.** The default container user is root; a compromise is then root inside the container. Add `USER node`.
-- **Copying source before installing deps.** Breaks layer caching, so every code change reinstalls all dependencies. Copy `package*.json` and `npm ci` first.
-- **`npm install` instead of `npm ci` in builds.** `install` can drift from the lockfile; `ci` is deterministic and faster for CI/images.
-- **Ignoring PID 1 / signals.** Node as PID 1 doesn't get default signal handling, so `docker stop`'s SIGTERM may be ignored and the container is SIGKILLed after a timeout, cutting off in-flight requests. Use `--init`/tini + graceful shutdown.
-- **Forgetting `NODE_ENV=production`.** Without it you keep dev-only overhead and dev dependencies, and some frameworks run slower.
-- **Running PM2 cluster mode *inside* Kubernetes.** Double-scaling (PM2 forks × pod replicas) confuses resource accounting and health checks. Usually one process per container and let the orchestrator scale.
-- **Storing state on the container's filesystem.** Containers are ephemeral; local files/sessions vanish on restart. Keep state in backing services (DB, Redis, object storage).
-- **Writing logs to files inside the container.** 12-factor says stream logs to stdout/stderr and let the platform collect them.
+- **Hard-coded config or a committed `.env`.** Secrets leak, and you cannot vary them per environment. Read environment variables. Inject secrets at deploy time.
+- **A single-stage image that still has compilers and dev dependencies.** Use multiple stages and copy only what you run.
+- **Running as root.** Add `USER node`.
+- **Copying source before `npm ci`.** Every code change reinstalls dependencies. Copy the manifest first.
+- **`npm install` in the image.** It can drift from the lockfile. `npm ci` is deterministic.
+- **Ignoring PID 1.** `docker stop` sends `SIGTERM`. If Node ignores it, the container is killed after the timeout. Use `--init` or tini, and shut down gracefully.
+- **Forgetting `NODE_ENV=production`.** You keep dev-only cost, and some frameworks run slower.
+- **PM2 cluster mode inside Kubernetes.** PM2's forks times pod replicas confuse CPU accounting and health checks. One process per container, and let the orchestrator scale.
+- **State on the container filesystem.** Containers are ephemeral. Put state in a database, Redis, or object storage.
+- **Log files inside the container.** Stream logs to stdout and stderr.
 
 ## Best practices
 
-- **Config in the environment**, validated at startup (fail fast on missing vars). One image, many environments.
-- **Multi-stage builds**: fat builder, slim runtime; copy only `dist` + prod `node_modules`.
-- **Slim, pinned base image** (`node:24-slim`/distroless; Node 20 is end-of-life), `NODE_ENV=production`, non-root `USER node`.
-- **Order Dockerfile for cache**: manifests + `npm ci` before source; keep a `.dockerignore`.
-- **Handle signals**: `--init`/tini + graceful shutdown so rolling deploys don't drop requests.
-- **Stateless processes; logs to stdout**; state and sessions in backing services.
-- **Pick one scaling owner**: PM2 cluster on VMs, *or* one process per container + orchestrator replicas — not both.
-- **Add a health-check endpoint** and wire it to the platform's liveness/readiness probes.
+- **Config in the environment**, checked at startup so a missing variable fails fast. One image, many environments.
+- **Multi-stage builds.** A fat builder, a slim runtime, and only `dist` plus production `node_modules` in the final image.
+- **A slim, pinned base**, `NODE_ENV=production`, and `USER node`.
+- **Order the Dockerfile for the cache:** manifests and `npm ci` before source, plus a `.dockerignore`.
+- **Handle signals** with `--init` or tini, and a graceful shutdown, so a rolling deploy does not drop requests.
+- **Stateless processes and logs on stdout.** Sessions live in a backing service.
+- **One scaling owner.** PM2 cluster on VMs, or one process per container plus orchestrator replicas.
+- **A health endpoint** wired to liveness and readiness probes.
 
 ## ⭐ Interview lens
 
 > **Q: Why not just run `node server.js` in production?**  
-> A: It doesn't restart on crash, uses only one core, has no zero-downtime reload, and dies with your shell. You need a supervisor — PM2 (restarts, cluster mode, log aggregation, reloads) on VMs, or a container platform (Kubernetes restarts + replicas) that provides the same guarantees.
+> A: `node server.js` is a laptop command. It does not restart when the process crashes, it uses one core because your JavaScript is one thread, it has no zero-downtime reload, and it dies when the SSH session dies. Production needs a supervisor. On a VM that is PM2: it restarts on crash or when memory crosses a limit, `pm2 start app.js -i max` runs one worker per core by using Node's cluster module, it gathers logs, and `pm2 reload` brings new workers up before the old ones exit. `pm2 startup` and `pm2 save` bring that back after a reboot. On a container platform, Kubernetes restarts a dead container and scales with replicas, which is the same set of guarantees without PM2. For example, a leaked heap past the ecosystem file's `max_memory_restart` gets a fresh worker instead of a dead API. The limit is stacking both. PM2 cluster mode inside a pod multiplies processes the scheduler cannot see cleanly. Pick one owner.
 
 > **Q: What is a multi-stage Docker build and why use it for Node?**  
-> A: A Dockerfile with multiple stages: a builder stage with the full toolchain installs and compiles, then a slim runtime stage `COPY --from=builder` pulls only the built output and production dependencies. Result: a much smaller image with no compilers, dev deps, or source — faster to ship and a smaller attack surface.
-
-> **Q: Why put config in environment variables (12-factor)?**  
-> A: So the same immutable image runs unchanged in dev, staging, and prod, with only env values differing — and secrets stay out of the repo and image. Hard-coded or committed config leaks secrets and forces a rebuild per environment. Validate required vars at startup and fail fast.
-
-> **Q: How does PM2 cluster mode relate to the cluster module?**  
-> A: PM2 cluster mode uses Node's cluster module under the hood — PM2 acts as the primary and forks one worker per core, sharing the port, so you get multi-core scaling and respawn without writing fork/exit code. It's cluster with production ergonomics (logs, reloads, monitoring).
+> A: A multi-stage Dockerfile has more than one `FROM`. The builder stage has the compilers and dev dependencies, runs `npm ci`, and compiles. The runtime stage starts from a slim image and `COPY --from=builder` takes only the built output and production dependencies. Compilers, source you do not need, and dev dependencies never land in the image you ship. Each instruction is a cached layer, so you copy `package.json` and the lockfile and run `npm ci` before you copy source. A source edit then reuses the install layer. `npm ci` installs the lockfile exactly. `npm install` can resolve something else. A `.dockerignore` keeps local `node_modules`, `.git`, and secrets out of the build context. For example, the final stage is `node:24-slim`, `NODE_ENV=production`, and `USER node`. The limit is a stage that looks small and still runs as root, or a `latest` tag that changes under you. Pin the Node major. The slim image is also why a health check cannot assume curl is installed.
 
 > **Q: Why run the container as a non-root user, and what's the PID 1 problem?**  
-> A: Non-root (`USER node`) limits blast radius — a container escape isn't automatically host root. PID 1: a process running as PID 1 doesn't get default signal handlers, so `SIGTERM` from `docker stop`/rolling deploys can be ignored and the container gets SIGKILLed, dropping in-flight requests. Fix with `--init`/tini plus graceful shutdown handling.
+> A: The default user in a container is root. If something in the app is compromised, it is root inside the container, which is a bigger blast radius if the escape reaches the host. Official Node images include a `node` user. `USER node` drops to it. Separate from that is PID 1. The process that is PID 1 does not get the default signal handlers a normal process gets. `docker stop` and a rolling deploy send `SIGTERM`. If Node ignores it, the runtime waits out the timeout and sends `SIGKILL`, which cuts off in-flight requests. `--init`, or tini, puts a tiny init as PID 1 that forwards signals, and the app still needs a graceful shutdown that stops accepting, drains, and exits. For example, `docker stop` should let the current requests finish instead of dying at the timeout. The limit is init without a handler, or a handler without init. You want both, and you still do not want PM2's multi-process cluster inside a platform that already sends `SIGTERM` to one process.
 
 > **Q: Do you need PM2 if you're deploying to Kubernetes?**  
-> A: Usually not in cluster mode. Kubernetes already restarts crashed containers and scales horizontally with replicas, so running PM2's multi-process cluster inside a pod double-counts CPU/memory and confuses probes. The common pattern is one Node process per container and let the orchestrator own scaling and restarts. PM2 is for VM deployments without an orchestrator.
+> A: Usually not in cluster mode. Kubernetes restarts a container that exits, and it scales by running more pods. PM2's job on a VM is those two things plus one process per core. Inside a pod, `pm2 start -i max` forks extra processes the resource limits and the probes were not written for, so CPU and memory are double-counted and a health check can pass while a worker is dead. The usual pattern is one Node process per container, a liveness and readiness endpoint, and the orchestrator owning restarts and replica count. PM2 still fits when you deploy onto VMs and there is no orchestrator. For example, the same image runs `node server.js` as PID 1 under Kubernetes, and on a VM you point PM2 at that file with `-i max`. The limit is thinking the image replaces the supervisor. The image makes the runtime identical. Something still has to restart it. That something is either PM2 or the platform, not both at once. Config stays in the environment so the image does not change between dev and prod.
 
 ## Cheat-card
 
-- **PM2**: production process manager — restart on crash, `-i max` cluster mode (wraps cluster module), zero-downtime `reload`, boot persistence.
-- **Docker image** = app + runtime, portable/immutable; **container** = running instance.
-- **Multi-stage build**: fat builder compiles → slim runtime copies only `dist` + prod deps.
-- Dockerfile: `package*.json` + `npm ci` **before** source (layer cache); `.dockerignore`; slim pinned base.
-- `NODE_ENV=production`, `USER node` (non-root), `--init`/tini for signals.
-- **12-factor**: config in env, stateless procs, logs to stdout, fast start / graceful stop.
-- Scale owner is **one**: PM2 cluster on VMs *or* one-process-per-container + orchestrator replicas.
-- **Next steps:** [107](103-ci-cd-with-github-actions.md) builds and pushes this image in GitHub Actions; [108](104-docker-compose.md) runs it with Postgres and Redis in Compose; [109](105-kubernetes-for-node-developers.md) Kubernetes; [110](106-cloud-and-serverless-deployment.md) cloud and serverless.
-- **Compose for this image:** `build: {context: ., target: runtime}` + `init: true` (= `docker run --init`); `docker compose config` validates the file without a daemon but does not read the Dockerfile.
+- **PM2** restarts on crash, `-i max` is cluster mode on top of the cluster module, `reload` is zero downtime, and `startup` plus `save` survive reboot.
+- A **Docker image** is the app plus its runtime, portable and immutable. A **container** is a running instance.
+- **Multi-stage:** the builder compiles, the slim stage copies `dist` and production dependencies.
+- Copy `package*.json` and run `npm ci` before source, so the install layer caches. Add a `.dockerignore`. Pin a slim base.
+- `NODE_ENV=production`, `USER node`, and `--init` or tini so signals arrive.
+- **12-factor:** config in the environment, stateless processes, logs on stdout, fast start and graceful stop.
+- One scaling owner: PM2 cluster on VMs, or one process per container plus orchestrator replicas.
+
+## Good to know
+
+- **Why environment variables, the 12-factor config rule?** The same image runs in dev, staging, and prod. Only the env values change, and secrets stay out of the repo and the image. Validate required variables at startup and fail fast. Hard-coded config forces a rebuild per environment.
+- **How does PM2 cluster mode relate to the cluster module?** PM2 is the primary. It forks one worker per core with Node's cluster module, they share the port, and you do not write the `exit` handler yourself. You also get logs, reload, and a memory restart.
+- **Node 20 is end of life** in this lesson's guidance. Pin a current major, such as the `node:24-slim` base the Dockerfile uses.
+- **Next lessons:** [107](103-ci-cd-with-github-actions.md) builds and pushes this image in GitHub Actions. [108](104-docker-compose.md) runs it with Postgres and Redis. [109](105-kubernetes-for-node-developers.md) is Kubernetes. [110](106-cloud-and-serverless-deployment.md) is cloud and serverless.
+- **Compose for this image:** `build: {context: ., target: runtime}` plus `init: true`, which is the same idea as `docker run --init`. `docker compose config` validates the file without a daemon and does not read the Dockerfile.
 
 ---
 

@@ -13,21 +13,23 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Drizzle is a TypeScript database library: you declare tables as objects, and you write queries as method calls that follow SQL, with the result types inferred from those objects. It exists so you can see the SQL you send and still get type checks, without a separate schema language or a generate step. The trade-off is that joins, counts, and a loop that queries once per row are yours to get right.
+
 ## Why it matters
 
-Drizzle is a TypeScript ORM that stays close to SQL. You declare tables as TypeScript objects with `pgTable`. Queries are written with a builder whose method names follow SQL (`select().from().leftJoin().where().groupBy()`), and result types are inferred from the table objects. There is no code-generation step and no separate schema language, and the runtime only needs `drizzle-orm` plus a driver such as `pg`. A second package, **Drizzle Kit**, compares your TypeScript schema with earlier snapshots or the live database and writes SQL migration files.
+Drizzle stays close to SQL. `pgTable` declares a table. The builder methods follow SQL: select, from, leftJoin, where, groupBy. There is no code-generation step and no separate schema language. The runtime is `drizzle-orm` plus a driver such as pg. A second package, Drizzle Kit, diffs your TypeScript schema against snapshots or the live database and writes SQL migration files.
 
-It is worth learning next to Prisma (lesson 77) because the two tools make opposite trade-offs. With Drizzle you see and shape the SQL, and one call usually means one statement. You also own more of it: aggregates, join fan-out and N+1 are yours to get right. Drizzle is also in the middle of a major version change. npm's stable release is 0.45.4, while the docs site already describes the 1.0 release candidates and their new relational query API. This lesson uses the stable line and shows exactly where 1.0 differs. Every example uses the kit's shared blog database and was run against PostgreSQL 18.4.
+Put next to Prisma, the trade-off flips. You see and shape the SQL, and one call is usually one statement. You also own aggregates, join fan-out, and N+1. The docs site already describes the 1.0 release candidates and a new relational API, while npm's stable install is still the 0.45 line. This lesson uses the stable line and shows where 1.0 differs.
 
 ## The concept, simply
 
-Drizzle has three layers:
+Drizzle has three layers.
 
-1. **Schema in TypeScript.** `pgTable('posts', { … })` describes columns, keys and foreign keys. These objects are the only schema: queries import them, types are inferred from them, and Drizzle Kit reads them to produce migrations.
-2. **Two query APIs on one `db` object.**
-   - The **query builder** is SQL written as method calls. You choose the joins, the grouping and the selected fields, and you get flat rows back.
-   - The **relational query API** (`db.query.posts.findMany({ with: { author: true } })`) returns nested objects. It uses relation definitions that you declare separately, and it compiles each call into a single SQL statement.
-3. **Drizzle Kit (the CLI).** `generate` writes a numbered `.sql` file from the schema diff, `migrate` applies pending files, and `push` makes the database match the schema directly, with no files.
+1. **Schema in TypeScript.** `pgTable('posts', { ... })` describes columns, keys, and foreign keys. Queries import those objects, types are inferred from them, and Drizzle Kit reads them to write migrations.
+2. **Two query APIs on one db object.** The query builder is SQL as method calls. You choose the joins, the grouping, and the fields, and you get flat rows. The relational API, `db.query.posts.findMany({ with: { author: true } })`, returns nested objects. You declare relations separately, and each call compiles to one SQL statement.
+3. **Drizzle Kit.** `generate` writes a numbered SQL file from the schema diff. `migrate` applies pending files. `push` makes the database match the schema directly, with no files.
 
 text
 
@@ -44,32 +46,26 @@ text
  PostgreSQL (+ drizzle.__drizzle_migrations)      drizzle-kit push: schema.ts ──▶ PostgreSQL directly (no files, no journal)
 ```
 
+
 ## How it works
 
-What happens from schema to result in the project this lesson builds:
+From schema to result:
 
-1. You declare tables in `src/schema.ts`. A column is a builder such as `integer('author_id').notNull().references(() => users.id, { onDelete: 'cascade' })`. The string is the SQL column name and the object key (`authorId`) is the TypeScript name.
-2. `drizzle-kit generate` loads `drizzle.config.ts` and your schema file through esbuild-based TypeScript loaders. It compares the schema with the last snapshot in `drizzle/meta/` and writes `drizzle/0000_<name>.sql`, a new snapshot and a journal entry (`_journal.json`).
-3. `drizzle-kit migrate`, or `migrate()` from `drizzle-orm/node-postgres/migrator` at startup, reads the journal. It applies every migration newer than the last row in `drizzle.__drizzle_migrations`, inside one transaction, and inserts a row (the SHA-256 hash and the journal timestamp) for each one.
-4. At runtime `drizzle({ client: pool, schema, logger })` wraps a `pg.Pool`. A builder chain is lazy: nothing is sent until you `await` it. On `await` it renders one SQL string with `$1…` parameters, passes it to the logger and sends it through `pg`.
-5. Rows come back. The builder maps column names to your keys and runs each column's decoder: `timestamptz` becomes `Date`, and `count()` becomes a number. The relational API gets one row per parent, with JSON for each relation, and parses it into nested objects.
+1. You declare tables in `src/schema.ts`. A column builder such as `integer('author_id')` uses the string as the SQL name and the object key, `authorId`, as the TypeScript name. `.references()` is what creates the foreign key.
+2. `drizzle-kit generate` loads the config and the schema, compares them with the last snapshot in `drizzle/meta`, and writes `drizzle/0000_<name>.sql`, a new snapshot, and a journal entry.
+3. `drizzle-kit migrate`, or `migrate()` from `drizzle-orm` at startup, reads the journal. It applies every migration newer than the last row in `drizzle.__drizzle_migrations`, inside one transaction, and inserts a row with the file hash and the journal timestamp. The stored hash is not compared on later runs.
+4. At runtime `drizzle({ client: pool, schema, logger })` wraps a pg Pool. A builder is lazy. Nothing is sent until you await it. Await renders one SQL string with `$1` parameters, passes it to the logger, and sends it through pg.
+5. The builder maps column names back to your keys and runs each column's decoder. A timestamptz becomes a Date. `count()` becomes a number. The relational API gets one row per parent, with JSON for each relation, and parses that into nested objects.
 
-**Relations: v1 (`relations()`) vs v2 (`defineRelations()`).** The stable 0.45.4 package has the v1 API. You call `relations(table, ({ one, many }) => …)` once per table, export the results and pass everything as `schema` to `drizzle()`. In v1 a many-to-many goes through the junction table explicitly: `post.postTags[].tag.name`. In the 1.0 release candidates (`npm i drizzle-orm@rc`, 1.0.0-rc.4 here) the newer **Relational Queries v2** API replaces this:
+**Relations, v1 and v2.** Stable 0.45 uses v1: `relations(table, ({ one, many }) => ...)` once per table, and you pass the results as `schema`. A many-to-many goes through the junction, so you read `post.postTags[].tag.name`. The 1.0 release candidates replace that with Relational Queries v2: `defineRelations` declares every relation in one place, `through()` hops over the junction so `post.tags[].name` works, and where and orderBy become plain objects. Relations exist only in TypeScript. They add no constraints. The foreign keys in SQL come from `.references()`.
 
-- `defineRelations(schema, (r) => ({ … }))` declares every relation in one place, and you pass the result as `relations` to `drizzle()`.
-- `through()` hops over the junction table, so `post.tags[].name` works directly.
-- `where` and `orderBy` become plain objects (`where: { published: true }`).
-- The v1 helper moves to `drizzle-orm/_relations`.
+**Builder versus relational, in SQL.** The canonical builder query is one SELECT with LEFT JOIN and GROUP BY, including the aggregates you write. The relational API writes one statement using lateral joins that build JSON. Neither API adds hidden extra queries. That is the difference from Prisma's default of one query per relation level.
 
-Both versions were installed and run here (Examples 8 and 9). Relations exist only in TypeScript. They add no constraints, and the foreign keys in the SQL come from `.references()`.
+**generate plus migrate, versus push.** `push` introspects the database, diffs it against the schema, and applies the change immediately. No SQL file, and nothing in `__drizzle_migrations`. The docs call push the best approach for prototyping, and say some teams use it as their main production flow. `generate` plus `migrate` leaves a reviewable file in git and a history row in every database, which is what a team needs. They mix badly: a database built with push has no history, so a later migrate tries to create the tables again.
 
-**Query builder vs relational queries, in SQL terms.** The canonical query in the builder is one `SELECT … LEFT JOIN … GROUP BY` that you write yourself, including the aggregate functions. The relational API writes one statement per call using `LEFT JOIN LATERAL` subqueries that build JSON (`json_build_array` in v1, `row_to_json` in v2). Neither API issues hidden extra queries, which is a real difference from Prisma's default of one query per relation level (lesson 77).
+**Transactions.** `db.transaction(async (tx) => { ... })` runs begin, your callback, then commit. A throw runs rollback. `tx.rollback()` throws `TransactionRollbackError` to abort on purpose. `tx.transaction` inside runs `savepoint sp1`, and a failure there rolls back to that savepoint while the outer transaction continues. Use `tx` inside the callback. `db` is another pool connection, outside the transaction.
 
-**`generate` + `migrate` vs `push`.** `push` introspects the database, computes the difference from your schema and applies it straight away. No SQL file is written and nothing is recorded in `__drizzle_migrations`. The `push` docs call it "the best approach for rapid prototyping" and say some teams and solo developers use it as their main flow in production. `generate` + `migrate` leaves a reviewable SQL file in git and a history row in every database, which is what a team and production need. The two do not mix well: a database built with `push` has no history, so a later `migrate` would try to create the tables again.
-
-**Transactions.** `db.transaction(async (tx) => { … })` runs `begin`, your callback, then `commit`. If the callback throws, it runs `rollback`. `tx.rollback()` throws a `TransactionRollbackError` to abort deliberately. Calling `tx.transaction(…)` inside runs `savepoint sp1`, and a failure there runs `rollback to savepoint sp1` while the outer transaction continues. Use `tx`, not `db`, inside the callback: only `tx` is bound to the transaction's connection.
-
-**Type inference.** `typeof posts.$inferSelect` is the row type a SELECT returns. `typeof posts.$inferInsert` is what an INSERT accepts: columns with a default, or nullable columns, are optional. These types exist only for `tsc`. When Node 24 runs a `.ts` file it strips the types without checking them, so a type error still runs (Example 12).
+**Types.** `typeof posts.$inferSelect` is the row a SELECT returns. `typeof posts.$inferInsert` is what an INSERT accepts. Columns with a default, or nullable columns, are optional. These types exist only for tsc. When Node runs a TypeScript file it strips types without checking them, so a type error still runs.
 
 ## Code examples
 
@@ -958,58 +954,63 @@ The loop costs 1 + 2 × N statements: 9 here, 2,001 for 1,000 posts. The relatio
 
 ## Common mistakes & gotchas
 
-- **Reading the docs for the wrong major.** orm.drizzle.team now documents 1.0 (Relational Queries v2: `defineRelations`, object `where`), but `npm i drizzle-orm` installs 0.45.4, which has v1 `relations()`. Check `npx drizzle-kit --version` against the page you are reading.
-- **Forgetting to pass `schema` (v1) or `relations` (v2) to `drizzle()`.** `db.query.posts` is then `undefined`, and the call fails with `TypeError: Cannot read properties of undefined (reading 'findMany')`. The query builder still works, which hides the mistake.
-- **Thinking `relations()` creates foreign keys.** It only feeds `db.query`. Constraints come from `.references()`. The migration in Example 3 contains exactly the five `.references()` foreign keys and nothing from the relation blocks.
-- **Counting across two joined one-to-many tables.** Rows multiply and `count()` is silently wrong (Example 10). Use `countDistinct`, or aggregate each child in a subquery.
-- **Raw `sql` aggregates come back as strings.** `pg` returns `bigint`/`numeric` as strings. Use `count()`/`countDistinct()`, cast with `::int`, or call `.mapWith(Number)`.
-- **Mixing `push` and `migrate` on one database.** `push` leaves no history, so a later `migrate` tries to create existing tables. Pick one per environment, and use migrations for anything shared.
-- **Editing or reordering applied migrations.** The migrator compares only journal timestamps with the newest history row and never re-checks hashes (Example 4). An edited file is silently skipped, and a migration merged from a branch with an older `when` than the last applied one is also skipped. Regenerate or renumber it instead.
-- **Using `db` instead of `tx` inside `db.transaction`.** That query runs on another pool connection outside the transaction and is not rolled back.
-- **Trusting `node file.ts` as a type check.** Type stripping runs code with type errors (Example 12). Run `tsc --noEmit` in CI.
-- **`update`/`delete` without `.where()`.** It affects every row. The builder does not warn.
+- **Reading the docs for the wrong major.** The docs site describes 1.0 relational queries v2. `npm i drizzle-orm` installs 0.45, which has v1 `relations()`. Check `drizzle-kit --version` against the page.
+- **Forgetting to pass schema (v1) or relations (v2) into drizzle().** `db.query.posts` is then undefined. The query builder still works, which hides the mistake.
+- **Thinking relations() creates foreign keys.** It only feeds `db.query`. Constraints come from `.references()`.
+- **Counting across two joined one-to-many tables.** Rows multiply and count() is silently wrong. Use countDistinct, or aggregate each child in a subquery.
+- **Raw sql aggregates come back as strings.** pg returns bigint and numeric as strings. Use `count()` or `countDistinct()`, cast with `::int`, or call `.mapWith(Number)`.
+- **Mixing push and migrate on one database.** push leaves no history, so a later migrate tries to create tables that exist. Pick one per environment.
+- **Editing or reordering applied migrations.** The migrator compares journal timestamps with the newest history row and does not re-check hashes. An edited file is skipped. A file merged with an older timestamp than the last applied one is also skipped.
+- **Using db instead of tx inside a transaction.** That query is outside the transaction and is not rolled back.
+- **Trusting `node file.ts` as a type check.** Type stripping runs code that has type errors. Run `tsc --noEmit` in CI.
+- **update or delete without where.** It affects every row. The builder does not warn.
 
 ## Best practices
 
-- **Pin `drizzle-orm` and `drizzle-kit` exactly,** and move to 1.0 deliberately (follow the docs' "Relational Queries v1 to v2" guide) rather than through a caret range.
-- **Commit `drizzle/` (SQL plus `meta/`).** Review each generated file and apply it with `migrate()` or `drizzle-kit migrate` in a release step. Keep `push` for throwaway local databases.
-- **One `Pool` and one `db` per process,** exported from a module, with pool sizing as in lesson 74.
-- **Use the relational API for nested reads and the builder for reports, aggregates and bulk writes,** and log SQL in tests to check the statement count of hot paths.
-- **Select only the columns you need** (`select({ … })` or `columns: { … }`) instead of whole rows.
-- **Export `$inferSelect`/`$inferInsert` types from the schema module** and use them in your service layer instead of writing row interfaces by hand.
-- **Keep transactions short.** Pass `tx` into helpers explicitly, and use nested `tx.transaction()` savepoints for optional sub-steps that may fail without aborting the whole unit.
-- **Write values into SQL only through `sql\`…${value}\``** (bound as parameters). `sql.raw()` inserts text verbatim and must only receive constants.
+- Pin `drizzle-orm` and `drizzle-kit` exactly. Move to 1.0 on purpose, using the v1-to-v2 guide, not through a caret range.
+- Commit the `drizzle` folder, SQL plus meta. Review each generated file. Apply with `migrate()` or `drizzle-kit migrate`. Keep push for throwaway databases.
+- One Pool and one db per process.
+- Relational API for nested reads. Builder for reports, aggregates, and bulk writes. Log SQL in tests and check the statement count.
+- Select only the columns you need.
+- Export `$inferSelect` and `$inferInsert` from the schema module and use them in services, instead of hand-written row types.
+- Keep transactions short. Pass tx into helpers. Use a nested savepoint for a sub-step that may fail without aborting the rest.
+- Put values into SQL only through the bound `sql` template. `sql.raw()` inserts text as-is and must only receive constants.
 
 ## ⭐ Interview lens
 
 > **Q: “How does Drizzle differ from Prisma in how a query reaches the database?”**  
-> A: Drizzle has no code generation and no query engine. The schema is TypeScript objects, types are inferred from them, and each `await` on a builder renders one SQL string sent through your driver (`pg` here). The relational API also compiles to one statement with lateral joins. Prisma generates a client and by default runs one query per relation level. *Trap:* saying Drizzle "has no N+1". A loop of queries is still N+1; Drizzle only avoids adding hidden extra queries of its own.
+> A: Drizzle has no code generation and no separate query engine. The schema is TypeScript objects from `pgTable`, the result types are inferred from those objects, and awaiting a builder renders one SQL string and sends it through your driver, pg in this lesson. The relational API, `db.query`, also compiles to one statement, using lateral joins and JSON, rather than one query per relation. Prisma generates a client and, by default, runs one query per relation level and stitches the objects in JavaScript. For example, the canonical published-posts query is one GROUP BY you write in the builder, or one lateral-join statement from `db.query`. The limit of "Drizzle has no N+1" is that a loop of queries is still N+1. Drizzle only avoids adding hidden queries of its own. The measured loop here was 9 statements, the relational call was 1, and a builder join plus an IN list was 2.
 
 > **Q: “Query builder or `db.query`? When do you use each?”**  
-> A: `db.query.x.findMany({ with })` returns nested objects from relation definitions and suits API responses shaped like the data. The builder gives flat rows and full SQL control (joins, `groupBy`, aggregates, CTEs), so it suits reports and writes. Watch for join fan-out in the builder: two one-to-many joins multiply rows, so counts need `DISTINCT` or subqueries.
+> A: `db.query.posts.findMany({ with })` returns nested objects from the relation definitions you declared. It fits an API response shaped like the data: a post, its author, its tags. The builder returns flat rows and gives you the SQL shape: joins, groupBy, aggregates, CTEs. It fits reports and writes. For example, comment count plus tag names is either a relational call with a correlated count in extras, or a builder query where you write `countDistinct` yourself. The limit is join fan-out. Two one-to-many joins in the builder multiply rows, so a post with 2 comments and 2 tags counted as 4 with a plain count, and nothing errored. Use countDistinct, or aggregate each child in its own subquery before you join.
 
 > **Q: “`drizzle-kit push` vs `generate` + `migrate`?”**  
-> A: `push` diffs the schema against the live database and applies the changes directly, with no files and no history. It suits prototyping, and it leaves nothing to review or audit later. `generate` writes a reviewable SQL file plus a snapshot. `migrate` applies pending files in one transaction and records each one in `drizzle.__drizzle_migrations`. Teams and production use migrations. The migrator applies files newer than the last recorded timestamp and does not re-check hashes of applied files.
+> A: `drizzle-kit push` diffs the TypeScript schema against the live database and applies the change directly. It writes no file and no history row. It suits a prototype, and it leaves nothing to review later. `generate` writes a SQL file plus a snapshot you can read in review. `migrate` applies pending files in one transaction and records each one in `drizzle.__drizzle_migrations`. Teams and production use that pair, because every database then has the same history. For example, a second migrate on an up-to-date database applies nothing, and you only know that by looking at the history table, because the success line looks the same. The limit is that the migrator applies files newer than the last recorded timestamp and does not re-check the hash of a file already applied. Editing an applied file does nothing on databases that already ran it. Write a new migration.
 
 > **Q: “How do nested transactions work in Drizzle?”**  
-> A: `tx.transaction()` inside `db.transaction()` issues `savepoint spN`. If the inner callback throws, Drizzle runs `rollback to savepoint spN`, and the outer transaction can catch the error and continue to `commit`. `tx.rollback()` throws `TransactionRollbackError` to abort the whole unit.
-
-> **Q: “What are `$inferSelect` and `$inferInsert`, and what do they not protect you from?”**  
-> A: They are types derived from a `pgTable`. `$inferSelect` is the row returned by a SELECT, and `$inferInsert` makes columns with defaults or nullable columns optional. They only exist for `tsc`. Code run with type stripping, plain JS callers or untrusted request bodies get no checking, so validate input at the edge (lesson 65) and run `tsc --noEmit` in CI.
+> A: `db.transaction` sends begin, runs your callback on one connection, then commit. A throw sends rollback. Nesting `tx.transaction` does not start a second transaction. It sends `savepoint spN`. If the inner callback throws, Drizzle rolls back to that savepoint and the outer callback can catch it and still commit. `tx.rollback()` throws `TransactionRollbackError` when you want to abort the whole unit on purpose. For example, a tag insert that hits a unique violation can roll back only the savepoint, while the outer update of the post still commits. Since 0.44 a failed query is wrapped in `DrizzleQueryError`, and the pg error code, such as 23505, is on `err.cause`. The limit is the same as any of these libraries: a call on `db` inside the callback uses another pool connection and is not rolled back. Pass `tx` into helpers.
 
 ## Cheat-card
 
-- **Versions used:** drizzle-orm 0.45.4 (npm `latest`), drizzle-kit 0.31.11, pg 8.23.1, Node v24.19.0, TypeScript 7.0.2, PostgreSQL 18.4; drizzle-orm 1.0.0-rc.4 (`@rc`) for Relational Queries v2.
-- **Schema:** `pgTable('posts', { authorId: integer('author_id').notNull().references(() => users.id, { onDelete: 'cascade' }) })`; composite PK via `(t) => [primaryKey({ columns: [t.postId, t.tagId] })]`.
-- **Client:** `drizzle({ client: new Pool(…), schema, logger: true })`; custom `Logger` = `{ logQuery(query, params) }`.
-- **Relations:** v1 `relations(table, ({ one, many }) => …)` per table, m-n through the junction model; v2 (1.0 rc) `defineRelations(schema, r => …)` with `through()`.
-- **Builder:** `select({…}).from().innerJoin/leftJoin().where().groupBy().orderBy()`; `count()`/`countDistinct()` return numbers; `.returning()` for rows from writes.
-- **Relational:** `db.query.posts.findMany({ columns, with, where, orderBy, extras })` = one SQL statement.
-- **Kit:** `generate --name x` → `drizzle/NNNN_x.sql` + `meta/`; `migrate` (journal in `drizzle.__drizzle_migrations`); `push` = no files, no history; `check` validates snapshots.
-- **Runtime migrations:** `migrate(db, { migrationsFolder: './drizzle' })` from `drizzle-orm/node-postgres/migrator`.
-- **Transactions:** `db.transaction(async tx => …)`; nested `tx.transaction` = `savepoint`; `tx.rollback()` throws `TransactionRollbackError`; query errors = `DrizzleQueryError` with `.cause.code`.
-- **Types:** `typeof posts.$inferSelect` / `$inferInsert`; only `tsc` checks them.
-- **N+1 measured:** loop 9 statements vs `db.query … with` 1 vs builder join + `inArray` 2 (4 posts).
+- **Schema:** `pgTable` with the SQL name in the column builder and the TypeScript name as the key. Composite primary key in the table callback. Foreign keys from `.references()`.
+- **Client:** `drizzle({ client: pool, schema, logger: true })`. A custom logger implements `logQuery`.
+- **Relations:** v1 is `relations()` per table, and many-to-many goes through the junction. v2 on the 1.0 release candidate is `defineRelations` with `through()`.
+- **Builder:** select, from, join, where, groupBy, orderBy. `count()` and `countDistinct()` return numbers. `returning()` gives rows from a write.
+- **Relational:** `db.query.posts.findMany` with columns, with, where, orderBy, and extras is one SQL statement.
+- **Kit:** `generate` writes SQL plus meta. `migrate` records the journal in `drizzle.__drizzle_migrations`. `push` has no files and no history.
+- **Runtime migrations:** `migrate(db, { migrationsFolder })` from `drizzle-orm/node-postgres/migrator`.
+- **Transactions:** callback commits or rolls back. Nested call is a savepoint. `tx.rollback()` throws `TransactionRollbackError`.
+- **Types:** `$inferSelect` and `$inferInsert` are checked only by tsc.
+- **N+1 measured:** loop 9, relational with 1, builder join plus inArray 2, for 4 posts.
+
+## Good to know
+
+- Versions used here: drizzle-orm 0.45.4 (npm latest), drizzle-kit 0.31.11, pg 8.23.1, Node v24.19.0, TypeScript 7.0.2, PostgreSQL 18.4. Relational Queries v2 was checked on drizzle-orm 1.0.0-rc.4. `latest` stayed on 0.45 because 0.45.4 was published after that release candidate.
+- drizzle-kit loads TypeScript through esbuild. It worked even though npm 11.17 did not run esbuild's postinstall, because the binary comes from `@esbuild/linux-x64`.
+- **What are `$inferSelect` and `$inferInsert`, and what do they not protect you from?** They are types taken from a `pgTable`. Select is the row you get back. Insert makes defaulted or nullable columns optional. Only tsc checks them. Type stripping, plain JavaScript, and untrusted request bodies are not checked. Validate at the edge and run `tsc --noEmit` in CI.
+- The migrator reads only the newest history row and applies journal entries whose timestamp is later. When a line was appended to an already-applied file, the next migrate still only printed begin and commit, and `drizzle-kit check` printed that everything was fine.
+- Query counts were measured. Run times were not, so choosing between the 1-statement and 2-statement versions is a measurement on your data. `Map.groupBy` needs Node 21 or later.
+- Drizzle has no built-in seed command. The seed here is a plain script. The separate `drizzle-seed` package generates fake data and was not used.
 
 ---
 

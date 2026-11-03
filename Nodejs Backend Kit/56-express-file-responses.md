@@ -13,44 +13,50 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`res.sendFile` streams one file from disk, with the content type, the length, cache validators, and support for asking for a byte range. `res.download` is that plus a header that tells the browser to save the file. `res.attachment` only sets that header, and you send the body yourself. You use them when code, not the URL, chooses the file, such as an invoice the user is allowed to see. The trade-off is that a path built from the request with `path.join` can climb out of the folder with `..`, unless you pass a `root` and send refuses to leave it.
+
 ## Why it matters
 
-`express.static` (lesson 55) serves a whole directory by URL. Many responses need one specific file chosen by code instead: an invoice the user is allowed to see, a generated export, a report with a friendly download name, a video that must support seeking. Express has three methods for this. `res.sendFile` sends a file, `res.download` sends it as a download, and `res.attachment` sets the download headers for a body you produce yourself.
+`express.static`, lesson 55, serves a whole directory by URL. Many responses need one file chosen by code: an invoice the user may see, a generated export, a report with a friendly download name, or a video that must support seeking. Express has three methods. `res.sendFile` sends a file. `res.download` sends it as a download. `res.attachment` sets the download headers for a body you produce yourself.
 
-They are short calls, and the mistakes they invite are serious:
+The calls are short, and the mistakes are serious.
 
-- **Path traversal.** Building the path from `req.params` with `path.join` lets `..%2f` reach any file the process can read (Example 2).
-- **Broken file names.** A name with `é`, `€` or a quote needs RFC 8187 encoding in `Content-Disposition`, or browsers save the wrong name.
-- **Unhandled errors.** A missing file, a refused path or a client that hangs up mid-transfer all arrive in a callback. If you pass a callback, you have to answer the request yourself.
-- **Memory.** Reading a file into a buffer before sending it costs as much memory as the file (Example 6).
+- **Path traversal.** Building the path from `req.params` with `path.join` lets `..%2f` reach any file the process can read. Example 2 shows it.
+- **Broken file names.** A name with `é`, `€`, or a quote needs the encoding from RFC 8187 in `Content-Disposition`, or the browser saves the wrong name.
+- **Unhandled errors.** A missing file, a refused path, or a client that hangs up all arrive in a callback. If you pass a callback, you answer the request yourself.
+- **Memory.** Reading the whole file into a buffer before sending it costs as much memory as the file. Example 6 measures it.
 
 ## The concept, simply
 
-- **`res.sendFile(path, [options], [fn])`** streams one file. `path` must be absolute unless you pass `options.root`, in which case `path` is resolved under `root` and any `..` that would escape it is refused with `403`. It sets `Content-Type` from the extension and adds `Content-Length`, `ETag`, `Last-Modified`, `Cache-Control` and `Accept-Ranges`. It answers conditional requests with `304` and `Range` requests with `206`.
-- **`res.download(path, [filename], [options], [fn])`** is `res.sendFile` plus `Content-Disposition: attachment; filename=…`, which makes the browser save the file instead of showing it. `filename` defaults to the basename of `path`. Unlike `sendFile`, a relative `path` without `root` is resolved against `process.cwd()`.
-- **`res.attachment([filename])`** sends nothing. It sets `Content-Disposition: attachment` (with `filename=` if given) and sets `Content-Type` from the filename's extension. You then send the body with `res.send`, a stream, or anything else.
+`res.sendFile(path, options, callback)` streams one file. `path` must be absolute unless you pass `options.root`. With `root`, `path` is resolved under that directory, and any `..` that would escape it is refused with 403. It sets `Content-Type` from the extension and adds `Content-Length`, `ETag`, `Last-Modified`, `Cache-Control`, and `Accept-Ranges`. A conditional request can be 304. A `Range` request can be 206.
 
-`res.sendFile` and `res.download` hand the work to the [send](https://github.com/pillarjs/send) package (1.2.1 under Express 5.3.0; 0.19.2 under Express 4.22.3), the same one behind `express.static`. The `Content-Disposition` value comes from [content-disposition](https://github.com/jshttp/content-disposition) (2.0.1 under Express 5.3.0; 0.5.4 under Express 4.22.3).
+`res.download(path, filename, options, callback)` is `res.sendFile` plus `Content-Disposition: attachment`, which tells the browser to save the file instead of showing it. `filename` defaults to the basename of `path`. Unlike `sendFile`, a relative path without `root` is resolved against `process.cwd()`.
+
+`res.attachment(filename)` sends nothing. It sets `Content-Disposition: attachment`, and if you passed a name it also sets `Content-Type` from that name's extension. You then send the body with `res.send`, a stream, or anything else.
+
+`res.sendFile` and `res.download` hand the work to the send package, the same one behind `express.static`. The `Content-Disposition` value comes from the content-disposition package.
 
 ## How it works
 
 What `res.sendFile('report.pdf', { root: FILES }, fn)` does:
 
-1. **Argument checks (synchronous).** No path → `TypeError: path argument is required to res.sendFile`. A relative path and no `root` → `TypeError: path must be absolute or specify root to res.sendFile`. These are thrown synchronously from your handler, so Express catches them like any other synchronous throw and calls the error handler.
-2. **Path resolution (send).** The path is percent-encoded for send, decoded again, checked for NUL bytes (`400`), joined to `root` and normalized. A remaining `..` segment → `403`. The `dotfiles` rule (`'ignore'` by default → `404`; `'deny'` → `403`; `'allow'`) is applied to the segments below `root`, or to every segment of an absolute path when there is no root (changed in Express 5, Example 8).
-3. **`stat()`.** Missing → `404` (`err.code` `ENOENT`). A directory → `EISDIR`, which Express turns into `next()` when you did not pass a callback.
-4. **Headers.** `options.headers` are set first. Then `Accept-Ranges` (unless `acceptRanges: false`), `Cache-Control: public, max-age=<maxAge>` (unless `cacheControl: false`; plus `immutable` if set), `Last-Modified` (unless `lastModified: false`), a weak `ETag` (unless the app setting `etag` is disabled), and `Content-Type` from the extension.
-5. **Conditional and Range checks.** A matching `If-None-Match` or `If-Modified-Since` gives `304`. A single satisfiable `Range` gives `206` with `Content-Range`. An unsatisfiable one gives `416` with `Content-Range: bytes */<size>`. Several ranges are merged when they touch, and otherwise ignored, so the full `200` is sent (send never builds `multipart/byteranges`). `If-Range` that does not match the current ETag or date turns the range request into a full `200`.
-6. **Streaming.** The file (or slice) is piped from `fs.createReadStream`, with backpressure, to the response.
-7. **Callback.** `fn(err)` runs once: with no argument when the transfer finished, with an error if one happened before or during it, or with `err.code === 'ECONNABORTED'` if the client went away. **If you pass `fn`, Express does not call `next(err)` for you.** If you leave it out, Express calls `next(err)` for every error except a client abort or a socket write error.
+1. **Argument checks, and they throw immediately.** No path throws `TypeError: path argument is required to res.sendFile`. A relative path and no `root` throws `TypeError: path must be absolute or specify root to res.sendFile`. Express catches that like any other synchronous throw.
+2. **Path resolution, inside send.** The path is percent-encoded for send, decoded again, and checked for a NUL byte, which is 400. It is joined to `root` and normalized. A remaining `..` segment is 403. The `dotfiles` rule is `'ignore'` by default, which is a 404, `'deny'` which is 403, or `'allow'`. With no `root`, that rule applies to every segment of an absolute path. That changed in Express 5. Example 8 shows it.
+3. **`stat()`.** Missing is 404 with `err.code` `ENOENT`. A directory is `EISDIR`, which Express turns into `next()` when you did not pass a callback.
+4. **Headers.** `options.headers` are set first. Then `Accept-Ranges`, unless `acceptRanges` is false. Then `Cache-Control: public, max-age=<maxAge>`, unless `cacheControl` is false, plus `immutable` if you set it. Then `Last-Modified`, unless you turned it off. Then a weak `ETag`, unless the app setting `etag` is disabled. Then `Content-Type` from the extension.
+5. **Conditional requests and Range.** A matching `If-None-Match` or `If-Modified-Since` is 304. One satisfiable `Range` is 206 with `Content-Range`. An unsatisfiable range is 416 with `Content-Range: bytes */<size>`. Several ranges are merged when they touch, and otherwise ignored, so the full 200 is sent. send never builds `multipart/byteranges`. An `If-Range` that does not match the current ETag or date turns the range request into a full 200.
+6. **Streaming.** The file, or the slice, is piped from `fs.createReadStream` to the response, with backpressure.
+7. **The callback.** `fn(err)` runs once. No argument means the transfer finished. An error means it failed before or during the transfer. `err.code === 'ECONNABORTED'` means the client went away. If you pass `fn`, Express does not call `next(err)` for you. If you leave it out, Express calls `next(err)` for every error except a client abort or a socket write error.
 
-**The options** (Express 5.x API, `res.sendFile` and `res.download`): `maxAge` (ms or an ms-format string, default `0`), `root`, `lastModified` (default `true`), `headers` (object), `dotfiles` (`'ignore'` default, `'allow'`, `'deny'`), `acceptRanges` (default `true`), `cacheControl` (default `true`) and `immutable` (default `false`). `res.download` passes them to `res.sendFile`, but it ignores a `Content-Disposition` key in `headers` because it sets that header itself (Example 4). Express 5 removed the `hidden` and `from` options (use `dotfiles` and `root`), and the lower-case `res.sendfile()` (removed in Express 5).
+The options are `maxAge` in milliseconds or an ms-format string, default 0, `root`, `lastModified` default true, `headers`, `dotfiles` default `'ignore'`, `acceptRanges` default true, `cacheControl` default true, and `immutable` default false. `res.download` passes them to `res.sendFile`, but it ignores a `Content-Disposition` key in `headers` because it sets that header itself. Example 4 shows it. Express 5 removed the `hidden` and `from` options. Use `dotfiles` and `root`. It also removed the lower-case `res.sendfile()`.
 
-**Why user-controlled paths are dangerous.** Express decodes route parameters, so a request for `/unsafe/..%2fsecret.txt` puts `'../secret.txt'` into `req.params.name`. `path.join(FILES, '../secret.txt')` is a path outside `FILES`, and `res.sendFile` sends whatever absolute path you give it, because without `root` it has nothing to check against. With `root`, send resolves the name under the root and refuses `..` with `403`. A leading `/` in the name stays under the root too (`/etc/passwd` became `FILES/etc/passwd`, a 404). `root` does not check permissions. It only keeps the path inside one directory, so you still decide in code whether *this user* may have *this file*. Symlinks inside the root are followed (lesson 55). Lesson 42's appendix builds the same checks by hand: [A safe path-traversal guard](42-manual-routing-serving-json.md#a-safe-path-traversal-guard).
+**Why a user-controlled path is dangerous.** Express decodes route parameters, so `/unsafe/..%2fsecret.txt` puts `'../secret.txt'` in `req.params.name`. `path.join(FILES, '../secret.txt')` is outside `FILES`. Without `root`, `res.sendFile` sends whatever absolute path you give it. With `root`, send resolves the name under the root and refuses `..` with 403. A leading `/` stays under the root too. `/etc/passwd` became `FILES/etc/passwd`, a 404. `root` does not check permissions. It only keeps the path inside one directory. You still decide whether this user may have this file. Symlinks inside the root are followed. Lesson 55 shows that. Lesson 42's appendix builds the same checks by hand.
 
-**`Content-Disposition` and file names.** RFC 6266 defines the header: `attachment` asks the browser to save the body, `inline` asks it to display it, and `filename` suggests the name. A header value is effectively ISO-8859-1, so a name outside US-ASCII goes in a second parameter, `filename*`, encoded as RFC 8187 describes: `UTF-8''` followed by the percent-encoded UTF-8 bytes. content-disposition 2.0.1 writes both: a US-ASCII `filename` fallback (non-ASCII characters replaced with `?`, quotes escaped as `\"`) for old clients, and the exact name in `filename*`. RFC 6266 says a client that understands `filename*` should prefer it.
+**File names.** RFC 6266 defines `Content-Disposition`. `attachment` asks the browser to save the body. `inline` asks it to display the body. `filename` suggests the name. A header value is effectively ISO-8859-1, so a name outside US-ASCII also goes in `filename*`, encoded as RFC 8187 describes: `UTF-8''` plus the percent-encoded UTF-8 bytes. content-disposition writes both. The `filename` fallback replaces non-ASCII characters with `?` and escapes quotes. Clients that understand `filename*` should prefer it.
 
-**Range requests.** A video player or a resumable download asks for part of a file with `Range: bytes=start-end`. Lesson 41's appendix implements the rules by hand ([ETags, conditional GET and byte ranges](41-parsing-requests-writing-responses.md#etags-conditional-get-and-byte-ranges)); `res.sendFile` does them for you (Example 7), with one difference noted there: send lets a weak ETag satisfy `If-Range`, which RFC 9110's strong comparison does not.
+**Range requests.** A video player or a resumable download asks for part of the file with `Range: bytes=start-end`. Lesson 41's appendix implements the rules by hand. `res.sendFile` does them for you, with one difference. send lets a weak ETag satisfy `If-Range`. RFC 9110's strong comparison does not.
 
 ## Code examples
 
@@ -568,57 +574,58 @@ Without `root`, send checks every segment of the absolute path, and Express 5 (s
 
 ## Common mistakes & gotchas
 
-- **`res.sendFile(path.join(DIR, req.params.name))`.** Params are decoded, so `..%2f` becomes `../` and escapes `DIR` (Example 2). Pass the name with `{ root: DIR }`.
-- **A relative path without `root`.** `res.sendFile('files/a.txt')` throws `TypeError: path must be absolute or specify root to res.sendFile`. `res.download` accepts it and resolves it against `process.cwd()`, which changes with where you start the app.
-- **Passing a callback and not responding.** With `fn`, Express no longer calls `next(err)`. A callback that only logs leaves a 404 or 403 request hanging.
-- **Responding after a partial send.** For `ECONNABORTED` or a mid-stream read error `res.headersSent` is `true`. Check it before writing an error response.
-- **Echoing `err.message`.** send's errors for missing files include the absolute path.
-- **Hand-building `Content-Disposition`.** `` `attachment; filename="${name}"` `` breaks on quotes and non-ASCII names, and a name containing a line break would be rejected by Node's header validation. Use `res.attachment`, `res.download` or `create()`.
-- **Expecting `res.attachment` to send a file.** It only sets headers. Without a name it sets no `Content-Type`, so `res.send('text')` goes out as `text/html`.
-- **`readFile` + `res.send` for big files.** Memory grows with the file size (Example 6), and there is no `Range` or `304` support.
-- **Expecting multi-range responses.** send serves the whole file for non-adjacent ranges.
-- **Upgrading to Express 5 with files in hidden directories.** Absolute paths through `.cache/` and similar now 404 (Example 8).
+- **`res.sendFile(path.join(DIR, req.params.name))`.** Params are decoded, so `..%2f` becomes `../` and leaves `DIR`. Pass the name with `{ root: DIR }`. Example 2 shows it.
+- **A relative path without `root`.** `res.sendFile('files/a.txt')` throws `TypeError: path must be absolute or specify root to res.sendFile`. `res.download` accepts it and resolves it from `process.cwd()`, which changes with where you start the app.
+- **A callback that does not respond.** With `fn`, Express no longer calls `next(err)`. A callback that only logs leaves a 404 or 403 hanging.
+- **Responding after a partial send.** For `ECONNABORTED`, or a read error mid-stream, `res.headersSent` is true. Check it before you write an error response.
+- **Echoing `err.message`.** send's missing-file errors include the absolute path.
+- **Building `Content-Disposition` by hand.** A template like `attachment; filename="${name}"` breaks on quotes and on non-ASCII names. Use `res.attachment`, `res.download`, or `contentDisposition()`.
+- **Expecting `res.attachment` to send a file.** It only sets headers. With no name it sets no `Content-Type`, so `res.send('text')` goes out as `text/html`.
+- **`readFile` plus `res.send` for a big file.** Memory grows with the file, and you get no `Range` and no 304. Example 6 measures it.
+- **Expecting a multi-range body.** send serves the whole file when the ranges do not touch.
+- **Files in hidden directories after an upgrade to Express 5.** An absolute path through `.cache/` and similar now 404s. Example 8 shows it.
 
 ## Best practices
 
-- **Always pass `root`** when any part of the name comes from the request, and authorize the request (does this user own this file?) before calling `sendFile`.
-- **Prefer IDs to file names in URLs:** `/invoices/:id` → look up the stored path in the database → `res.sendFile(storedName, { root })`.
-- **Handle the callback fully:** `if (!err) return; if (res.headersSent) return; respond or next(err)`. Treat `ECONNABORTED` as an incomplete transfer, not a server error.
-- **Use `res.download(path, niceName)`** for downloads, and `create(name, { fallback: 'ascii-name.ext' })` when the fallback name matters.
-- **Use `res.sendFile` for files on disk** and `pipeline()` for bytes from elsewhere, so `Range`, `304` and the headers are handled for you where possible.
-- **Set caching per file type** with `maxAge`, `immutable` and `headers`, as in lesson 55.
-- **Use `acceptRanges: false`** for responses where partial content makes no sense (generated one-time files), and keep it on for media and large downloads.
+- Always pass `root` when any part of the name comes from the request, and decide whether this user may read this file before you call `sendFile`.
+- Prefer an id in the URL. `/invoices/:id` looks up the stored path, then `res.sendFile(storedName, { root })`.
+- Handle the callback fully. If there is no error, return. If `res.headersSent` is true, return. Otherwise respond or call `next(err)`. Treat `ECONNABORTED` as an incomplete transfer, not a server error.
+- Use `res.download(path, niceName)` for a download. Pass a `fallback` ASCII name when old clients matter.
+- Use `res.sendFile` for a file on disk. Use `pipeline()` when the bytes come from somewhere else, so you still stream, and accept that you then write `Range` and `ETag` yourself.
+- Set caching per file type with `maxAge`, `immutable`, and `headers`, as in lesson 55.
+- Turn `acceptRanges` off for a one-time generated file. Leave it on for media and large downloads.
 
 ## ⭐ Interview lens
 
 > **Q: “What is the difference between `res.sendFile`, `res.download` and `res.attachment`?”**  
-> A: `sendFile` streams a file with type, length, cache and range handling. `download` is `sendFile` plus `Content-Disposition: attachment; filename=…`, so the browser saves it; the name defaults to the path's basename. `attachment` only sets `Content-Disposition` (and `Content-Type` from the name) and sends nothing; you send the body. *Trap:* `download` resolves relative paths against `process.cwd()`, while `sendFile` throws without `root`.
+> A: `res.sendFile` streams one file. It sets the type from the extension, the length, cache validators, and range handling, and it can answer 304 or 206. `res.download` is that same call plus `Content-Disposition: attachment` and a filename, so the browser saves the file instead of showing it. The name defaults to the file's basename. `res.attachment` only sets that header, and the content type from the name, and sends nothing. You write the body afterwards. The trap is relative paths. `download` resolves a relative path against `process.cwd()`. `sendFile` throws `TypeError: path must be absolute or specify root` unless you pass `root`. `download` also ignores a `Content-Disposition` you put in `options.headers`, because it sets that header itself.
 
 > **Q: “Is `res.sendFile(path.join(__dirname, 'uploads', req.params.file))` safe?”**  
-> A: No. Express decodes params, so `..%2f..%2f.env` becomes `../../.env` and `path.join` resolves outside `uploads`. Without `root`, sendFile sends any absolute path. Use `res.sendFile(req.params.file, { root: UPLOADS })`, which refuses `..` with `403`, and check that the user may read that file. Better still, map an ID to a stored file name. *Trap:* `root` stops traversal, not access to other users' files in the same directory.
+> A: No. Express decodes the parameter, so `..%2f..%2f.env` arrives as `../../.env`, and `path.join` resolves that outside `uploads`. Without `root`, sendFile sends any absolute path the process can read. Pass the name as `res.sendFile(req.params.file, { root: UPLOADS })`. send then refuses `..` with 403, and a leading slash stays inside the root, so `/etc/passwd` becomes a path under `UPLOADS` and 404s. `root` stops the climb. It does not stop one user from naming another user's file in the same directory. Check ownership in your code, or better, map an id to a stored name and never put the raw filename in the URL. A wildcard such as `*file` arrives as an array of segments that can contain `'..'`. Example 2 shows both.
 
 > **Q: “How do you send a file name like `Résumé.pdf` in a download?”**  
-> A: With RFC 6266/8187 encoding: `filename*=UTF-8''R%C3%A9sum%C3%A9.pdf`, plus an ASCII `filename=` fallback for old clients. `res.download` and `res.attachment` produce both through the content-disposition package. Clients that understand `filename*` use it.
+> A: Put the real name in `filename*`, as RFC 6266 and RFC 8187 describe: `filename*=UTF-8''R%C3%A9sum%C3%A9.pdf`. Also send an ASCII `filename` fallback for old clients. Non-ASCII characters in that fallback become `?`, and quotes are escaped. `res.download` and `res.attachment` produce both through the content-disposition package. A client that understands `filename*` uses it. If you need `inline`, so the browser displays a PDF but still suggests a name, set the header yourself with that package's `type: 'inline'`. `res.attachment` and `res.download` always use `attachment`. Do not build the header with a template string. A quote or a non-ASCII character breaks it.
 
 > **Q: “Does `res.sendFile` load the file into memory? What about Range?”**  
-> A: No, it streams through `fs.createReadStream` with backpressure. In a measured run, peak RSS rose about 64–74 MiB for both a 200 MiB and a 600 MiB file, while `readFile` + `send` rose by the file size. It supports single ranges (`206`, `416` with `Content-Range: bytes */size`), merges adjacent ones, falls back to `200` for several separate ranges, and honours `If-Range`. `acceptRanges: false` turns ranges off.
-
-> **Q: “What happens in the `sendFile` callback if the user cancels the download?”**  
-> A: It receives an error with `code === 'ECONNABORTED'` and `res.headersSent === true`. Nothing can be sent anymore. Log it or mark the transfer incomplete. Without a callback, Express ignores that error instead of passing it to `next`.
+> A: No. `res.sendFile` streams with `fs.createReadStream` and respects backpressure. It does not hold the whole file. In the measured run, peak RSS rose about 64 to 74 MiB for both a 200 MiB file and a 600 MiB file, while `readFile` plus `res.send` rose by about the file size, 604 MiB on the 600 MiB file. RSS is coarse, because it includes memory V8 has not returned to the operating system, so read it as "roughly constant" versus "proportional to the file". Ranges work for one range: 206 with `Content-Range: bytes start-end/size`, and 416 with `bytes */size` when the start is past the end. Adjacent ranges are merged. Several separate ranges fall back to a full 200, because send does not build a multipart body. `If-Range` that does not match returns the whole file. `acceptRanges: false` ignores `Range`. One limit: send 1.2.1 accepts a weak ETag in `If-Range`. RFC 9110 says a weak tag must not match.
 
 ## Cheat-card
 
-- **`res.sendFile(path, opts?, fn?)`**: absolute path, or relative + `root`. `..` under root → `403`; bad escape/NUL → `400`; missing → `404 ENOENT`.
-- **Options:** `root`, `maxAge` (`0`), `headers`, `dotfiles` (`'ignore'`), `lastModified` (`true`), `acceptRanges` (`true`), `cacheControl` (`true`), `immutable` (`false`). `hidden`/`from` and `res.sendfile()` removed in Express 5.
-- **Callback:** you must respond on error; check `res.headersSent`; `ECONNABORTED` = client left. No callback → `next(err)` except aborts.
-- **`res.download(path, name?, opts?, fn?)`** = sendFile + `Content-Disposition: attachment; filename=…`; ignores `Content-Disposition` in `headers`; relative paths use `process.cwd()`.
-- **`res.attachment(name?)`**: header only (+ `Content-Type` from name). No name → no type.
-- **Filename encoding:** `filename="ASCII fallback"; filename*=UTF-8''%-encoded` (content-disposition 2.0.1). Express 4's 0.5.4 wrote Latin-1 names raw.
-- **Streaming:** sendFile streams (≈ constant RSS); `readFile` + `send` ≈ file size. `pipeline(createReadStream, res)` streams but has no Range/ETag/304.
-- **Range:** `206` + `Content-Range: bytes a-b/size`; `416` + `bytes */size`; multi-range → `200`; adjacent ranges merged; `If-Range` mismatch → `200`; weak ETag accepted by send 1.2.1.
-- **Dot-directories (changed in Express 5):** absolute path through `.cache/` → 404; use `root` or `dotfiles: 'allow'`.
+- `res.sendFile(path, opts, fn)` needs an absolute path, or a relative path plus `root`. `..` under `root` is 403. A bad escape or a NUL is 400. Missing is 404 `ENOENT`.
+- Options: `root`, `maxAge` default 0, `headers`, `dotfiles` default `'ignore'`, `lastModified` default true, `acceptRanges` default true, `cacheControl` default true, `immutable` default false. Express 5 removed `hidden`, `from`, and `res.sendfile()`.
+- If you pass a callback, you must respond on error. Check `res.headersSent`. `ECONNABORTED` means the client left. With no callback, Express calls `next(err)` except for aborts.
+- `res.download(path, name, opts, fn)` is sendFile plus `Content-Disposition: attachment`. It ignores `Content-Disposition` inside `headers`. A relative path uses `process.cwd()`.
+- `res.attachment(name)` sets the header only, plus `Content-Type` from the name. No name means no type.
+- The filename encoding is an ASCII `filename` plus `filename*=UTF-8''` and the percent-encoded bytes. That is content-disposition 2.0.1 on Express 5. Express 4's 0.5.4 wrote Latin-1 names raw, with no `filename*`.
+- sendFile streams, so RSS stays roughly flat. `readFile` plus `send` grows with the file. `pipeline(createReadStream, res)` streams too, but you lose Range, ETag, and 304.
+- Range: 206 with `Content-Range: bytes a-b/size`. 416 with `bytes */size`. Several separate ranges become 200. Adjacent ranges are merged. An `If-Range` mismatch is 200. send 1.2.1 accepts a weak ETag there.
+- A dot-directory on an absolute path 404s on Express 5. Pass `root`, or `dotfiles: 'allow'`.
 
----
+## Good to know
+
+- If the user cancels a `sendFile` download, the callback receives `err.code === 'ECONNABORTED'` and `res.headersSent` is true. Nothing more can be sent. Log it or mark the transfer incomplete. Without a callback, Express ignores that error instead of passing it to `next`.
+- send is 1.2.1 under Express 5.3.0 and 0.19.2 under Express 4.22.3. content-disposition is 2.0.1 under Express 5.3.0 and 0.5.4 under Express 4.22.3.
+- In the memory run, a 200 MiB file and a separate 600 MiB file both grew RSS by about 64 to 74 MiB for `res.sendFile` and `pipeline`. `readFile` grew by about the file size: `+604 MiB` on the 600 MiB file. The streaming growth was short-lived 64 KiB chunks the garbage collector had not reclaimed yet.
 
 ## Learn More
 

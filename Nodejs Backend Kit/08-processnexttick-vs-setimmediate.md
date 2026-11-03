@@ -13,55 +13,48 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`process.nextTick` queues a function that runs after the current JavaScript returns, and before the event loop is allowed to take its next step. `setImmediate` queues a function for the check phase, a later stop on that loop.
+
+`nextTick` exists so a library can finish the call that is running now before it fires a callback, for example so the caller can attach a listener first. The trade-off is starvation. If that callback keeps scheduling another `nextTick`, timers and file or network callbacks never get a turn.
+
+The event loop is Node's scheduler. A phase is one of its stops. Check is the stop where `setImmediate` runs. A promise callback is a microtask, a small job drained before the loop moves on. A macrotask is one phase callback, such as a timer.
+
 ## Why it matters
 
-Three functions promise to "run your callback later": `process.nextTick`, `setImmediate`, and `setTimeout(fn, 0)`. Their names are actively misleading. `nextTick` does *not* run on the next loop tick — it runs before the loop continues at all. `setImmediate` is not immediate — it runs in a specific later phase. And `setTimeout(fn, 0)` is not zero — it is clamped to at least 1ms. Every Node developer eventually ships a bug because they guessed at this ordering, and every serious Node interview tests whether you actually know it.
-
-The stakes are higher than trivia. Choosing `nextTick` where you meant `setImmediate` can **starve the event loop** — a recursive `nextTick` will prevent timers and I/O from *ever* running, freezing your server while it looks busy. Choosing the wrong deferral in library code changes the observable order of user callbacks and breaks people who depend on it. This topic makes the ordering deterministic in your head.
+The three "run this later" tools have misleading names, and guessing their order changes what users of your function observe. The expensive mistake is recursive `nextTick`. The process stays busy, and timers and I/O never run, so a server freezes while it looks alive.
 
 ## The concept, simply
 
-Rank these deferral mechanisms by how soon they run, from a callback that is currently executing:
+From code that is running right now, soonest to latest:
 
-1. **`process.nextTick(fn)`** — soonest. Runs after the current operation finishes but *before* the event loop is allowed to proceed to any phase. It has its own dedicated queue that drains completely first.
-2. **Promise callbacks** (`.then`, `await`, `queueMicrotask`) — the microtask queue, which drains right after the nextTick queue. (Full detail in the next topic.)
-3. **`setImmediate(fn)`** — runs in the **check** phase of the loop. A macrotask.
-4. **`setTimeout(fn, 0)`** — runs in the **timers** phase, subject to a ~1ms minimum. Also a macrotask.
+1. **`process.nextTick(fn)`.** After the current operation, before the event loop may enter any phase. Its own queue drains completely first.
+2. **Promise callbacks** (`.then`, `await`, `queueMicrotask`). The microtask queue. It drains right after nextTick. The next lesson covers it.
+3. **`setImmediate(fn)`.** The check phase. A macrotask, meaning one turn of a phase.
+4. **`setTimeout(fn, 0)`.** The timers phase, after a floor of about 1 millisecond. Also a macrotask.
 
 ![Four priority lanes stacked: process.nextTick first, Promise microtasks second, then setTimeout timers phase and setImmediate check phase as macrotasks](assets/i05_01_f4f3de83.svg)
 
-nextTick outranks promises, and both drain before any macrotask. setImmediate and setTimeout are macrotasks whose order depends on context.
-
-The headline: **nextTick and promises are not part of any phase** — they run *between* phases, before the loop can advance. `setImmediate` and `setTimeout` *are* phases. So microtask-family callbacks always win against timer/immediate callbacks scheduled at the same moment.
+nextTick and promises are not a phase. They run between phases. `setImmediate` and `setTimeout` are phases. At the same moment, the first group always wins. Between the two macrotasks, order depends on where you scheduled them.
 
 ## How it works
 
-**The nextTick queue is special and separate.** Node keeps a dedicated `nextTick` queue that is *not* the same as the Promise microtask queue, and it is drained *first*. After the currently running JavaScript returns — and at every phase boundary — Node does: drain the entire nextTick queue (including any nextTicks added while draining), then drain the entire microtask (Promise) queue. Only then does the loop move forward. Because the nextTick queue is emptied exhaustively before promises, a `process.nextTick` callback always fires before a `Promise.resolve().then` callback registered at the same point.
+After the current function returns, and again at every phase boundary, Node empties the whole nextTick queue, including nextTicks added during that drain, then empties the promise queue. Only then may the loop move.
 
-**Why nextTick can starve the loop.** Since the loop is not allowed to advance until the nextTick queue is empty, a callback that schedules another `nextTick`, which schedules another, and so on, creates an infinite queue that never empties. The loop is frozen at that boundary forever: no timers fire, no I/O completes, no `setImmediate` runs. `setImmediate` does not have this problem — each `setImmediate` you schedule from within a check-phase callback runs on the *next* loop iteration's check phase, so the loop still cycles through poll and timers in between, keeping I/O alive.
+The loop cannot move while nextTick still has work. A callback that schedules another `nextTick` forever blocks timers, I/O, and `setImmediate`. A `setImmediate` scheduled during check runs on the next trip, so poll and timers still happen.
 
 ![Timeline showing a macrotask callback followed by a microtask drain, then another macrotask, then another drain, illustrating recursion risk](assets/i05_02_6c3fcc09.svg)
 
-Recursion in the nextTick/microtask lane keeps the drain running and can freeze the loop; setImmediate recursion yields between iterations.
+At the top of a file, `setTimeout` of 0 and `setImmediate` race, depending on whether about 1 millisecond has passed before the first timers phase. Inside an I/O callback, `setImmediate` always wins. That callback is in poll, check is next, and the timer waits for the loop to wrap around.
 
-**setImmediate vs setTimeout(0): it depends where you are.** At the top level the order is non-deterministic (a startup-timing race, as in the phases topic). But *inside an I/O callback*, `setImmediate` always wins, because I/O callbacks run in the poll phase and the very next phase is check — the `setTimeout` must wait for the loop to wrap around to timers on the next iteration.
+Node does not interrupt a promise drain for a nextTick that a promise just scheduled. It finishes the promise queue, then goes back to nextTick, and repeats until both are empty. Example 2b is that case. "nextTick first" means both were scheduled from synchronous code or from a macrotask.
 
-**Putting the four mechanisms side by side.** It helps to see exactly where each callback is parked and what governs its turn. The table below is the whole mental model in one place — memorise the "When it runs" column and most output-prediction questions collapse into a lookup.
-
-| Mechanism | Queue / phase | When it runs | Can starve the loop? |
-| --- | --- | --- | --- |
-| `process.nextTick` | Dedicated nextTick queue (not a phase) | After the current op, before the loop advances; drained fully, ahead of promises | **Yes** — recursive scheduling never lets the loop move on |
-| `Promise.then` / `await` / `queueMicrotask` | V8 microtask queue (not a phase) | Right after the nextTick queue empties, still before the loop advances | **Yes** — an endless promise chain drains forever |
-| `setImmediate` | check phase | Once per loop iteration, when the loop reaches check | No — it yields between iterations |
-| `setTimeout(fn, 0)` | timers phase | Next timers phase, once the ~1ms floor has elapsed | No — it yields between iterations |
-
-**A subtlety that trips up seniors: nextTick and microtasks interleave *with each other* during a single drain.** Node does not run every nextTick once and then every promise once. It empties the whole nextTick queue, then the whole promise queue, then — if draining the promises produced new nextTicks — it goes back and drains those, then re-drains promises, alternating until *both* are genuinely empty. So the guarantee is not "all nextTicks before all promises" across the whole program; it is "nextTick beats promise when both are scheduled from synchronous code or a macrotask callback". The promise queue is never interrupted mid-drain: a promise callback that itself calls `process.nextTick` will see that nextTick run *after* every promise already queued — including ones scheduled after the nextTick — because Node only goes back to the nextTick queue once V8 has emptied the promise queue (see Example 2b; this matches the alternation described in the microtasks topic). Even so, this is exactly why an unbounded recursive `nextTick` is more dangerous than an unbounded promise chain: the nextTick queue is always re-checked and re-emptied first, so it can wedge the boundary shut while starving promises too.
-
-**What is `nextTick` actually for?** Two legitimate uses. First, to let a function *appear* asynchronous consistently — e.g. deferring an error callback so it never fires synchronously in the same stack that called your function (the "don't release Zalgo" pattern). Second, to run cleanup or allow the caller to attach listeners before an event fires — emitting an event on `nextTick` gives the caller a chance to register a handler first. Both are about ordering guarantees, not about "running soon".
+Use nextTick for order. Make an error callback always asynchronous, so it never fires on the caller's stack. Or emit on nextTick so the caller can listen first.
 
 ## Code examples
 
-**Example 1 — the canonical ordering question.**
+**Example 1. The usual ordering question.**
 
 javascript
 
@@ -83,9 +76,9 @@ console.log('end');
 //   setTimeout / setImmediate  (these two race at the top level)
 ```
 
-Synchronous `start`/`end` run first. Then the loop drains nextTick (beats `promise`), then promises. The last two are macrotasks whose relative order is not guaranteed at the top level.
+`start` and `end` run first because they are synchronous. Then nextTick, then the promise. The timer and `setImmediate` are macrotasks, and at the top of a file their order is not guaranteed.
 
-**Example 2 — inside I/O, immediate is deterministic.**
+**Example 2. Inside I/O, immediate is fixed.**
 
 javascript
 
@@ -106,9 +99,9 @@ fs.readFile(__filename, () => {
 //   setTimeout
 ```
 
-nextTick and promise drain before the loop leaves the poll phase. Then check runs (`setImmediate`) before the loop wraps back to timers (`setTimeout`).
+nextTick and the promise drain before the loop leaves poll. Check runs `setImmediate`. The timer waits for the next trip's timers phase.
 
-**Example 2b — a nextTick scheduled *inside* a promise callback waits for the promise queue.**
+**Example 2b. A nextTick scheduled inside a promise waits for that promise queue.**
 
 javascript
 
@@ -128,11 +121,9 @@ Promise.resolve().then(() => console.log('promise C (queued before A ran)'));
 //   nextTick scheduled inside A
 ```
 
-Once the promise queue is draining, V8 runs it to empty — `C` and the later-queued `B` both run — before Node goes back to the nextTick queue. "nextTick first" only holds when both are scheduled from synchronous code or a macrotask callback.
+V8 empties the promise queue before Node returns to nextTick, so `C` and `B` both run first. "nextTick first" holds when both were scheduled from synchronous code or from a macrotask.
 
-> **Why this was wrong:** an earlier version of this topic said the nextTick queue is re-checked *during* the promise drain. It is only re-checked *after* the promise queue empties, which is why `B` beats the nextTick above.
-
-**Example 3 — nextTick recursion freezes everything.**
+**Example 3. nextTick recursion freezes everything.**
 
 javascript
 
@@ -152,9 +143,9 @@ loop();
 //   ... forever. 'timer fired' NEVER prints — the loop is starved.
 ```
 
-Swap `process.nextTick(loop)` for `setImmediate(loop)` and the timer *does* fire, because `setImmediate` yields between loop iterations so timers and I/O still get their turn.
+Replace `process.nextTick(loop)` with `setImmediate(loop)` and the timer does fire, because `setImmediate` yields between trips.
 
-**Example 4 — nextTick to guarantee async, so listeners can attach.**
+**Example 4. nextTick so listeners can attach.**
 
 javascript
 
@@ -177,55 +168,56 @@ t.on('ready', () => console.log('ready!')); // attached in time
 //   ready!
 ```
 
+The `'ready'` listener on the next line is attached before the deferred emit runs.
+
 ## Common mistakes & gotchas
 
-- **Thinking `nextTick` runs "on the next tick of the loop".** It runs *before* the loop advances at all — sooner than any phase, sooner than promises.
-- **Using recursive `nextTick` for chunked work.** It starves the loop. Use `setImmediate` for anything that should yield to I/O between iterations.
-- **Assuming `nextTick` and `Promise.resolve().then` are interchangeable.** nextTick drains first; if you schedule both, nextTick's callback runs earlier.
-- **Believing `setImmediate` means "right now".** It runs in the check phase, after poll — later than any pending microtask.
-- **Expecting a fixed `setTimeout(0)` vs `setImmediate` order.** Deterministic only inside I/O callbacks (immediate first); a race at the top level.
-- **Emitting an event synchronously from a constructor.** Listeners added after construction miss it; defer the emit with `nextTick`.
-- **Assuming a `nextTick` scheduled from inside a promise callback jumps ahead of the remaining promises.** It does not. The promise queue drains to empty first — including promises queued *after* the nextTick — and only then does Node return to the nextTick queue (still before the loop advances, not on the next loop iteration). The same rule flips Example 1 in an ES module entry file: the module body is evaluated from inside Node's promise-based ESM loader, so `promise` prints before `nextTick` there (verified on Node v24.19.0 with the same two lines saved as `.cjs` vs `.mjs`).
-- **Treating `setImmediate` as "faster" than `setTimeout(fn, 0)`.** Neither is inherently faster; they simply fire in different phases. The only firm rule is the I/O-callback case, where `setImmediate` precedes `setTimeout`.
+- **Reading `nextTick` as "the next turn of the loop."** It runs before the loop advances, ahead of every phase and ahead of promises.
+- **Splitting work with recursive `nextTick`.** That starves the loop. Use `setImmediate` when you must yield to I/O.
+- **Treating `nextTick` and `Promise.resolve().then` as one queue.** When both are scheduled from synchronous code or a macrotask, nextTick runs first.
+- **Hearing `setImmediate` as "right now."** It runs in check, after poll and after pending microtasks.
+- **Expecting one order for `setTimeout` of 0 and `setImmediate`.** Fixed only inside an I/O callback, and there immediate is first. At the top of a file it is a race.
+- **Emitting from a constructor before the caller can listen.** A synchronous `'ready'` is missed by `.on` on the next line. Defer it with `nextTick`.
+- **Expecting a nextTick inside a promise to jump the rest of that promise queue.** The promise queue empties first, including promises queued after the nextTick. The same rule flips Example 1 in an ES module entry: the body runs inside Node's promise loader, so `promise` prints before `nextTick`. Checked on Node v24.19.0 as `.cjs` versus `.mjs`.
+- **Calling `setImmediate` faster than `setTimeout` of 0.** They are different phases. The firm rule is the I/O callback, where `setImmediate` is first.
 
 ## Best practices
 
-- **Reach for `setImmediate`, not `nextTick`, to break up work** or to schedule "after this phase, but let I/O run".
-- **Use `nextTick` only for ordering guarantees:** making an API consistently async, or deferring an emit so callers can subscribe first.
-- **Never build an unbounded recursive `nextTick` chain.** If you must recurse in the microtask lane, cap it or hand off to `setImmediate` periodically.
-- **Prefer promises/`queueMicrotask` over `nextTick` in new code** unless you specifically need to beat the microtask queue — it keeps intent clear and portable.
-- **Document any ordering you rely on.** "This runs in the check phase after I/O" is a comment worth writing.
+- Use `setImmediate`, not `nextTick`, to break up work or to mean "after this phase, but let I/O run."
+- Use `nextTick` only for an ordering guarantee: an API that is always asynchronous, or an emit deferred so callers can subscribe.
+- Do not build an unbounded `nextTick` chain. Cap it, or hand off to `setImmediate`.
+- Prefer promises or `queueMicrotask` unless you specifically need to run before the promise queue.
+- If you depend on a phase, say so in a comment. "Runs in check, after I/O" is enough.
 
 ## ⭐ Interview lens
 
 > **Q: `nextTick` vs `setImmediate` — one sentence each.**  
-> `process.nextTick` runs its callback before the event loop continues, ahead of the Promise microtask queue and every phase. `setImmediate` runs in the check phase of the loop, as a macrotask, after the current poll phase and after all pending microtasks.
+> `process.nextTick` is its own queue, not a phase of the event loop. When the current function returns, Node empties that queue, then promise callbacks, before the loop may move. `setImmediate` is a macrotask for the check phase, after poll, where I/O callbacks run. Schedule both from synchronous code and nextTick prints first. The limit is starvation. A nextTick that schedules another nextTick holds the loop. `setImmediate` waits for the next trip, so I/O still runs.
 
 > **Q: Predict the output.**  
 > `process.nextTick(() => console.log('a')); Promise.resolve().then(() => console.log('b')); setImmediate(() => console.log('c'));`  
-> Output: `a`, `b`, `c`. nextTick drains first, then the microtask queue (`b`), then the check phase (`c`).
+> From synchronous code, such as a CommonJS file, you get `a`, then `b`, then `c`. The three lines only schedule work. When the stack ends, nextTick prints `a`, the promise microtask prints `b`, and check prints `c`. The limit is the module format. An ES module entry runs its body inside a promise job, so the promise can print before nextTick.
 
 > **Q: How can `process.nextTick` freeze a Node server?**  
-> The loop cannot advance until the nextTick queue is empty. A callback that schedules another `nextTick` indefinitely keeps the queue non-empty forever, so timers, I/O, and `setImmediate` never get to run. `setImmediate` recursion does not do this because it yields between loop iterations.
+> The loop may not enter the next phase until the nextTick queue is empty, including nextTicks added while it drains. A callback that calls `process.nextTick` on itself keeps that queue full, so timers, I/O callbacks, and `setImmediate` never start. The same loop with `setImmediate` does not stick, because each call waits for the next trip and poll still runs. You pay in wall-clock time. The work is slower because you yield on purpose.
 
 > **Q: Inside `fs.readFile`'s callback you schedule both `setTimeout(fn, 0)` and `setImmediate`. Which runs first?**  
-> `setImmediate`, always. The callback runs in the poll phase; the next phase is check (`setImmediate`), while `setTimeout` waits for the timers phase on the next iteration.
-
-> **Q: Why would a library emit an event via `process.nextTick` instead of synchronously?**  
-> To let the caller attach listeners first. If a constructor emits `'ready'` synchronously, any `.on('ready')` added afterward misses it. Deferring the emit to `nextTick` guarantees the emit happens after the current stack unwinds, once listeners are registered.
-
-> **Q: Is `setTimeout(fn, 0)` the same as `setImmediate`?**  
-> No. `setTimeout(fn, 0)` is clamped to ~1ms and runs in the timers phase; `setImmediate` runs in the check phase with no delay clamp. At the top level their order races; inside an I/O callback `setImmediate` reliably wins.
+> `setImmediate` always runs first. The read callback runs in poll. The next phase is check. The timeout waits for timers on the next trip. nextTick and promises scheduled in that same callback still run before both, because those queues drain before the loop leaves the boundary. The limit is location. At the top of the file, timeout and immediate are a startup race.
 
 ## Cheat-card
 
-- **Priority:** nextTick → promises → (timers | check macrotasks).
-- `process.nextTick`: before loop advances; own queue; drains before promises.
-- `setImmediate`: check phase; macrotask; yields between iterations.
-- `setTimeout(fn,0)`: timers phase; ~1ms floor; macrotask.
-- Inside I/O callback: `setImmediate` > `setTimeout(0)` (guaranteed).
-- Recursive `nextTick` = starvation. Recursive `setImmediate` = safe.
-- Use `nextTick` for ordering guarantees; `setImmediate` to yield to I/O.
+- **Order:** nextTick, then promises, then a macrotask in timers or check.
+- `process.nextTick`: before the loop advances. Drains before promises.
+- `setImmediate`: check phase. Yields between trips.
+- `setTimeout(fn, 0)`: timers phase, after about 1 millisecond.
+- Inside an I/O callback, `setImmediate` comes before `setTimeout` of 0.
+- Recursive `nextTick` starves the loop. Recursive `setImmediate` yields.
+- `nextTick` is for order. `setImmediate` is for yielding to I/O.
+
+## Good to know
+
+- Q: Why would a library emit an event via `process.nextTick` instead of synchronously? So the caller can attach listeners first. A constructor that emits `'ready'` during `new` runs before `.on('ready')` on the next line.
+- Q: Is `setTimeout(fn, 0)` the same as `setImmediate`? No. The timer is clamped to about 1 millisecond and runs in the timers phase. `setImmediate` runs in check with no delay clamp. They race at the top of a file. Inside an I/O callback, `setImmediate` wins.
 
 ---
 
@@ -236,3 +228,4 @@ t.on('ready', () => console.log('ready!')); // attached in time
 - [process.nextTick(callback[, ...args]) — API docs nodejs.org](https://nodejs.org/api/process.html)
 - [setImmediate(callback[, ...args]) — Timers API docs nodejs.org](https://nodejs.org/api/timers.html)
 - [This is how the Node.js Event Loop really works Software Developer Diaries](https://www.youtube.com/watch?v=paI6J8my3Yw)
+

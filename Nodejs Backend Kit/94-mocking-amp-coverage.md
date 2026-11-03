@@ -13,43 +13,45 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A test double is a stand-in that lets a test control a dependency it should not call for real, such as a payment API, and record how that dependency was called. Coverage then counts which lines and branches actually ran, so you can see the error path nobody tested. The trade-off is that doubles and a high coverage number can both look healthy while proving little: if you replace your own logic, or if a test asserts nothing, the suite stays green and production still breaks.
+
 ## Why it matters
 
-Real code has dependencies you cannot or should not call for real in a test: a payment API that charges money, an email service that spams inboxes, a clock that makes results change by the day, a database call you want to keep out of a pure unit test. **Test doubles** — the family of spies, stubs, and mocks — are how you cut those dependencies out and take control of them, so a test can run fast, offline, deterministically, and can simulate conditions (a network timeout, a 500 from the gateway) that are hard to trigger for real.
+Real code calls things you should not call in a test: a payment API that charges money, an email service, a clock that changes the result by the day, a database you want out of a pure unit test. Test doubles, the family of spies, stubs, and mocks, cut those out so the test can run fast, offline, and can force a timeout or a 500 that is hard to trigger for real.
 
-**Coverage**, meanwhile, is how you find the code your tests *forgot*. It is a map of which lines and branches ran during the suite, and its highest use is spotting the untested error path nobody thought about. But coverage is also the single most misunderstood metric in testing, and interviewers use it as a maturity test: a junior treats "100%" as the goal; a senior knows it measures execution, not correctness, and reasons about it accordingly.
+Coverage is a map of which lines and branches ran. Its best use is the untested error path. A junior treats 100% as the goal. The number measures execution, not correctness.
 
-Finally, **flaky tests** — tests that pass and fail without any code change — are the thing that quietly destroys a suite's value. Once a suite fails randomly, people start re-running until green and then stop trusting red altogether, which defeats the entire point of having tests. Knowing the common causes of flakiness (real time, shared state, ordering, unawaited async) and how to kill them is core senior-engineer knowledge.
+Flaky tests pass and fail with no code change. Once people re-run until green, they stop trusting red. The usual causes are real time, shared state, order, and async work nobody waited for.
 
 ## The concept, simply
 
-A **test double** is any stand-in for a real dependency. The three you must be able to distinguish: a **spy** records how a function was called (arguments, call count) while optionally letting the real thing still run — it's about *observing*. A **stub** replaces a function with a canned return value so you can control what a dependency *gives back* — it's about *controlling inputs*. A **mock** is a stub with built-in expectations about how it should be called — it both controls inputs and *verifies* the interaction.
+A **spy** records how a function was called, arguments and call count, and can still let the real function run. It observes. A **stub** replaces a function with a canned return value so you control what a dependency gives back. A **mock** is a stub plus expectations about how it should be called. It controls the input and verifies the interaction.
 
 ![Three cards Spy records calls Stub returns canned values Mock stub plus expectations with a note that jest.fn is all three](assets/i57_01_d5bd1b3d.svg)
 
-Spies observe calls, stubs control return values, mocks add expectations — and Jest's jest.fn() does all three.
+Spies observe calls, stubs control return values, and mocks add expectations. Jest's `jest.fn()` does all three.
 
-Here's the practical catch that trips people up: **Jest deliberately blurs these lines.** A single `jest.fn()` is simultaneously a spy (it records every call in `.mock.calls`), a stub (you set its return with `mockReturnValue`), and a mock (you verify it with `expect(fn).toHaveBeenCalledWith(...)`). So in Jest you rarely say "make me a stub"; you make a mock function and use whichever facet you need. In interviews you should still be able to define the three precisely — the vocabulary comes from the wider testing literature (and libraries like Sinon that keep them separate).
+Jest blurs the three on purpose. One `jest.fn()` records every call in `.mock.calls`, returns what you set with `mockReturnValue`, and can be checked with `toHaveBeenCalledWith`. You should still be able to define the three. Libraries such as Sinon keep them separate.
 
-**Coverage** counts, as your tests run, which parts of the code executed. It reports four numbers: *statement*, *branch*, *function*, and *line* coverage. Branch coverage is the one that matters most, because it asks whether *both* sides of every `if` ran — the untested `else` is where bugs hide.
+**Coverage** reports four numbers: statement, branch, function, and line. Branch coverage asks whether both sides of every `if` ran. The untested `else` is where bugs hide.
 
 ![Four boxes Statement each line ran Branch both if else sides Function each function called Line source lines executed with a note that coverage proves lines ran not correctness](assets/i57_02_c113eff1.svg)
 
-The four coverage metrics — branch coverage, checking both sides of every decision, is the one that matters most.
+The four coverage metrics. Branch coverage, checking both sides of every decision, is the one that matters most.
 
 ## How it works
 
-**Creating doubles in Jest.** `jest.fn()` makes a standalone mock function. `jest.spyOn(obj, 'method')` wraps an existing method so you can observe (and optionally override) it while keeping the ability to restore the original. `jest.mock('./module')` replaces an *entire module* with auto-generated mock functions — this is how you neutralise a whole dependency like a payments client or the `fs` module. The distinction interviewers probe: `spyOn` by default calls through to the real implementation unless you add `.mockReturnValue()`, whereas `jest.mock` replaces the module wholesale.
+`jest.fn()` makes a standalone mock function. `jest.spyOn(object, 'method')` wraps an existing method so you can observe it and restore the original. By default `spyOn` calls through to the real implementation until you add `mockReturnValue`. `jest.mock('./module')` replaces a whole module with generated mock functions, which is how you neutralise a payments client or `fs`.
 
-**Module mocking is hoisted.** Jest lifts `jest.mock()` calls to the top of the file, above the imports, so the mock is in place before the module under test `require`s its dependency. This is why `jest.mock('./payments')` works even though you wrote it after the import line — and why it can feel like magic until you know it's happening. (In Vitest the equivalent is `vi.mock()`, also hoisted; in ESM you sometimes need `vi.hoisted()` for values referenced inside the factory.)
+**Module mocks are hoisted.** Jest lifts `jest.mock()` above the imports, so the mock exists before the code under test loads its dependency. That is why a mock written below the import still works. In Vitest, `vi.mock()` is also hoisted, and in ES modules you sometimes need `vi.hoisted()` for values used inside the factory.
 
-**Mocking time.** Real timers and `Date.now()` make tests slow (waiting for a real `setTimeout`) and non-deterministic (results change with the date). Fake timers solve both: `jest.useFakeTimers()` replaces the timer functions and the clock with controllable versions, then `jest.advanceTimersByTime(1000)` fast-forwards a second instantly and `jest.setSystemTime(date)` pins "now". A test for a function that fires after a 30-minute delay runs in microseconds. Always restore real timers afterward (`jest.useRealTimers()`) so you don't leak the fake into other tests.
+**Fake timers** replace real timers and `Date.now()`. `jest.useFakeTimers()`, then `jest.advanceTimersByTime(1000)` skips a second instantly, and `jest.setSystemTime(date)` pins now. A 30-minute delay runs in microseconds. Call `jest.useRealTimers()` afterward so the fake does not leak.
 
-**How coverage is measured.** The runner *instruments* your code — it rewrites it to increment counters whenever a statement, branch, or function executes — runs the suite, and tallies the counters. Jest does this with `--coverage` (built on Istanbul); Vitest via `--coverage` (v8 or Istanbul); node:test via `--experimental-test-coverage`. The report shows percentages per file and lists the exact uncovered lines. You can set **thresholds** in config (e.g. fail the build under 80% branch coverage) to stop coverage silently eroding — a floor, not a target.
+**Coverage** is measured by instrumentation: the runner rewrites your code to increment counters, runs the suite, and tallies them. Jest uses `--coverage` on top of Istanbul. Vitest uses `--coverage` with v8 or Istanbul. node:test uses `--experimental-test-coverage`. You can set a threshold, for example fail the build under 80% branch coverage. That is a floor, not a target. A test that calls a function and checks nothing still marks the lines it touched.
 
-**Why 100% is a trap.** Coverage only proves a line *ran*, not that its behaviour was *asserted*. A test that calls a function and checks nothing still marks every line it touched as covered. So 100% coverage with weak assertions is worse than 80% with strong ones: it manufactures false confidence. Use coverage to *find* gaps (especially uncovered branches), never as proof of quality.
-
-**Flaky tests and their causes.** A flaky test is non-deterministic. The usual culprits: (1) real time/timeouts — use fake timers; (2) shared state between tests — reset in `beforeEach`; (3) test-order dependence — make each test self-contained; (4) unawaited async — a floating promise resolves after the test ends; (5) real network/external services — mock them; (6) time-zone or locale assumptions. The cure is always the same principle: remove the source of non-determinism and control it explicitly.
+**A flaky test** is non-deterministic. Usual causes: real time, shared state, dependence on test order, a promise nobody awaited, a real network call, or a time-zone assumption. Remove the source and control it. Do not re-run until green.
 
 ## Code examples
 
@@ -158,58 +160,55 @@ module.exports = {
 
 ## Common mistakes & gotchas
 
-- **Not resetting mocks between tests.** A `jest.fn()`'s call history and stubbed return values persist across tests in a file, so one test sees another's setup. Use `clearAllMocks`/`resetAllMocks` in `beforeEach` (or set `clearMocks: true` in config).
-- **Forgetting to restore `spyOn` or fake timers.** A spy left on `console.warn`, or fake timers never switched back, leaks into later tests and causes bewildering, order-dependent failures. Always `mockRestore()` / `useRealTimers()`.
-- **Over-mocking.** Mock so much that the test only exercises your mocks and never the real logic. Then the test passes no matter what the real code does. Mock at boundaries; keep your own logic real.
-- **Treating 100% coverage as "well tested".** Coverage counts execution, not assertions. High coverage with weak assertions is false confidence; it's a discovery tool, not a quality proof.
-- **Ignoring branch coverage.** Statement/line coverage can look great while an entire `else` or error path never ran. Branch coverage is the number that reveals the untested decision.
-- **Re-running flaky tests until green.** Retrying a flaky test hides a real non-determinism (shared state, real time, unawaited async) that will eventually bite in production. Fix the cause; don't paper over it with retries.
-- **Mocking what you're testing.** If you mock the very function under test (or its core logic), the test proves nothing. Mock its *collaborators*, not the subject.
-- **Mock drift.** A hand-written mock that no longer matches the real dependency's signature lets tests pass while production breaks. Prefer auto-mocks or typed mocks, and keep them honest.
+- **Not resetting mocks between tests.** Call history and canned returns persist in the file. Use `clearAllMocks` or `resetAllMocks` in `beforeEach`, or `clearMocks: true`.
+- **Not restoring `spyOn` or fake timers.** A leftover spy or fake clock leaks into later tests. Call `mockRestore()` and `useRealTimers()`.
+- **Replacing so much that the test never runs your logic.** It passes no matter what the real code does.
+- **Treating 100% as well tested.** High coverage with weak assertions is false confidence.
+- **Ignoring branch coverage.** Line coverage can look fine while an `else` never ran.
+- **Re-running a flaky test until it passes.** That hides real time, shared state, or a floating promise.
+- **Mocking the function under test.** Mock its collaborators.
+- **A hand-written mock that no longer matches the real dependency.** Tests stay green and production breaks. Prefer auto-mocks and keep them honest.
 
 ## Best practices
 
-- **Reset mocks between tests.** `clearMocks: true` in config, or `jest.clearAllMocks()` in `beforeEach`, so each test starts clean.
-- **Always restore spies and fake timers.** `mockRestore()` and `useRealTimers()` keep a double from leaking into unrelated tests.
-- **Mock at the boundary, not inside your logic.** Replace the network, the clock, the payment gateway; leave your own decision-making real so the test actually exercises it.
-- **Use fake timers for anything time-dependent.** Debounces, retries with backoff, TTLs — fast and deterministic instead of slow and flaky.
-- **Read coverage by branch, and use it to find gaps.** Look at the uncovered-lines report to spot the error path you forgot; don't chase a headline percentage.
-- **Set a coverage *floor* in CI, not a 100% target.** A threshold stops erosion; an obsession with 100% breeds assertion-free tests.
-- **Treat every flaky test as a bug.** Quarantine it, find the non-determinism (time, order, shared state, async), and fix the root cause rather than retrying.
+- **Reset mocks between tests** with `clearMocks: true` or `jest.clearAllMocks()` in `beforeEach`.
+- **Restore spies and real timers** so a double cannot leak.
+- **Replace the network, the clock, and the payment gateway.** Leave your own decisions real.
+- **Use fake timers** for debounce, retry, and expiry.
+- **Read the uncovered-lines report,** especially branches, and look for the error path you forgot.
+- **Set a coverage floor in CI.** Do not chase 100%.
+- **Treat every flaky test as a bug.** Find the non-determinism and fix it.
 
 ## ⭐ Interview lens
 
 > **Q: "Difference between a mock, a stub, and a spy?"**  
-> A: A spy observes — it records how a function was called while the real implementation may still run. A stub replaces a function with a canned return so you control what a dependency gives back. A mock is a stub plus expectations — it also verifies the function was called the right way. In Jest the distinction blurs because `jest.fn()` is all three at once: it records calls (spy), returns what you set (stub), and can be asserted against (mock). Libraries like Sinon keep them separate.
+> A: A spy observes. It records arguments and how many times a function was called, and the real function can still run. A stub replaces the function with a canned return so you control what a dependency gives back. A mock is a stub plus an expectation you verify, such as "it was called with this amount." In Jest one `jest.fn()` is all three: `.mock.calls` is the spy, `mockReturnValue` or `mockRejectedValue` is the stub, and `toHaveBeenCalledWith` is the mock check. `jest.spyOn` wraps a real method and calls through until you override it. `jest.mock('./module')` replaces a whole module, and Jest hoists that call above the imports. For example, stub `payments.charge` to reject with `card_declined`, then expect your order function to return `payment_failed` and to have called `charge` with the amount. The limit is that Jest's one function blurs the words. Sinon keeps them separate, and interviewers still want the three definitions. Also reset call history between tests, or one test sees another's calls.
 
 > **Q: "Does 100% coverage mean your code is well tested?"**  
-> A: No — this is the classic trap. Coverage only measures which lines executed during the run, not whether anything was asserted about them. You can hit 100% with tests that assert nothing. It's a tool to *find* untested code, and branch coverage in particular reveals untested decision paths, but it's never a proof of correctness. I use it as a floor in CI to prevent erosion, not as a goal to max out.
+> A: Coverage counts which statements, branches, functions, and lines executed. The runner rewrites the code to bump counters, runs the suite, and prints the percentages and the uncovered lines. One hundred percent means every counted line ran. It does not mean any test checked the result. A call with no `expect` still paints those lines covered. Branch coverage is the useful one, because line coverage can be high while an `else` or an error path never ran. For example, a threshold of 80% branches in `coverageThreshold` fails the build when that floor drops, which stops silent erosion. The limit is using the number as the goal. One hundred percent with weak assertions is worse than a lower number with strong checks. Coverage finds forgotten code. It is not proof of correctness.
 
 > **Q: "How do you test code that depends on the current time or a timer?"**  
-> A: Fake timers. `jest.useFakeTimers()` replaces the real timers and clock, then `advanceTimersByTime()` fast-forwards without real waiting and `setSystemTime()` pins 'now'. So a function that fires after 30 minutes tests in microseconds and deterministically. The alternatives are injecting the clock as a dependency. Either way I always restore real timers afterward so the fake doesn't leak into other tests.
-
-> **Q: "A test fails maybe one run in twenty. How do you approach it?"**  
-> A: I treat flakiness as a real bug, never as noise to retry away. The cause is almost always non-determinism: real time or timeouts, shared state between tests, order dependence, or an unawaited promise resolving after the test ends. I reproduce it (run repeatedly, randomise order), isolate which of those it is, and remove the source — fake the clock, reset state in `beforeEach`, make the test self-contained, await the async. A flaky suite erodes trust in every red, so it's worth fixing properly.
-
-> **Q: "What is the risk of over-mocking?"**  
-> A: You end up testing your mocks instead of your code. If everything a function touches is stubbed, the test passes regardless of what the real logic does, and it also breaks on every refactor because it's coupled to internal call shapes. Worse, mocks can drift from the real dependency's behaviour, so tests stay green while production breaks. The discipline is to mock only at true boundaries — network, clock, third-party services — and keep your own logic real.
+> A: Fake timers replace `setTimeout`, the clock, and `Date.now()` with versions you control. `jest.useFakeTimers()` installs them, `advanceTimersByTime(300)` skips the wait instantly, and `setSystemTime` pins now. A debounce of 300 milliseconds, or a job that fires after 30 minutes, then finishes in microseconds and gives the same result every run. The other approach is to pass the clock in as a parameter so the function never reads the real time. For example, call a debounced handler twice, assert it has not run, advance 300 milliseconds, and assert it ran once. The limit is leakage. Fake timers left on will break later tests that expect real time, so you always call `jest.useRealTimers()` before the test ends. The same restore rule applies to `spyOn`.
 
 > **Q: "Which coverage metric matters most and why?"**  
-> A: Branch coverage. Statement and line coverage can be high while an entire `else` branch or error path never executed — and untested branches are exactly where bugs hide. Branch coverage asks whether both outcomes of every decision ran, so it surfaces the missing negative case, the unhandled error, the skipped guard clause. That's the number I read first in a coverage report.
-
-> **Q: "How does jest.mock() work when it's written below the import?"**  
-> A: Jest hoists `jest.mock()` calls to the top of the module, above the imports, during transformation. So by the time the module under test requires its dependency, the mock is already in place. That's why it works despite appearing after the import line — and it's also why the mock factory can't reference variables declared later in the file unless you use the hoist-aware helpers.
+> A: Branch coverage. Statement, function, and line coverage ask whether a line or a function ran. Branch coverage asks whether both outcomes of a decision ran, the `if` and the `else`, the error path and the guard. A file can show high line coverage while the negative case never executed, and that missing side is where bugs hide. Jest, Vitest, and node:test can all emit the four numbers. Jest's report lists the exact uncovered lines, and a `coverageThreshold` on `branches` can fail the build. For example, set branches at 80 and lines a bit higher, because branches are harder and more useful. The limit is the same as any coverage number: a branch that ran is not a branch whose result you asserted. Read the uncovered branches to find the missing case. Do not treat the percentage as proof.
 
 ## Cheat-card
 
-- **Spy** = observe calls · **Stub** = canned return · **Mock** = stub + verify.
-- **jest.fn()** is all three; `spyOn` wraps a real method; `jest.mock()` replaces a whole module (hoisted).
-- **Reset between tests:** `clearMocks` / `jest.clearAllMocks()`; restore spies with `mockRestore()`.
-- **Fake time:** `useFakeTimers()` + `advanceTimersByTime()` / `setSystemTime()`; always `useRealTimers()` after.
-- **Coverage = 4 metrics:** statement, branch, function, line. **Branch matters most.**
-- **Coverage ≠ correctness** — it proves lines ran, not asserted. Use it as a floor, not a target.
-- **Mock at boundaries** (network, clock, 3rd-party); keep your own logic real.
-- **Flaky causes:** real time · shared state · order · unawaited async · real network. Fix the cause, don't retry.
+- **Spy** observes calls. **Stub** returns a canned value. **Mock** is a stub plus a check that it was called the right way.
+- **`jest.fn()`** is all three. **`spyOn`** wraps a real method. **`jest.mock()`** replaces a module and is hoisted.
+- **Reset between tests** with `clearMocks` or `jest.clearAllMocks()`. Restore spies with `mockRestore()`.
+- **Fake time:** `useFakeTimers()`, then `advanceTimersByTime()` or `setSystemTime()`. Always `useRealTimers()` after.
+- **Four coverage numbers:** statement, branch, function, line. Branch matters most.
+- **Coverage counts lines that ran.** Use a floor in CI, not a target of 100%.
+- **Replace boundaries** such as network, clock, and third parties. Keep your own logic real.
+- **Flaky causes:** real time, shared state, order, a promise nobody awaited, a real network. Fix the cause.
+
+## Good to know
+
+- **A test that fails about one run in twenty** is a real bug. The cause is almost always real time, shared state, order dependence, or a promise that resolves after the test ends. Reproduce it, remove that source, and do not retry until green.
+- **Over-mocking** means the test passes no matter what the real logic does, breaks when internal calls change, and can drift from the real dependency so production fails while the suite stays green. Replace only true boundaries.
+- **`jest.mock()` written below the import still works** because Jest hoists it above the imports. A factory cannot use variables declared later in the file unless you use the hoist-aware helpers. Vitest's `vi.mock()` is hoisted too, and ES modules sometimes need `vi.hoisted()`.
 
 ---
 

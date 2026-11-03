@@ -13,34 +13,38 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+node:util is a drawer of small functions the rest of Node is built on: inspect turns a value into the string console.log prints, format fills in percent placeholders, types checks what a value really is across realms, and deprecate, styleText, and promisify cover warnings, terminal color, and callback-to-promise. It exists so you do not add a package for each of those jobs. The trade-off is that inspect output is for humans, not for tests or for hiding secrets, and instanceof lies about values that came from another realm.
+
 ## Why it matters
 
-`node:util` is the drawer of small tools the rest of Node is built from. Every time you `console.log(anObject)` and see `{ a: 1, b: [Object] }`, that string came from `util.inspect`. Every `console.log('%s items', n)` runs through `util.format`. When you need to know "is this actually a `Date`, or just something that looks like one across a realm boundary", `util.types` answers it where `instanceof` lies. When you deprecate a function in a library, `util.deprecate` emits the warning exactly once. And `util.styleText` colors terminal output while respecting the user's `NO_COLOR` preference, so you do not ship a tool that spews escape codes into a log file.
+Every time you console.log an object and see a nested value replaced by [Object], that string came from util.inspect. Every console.log with a percent placeholder runs through util.format. When you need to know whether a value is actually a Date, including one that crossed a realm boundary, util.types answers where instanceof lies. A realm is a separate JavaScript environment, such as a vm context, a worker, or an iframe, with its own built-in prototypes. util.deprecate emits a warning once. util.styleText colors terminal output and respects NO_COLOR, so a tool does not dump escape codes into a log file.
 
-Knowing these directly — instead of reaching for a dependency like `chalk`, `debug`'s formatter, or `is-promise` — means fewer packages, and output you can shape precisely (depth, sorting, hidden properties) when you are staring at a confusing object at 2 a.m.
+Using these directly, instead of a dependency for color, formatting, or an is-promise check, means fewer packages and output you can shape when an object is confusing.
 
 ## The concept, simply
 
-`util` is a collection of functions, not one object with a theme. The ones worth knowing:
+util is a collection of functions, not one object with a single theme. The ones worth knowing:
 
-- **`util.inspect(value, options)`** — turn any value into a readable string, the way `console.log` does. Options control `depth`, `colors`, `compact`, `breakLength`, `sorted`, `showHidden`, `maxArrayLength`, `getters`, and more. An object can customize its own output with the `util.inspect.custom` symbol.
-- **`util.format(fmt, ...args)`** — C-style `printf` substitution: `%s %d %i %f %j %o %O %c %%`.
-- **`util.types`** — predicates like `isPromise`, `isDate`, `isProxy` that check an object's internal V8 slot, not its prototype, so they are correct across realms.
-- **`util.deprecate(fn, msg, code)`** — wrap a function so calling it prints a one-time deprecation warning.
-- **`util.inherits(ctor, superCtor)`** — the pre-`class` way to set up prototype inheritance. Legacy; the docs discourage it.
-- **`util.styleText(format, text, options)`** — wrap text in ANSI color codes, skipping them when the output cannot show color.
-- **`util.promisify(fn)`** — turn an error-first callback function into one that returns a promise.
-- **`util.parseArgs(config)`** — a built-in command-line flag parser (covered in lessons 96 and 04).
+- util.inspect(value, options) turns any value into a readable string, the way console.log does. Options include depth, colors, compact, breakLength, sorted, showHidden, maxArrayLength, and getters. An object can customise its own output with the util.inspect.custom symbol.
+- util.format(fmt, ...args) is printf-style substitution: percent s, d, i, f, j, o, O, c, and a doubled percent for a literal percent sign.
+- util.types holds predicates such as isPromise, isDate, and isProxy. They check an object's internal V8 slot, not its prototype, so they stay correct across realms.
+- util.deprecate(fn, msg, code) wraps a function so the first call prints one deprecation warning.
+- util.inherits(ctor, superCtor) is the pre-class way to set up prototype inheritance. The docs mark it legacy and discourage it.
+- util.styleText(format, text, options) wraps text in ANSI color codes and skips them when the output cannot show color.
+- util.promisify(fn) turns an error-first callback function into one that returns a promise.
+- util.parseArgs(config) is a built-in command-line flag parser. Lessons 96 and 04 cover it.
 
 ## How it works
 
-1. **You import it:** `import util from 'node:util'` or pull out pieces, e.g. `const { inspect, format } = require('node:util')`.
-2. **`inspect` walks the value.** It recurses up to `depth` levels (default 2), replacing anything deeper with `[Object]` / `[Array]`. It respects a custom inspect method, marks circular references, and truncates long arrays and strings. `console.log` of an object is `inspect` with the stream's color setting.
-3. **`format` scans the format string** left to right, consuming one argument per specifier. Extra arguments are appended with spaces; a missing argument leaves the specifier in place.
-4. **`types.*` predicates call into C++** to read the object's internal type tag. They ignore the prototype chain entirely, which is why they survive `vm` contexts and faked prototypes.
-5. **`deprecate` tracks codes.** The first call with a given `code` emits one `DeprecationWarning` via the `'warning'` event; later calls with the same code are silent. CLI flags (`--no-deprecation`, `--throw-deprecation`) change this.
+1. Import it with import util from 'node:util', or pull out pieces, such as inspect and format from require('node:util').
+2. inspect walks the value. It recurses up to depth levels, default 2, and replaces anything deeper with [Object] or [Array]. It respects a custom inspect method, marks circular references, and truncates long arrays and strings. console.log of an object is inspect with the stream's color setting.
+3. format scans the format string left to right and consumes one argument per specifier. Extra arguments are appended, separated by spaces. A missing argument leaves the specifier in place.
+4. types predicates call into C++ and read the object's internal type tag. They ignore the prototype chain, which is why they survive vm contexts and faked prototypes.
+5. deprecate tracks codes. The first call with a given code emits one DeprecationWarning through the warning event. Later calls with the same code are silent. The flags --no-deprecation and --throw-deprecation change that.
 
-**Why `types` and `instanceof` disagree.** `instanceof` checks whether a constructor's `.prototype` is anywhere on the value's prototype chain. That chain is per-realm: a `Date` made inside a `vm` context has *that* context's `Date.prototype`, not yours, so `value instanceof Date` is false even though it is a genuine `Date`. It can also be faked with `Object.create(Date.prototype)`. `util.types.isDate` reads the internal `[[DateValue]]` slot, which only a real `Date` has and which no prototype trick can forge — so it is right in both cases.
+Why types and instanceof disagree. instanceof checks whether a constructor's prototype sits anywhere on the value's prototype chain. That chain is per realm. A Date made inside a vm context has that context's Date.prototype, not yours, so value instanceof Date is false even though it is a genuine Date. Object.create(Date.prototype) can fake the chain the other way. util.types.isDate reads the internal DateValue slot, which only a real Date has and which no prototype trick can forge, so it is right in both cases.
 
 ## Code examples
 
@@ -498,50 +502,55 @@ For the full treatment — detailed tokens, `allowNegative`, strict-mode error c
 
 ## Common mistakes & gotchas
 
-- **Relying on `console.log` output in tests or logs.** It is `util.inspect` with a default `depth` of 2, so anything deeper is `[Object]`. For logs, serialize with `JSON.stringify` or `inspect(x, { depth: Infinity })`; do not parse inspect output.
-- **Treating `util.inspect.custom` or a custom `toJSON` as hiding data.** A custom inspect only changes `console.log`/`inspect`; `JSON.stringify` still serializes the raw fields (Example 2). It is a display helper, not a redaction tool.
-- **Using `instanceof` for type checks across realms.** Values from a `vm` context, a different `<iframe>`, or a worker fail `instanceof` against your constructors. Use `util.types.*`, `Array.isArray`, or `Error.isError`.
-- **Expecting `%s` to deep-print an object.** `format('%s', obj)` inspects at depth 0, so nested fields collapse to `[Object]`. Use `%O` for a readable object, or `inspect` with a `depth`.
-- **Catching a `--throw-deprecation` throw with `try/catch`.** The throw happens through the asynchronous warning mechanism, so it becomes an `uncaughtException`, not a synchronous error at the call site.
-- **Still writing `util.inherits`.** It does not inherit static members and is marked Legacy. Use `class extends`.
-- **`%d` on a BigInt or `%f` on a Symbol.** `%d` and `%i` skip BigInt (they print `10n`) and throw on Symbol conversions in some positions; `format` is a debugging aid, not a numeric formatter.
+- Relying on console.log output in tests or logs. It is util.inspect with depth 2, so anything deeper is [Object]. For logs, use JSON.stringify or inspect with depth Infinity. Do not parse inspect output.
+- A custom util.inspect.custom, or a custom toJSON, is not hiding. JSON.stringify still serialises the raw fields. It is a display helper, not a redaction tool.
+- instanceof fails for values from a vm context, another iframe, or a worker. Use util.types, Array.isArray, or Error.isError.
+- format with percent s on an object inspects at depth 0, so nested fields collapse to [Object]. Use percent O, or inspect with a depth.
+- A throw from --throw-deprecation does not land in the try/catch around the call. It goes through the asynchronous warning mechanism and becomes an uncaughtException.
+- util.inherits does not inherit static members and is legacy. Use class extends.
+- percent d and percent i on a BigInt print it with an n, and some Symbol conversions throw. format is a debugging aid, not a numeric formatter.
 
 ## Best practices
 
-- **Reach for `util` before a dependency.** `inspect` replaces custom pretty-printers, `styleText` replaces `chalk` for simple color, `types` replaces `is-promise`/`is-date`, `format` is the `%s` engine behind `console.log`.
-- **Pass `depth` explicitly when inspecting for real.** `inspect(value, { depth: Infinity })` (or a generous number) when debugging a deep structure; `{ depth: 0 }` for a one-line summary.
-- **Define `[util.inspect.custom]`** on domain objects that log noisily or hold secrets, using `Symbol.for('nodejs.util.inspect.custom')` if you want to stay portable — but never rely on it for security.
-- **Use `util.types.*` for cross-realm type checks** in library code that may receive values from workers, `vm`, or other contexts.
-- **Give every `util.deprecate` call a stable `code`** so the warning fires once and users can silence a specific one with `--no-warnings=CODE`.
-- **Let `styleText` validate the stream** (the default) so your tool is quiet in pipes and honors `NO_COLOR`; only force codes when you know the destination.
+- Reach for util before a dependency. inspect replaces a custom pretty-printer, styleText replaces chalk for simple color, types replaces is-promise and is-date, and format is the engine behind console.log percent strings.
+- Pass depth explicitly. Infinity, or a generous number, when you are debugging a deep structure. depth 0 for a one-line summary.
+- Define util.inspect.custom on domain objects that log noisily or hold secrets, using Symbol.for('nodejs.util.inspect.custom') if you want it without importing util. Never rely on it for security.
+- Use util.types in library code that may receive values from workers, vm, or other realms.
+- Give every util.deprecate call a stable code so the warning fires once and users can silence that code.
+- Let styleText validate the stream, which is the default, so a pipe stays plain and NO_COLOR is honoured. Force codes only when you know the destination.
 
 ## ⭐ Interview lens
 
 > **Q: “Why does `value instanceof Date` return false for a real Date, and how do you check reliably?”**  
-> A: `instanceof` walks the prototype chain, which is per-realm. A `Date` from a `vm` context, iframe, or worker has that realm's `Date.prototype`, so it fails `instanceof Date` in yours. Use `util.types.isDate(value)`, which reads the internal V8 slot and is realm-independent (and un-fakeable). *Trap:* `Object.create(Date.prototype)` also passes `instanceof` but is not a Date — `types.isDate` says false.
+> instanceof walks the prototype chain, and that chain belongs to one realm. A realm is a separate JavaScript environment, such as a vm context, a worker, or an iframe, with its own Date.prototype. A real Date created in that other realm fails instanceof Date in yours, because it does not point at your prototype. util.types.isDate reads the internal V8 slot that only a real Date has, so it returns true across realms and it cannot be faked. For example, Object.create(Date.prototype) passes instanceof and fails types.isDate. The limit is proxies. A Proxy around a Date can still pass instanceof Date, while types.isDate on the proxy is false, because a proxy has no DateValue slot of its own.
 
 > **Q: “What is the difference between `%o` and `%O` in `util.format`?”**  
-> A: `%O` is `util.inspect` with defaults. `%o` is `inspect` with `showHidden` and `showProxy` on, so it shows non-enumerable properties (like an array's `[length]`) and proxy internals. `%s` on an object inspects at depth 0.
+> percent O is util.inspect with the default options. percent o is inspect with showHidden and showProxy turned on, so you see non-enumerable properties, such as an array's length, and proxy internals. percent s on an object is neither of those. It inspects at depth 0, so nested fields collapse to [Object]. For example, format('%o', arr) can show [length]: 1, and format('%O', arr) looks like a normal inspect. The limit is that both are still inspect strings for humans. They are not JSON, and a circular structure is marked rather than thrown the way JSON.stringify would throw.
 
 > **Q: “How does `util.deprecate` avoid spamming the same warning?”**  
-> A: It emits one `DeprecationWarning` per `code` via the `'warning'` event, on the first call; later calls with that code are silent. `--no-deprecation` suppresses it, `--throw-deprecation` turns it into a thrown (uncaught) error, `--trace-deprecation` adds a stack.
-
-> **Q: “Your CLI prints color codes into a redirected log file. What is the fix?”**  
-> A: Use `util.styleText`, which by default checks whether the target stream is a TTY and honors `NO_COLOR`/`FORCE_COLOR`, so it emits plain text into a pipe or file. Do not hand-concatenate ANSI codes, and do not pass `validateStream: false` unless you really want to force them.
+> It emits one DeprecationWarning per code, through the process warning event, on the first call. Later calls with that same code are silent, which is how it avoids a warning per request. --no-deprecation suppresses the warning. --trace-deprecation adds a stack. --throw-deprecation turns it into an error. That throw is delivered through the warning mechanism, so a try/catch around the deprecated call does not see it. It becomes an uncaughtException. For example, deprecate(fn, 'use next()', 'DEP_EXAMPLE') prints once even if you call it in a loop. The limit is a missing or unstable code. Without a stable code you cannot tell two warnings apart, and callers cannot silence just that one.
 
 > **Q: “Is a custom `[util.inspect.custom]` method a safe way to hide a secret?”**  
-> A: No. It only affects `console.log`/`inspect` output. `JSON.stringify` and direct property access still see the real value. Treat it as a display convenience, and keep secrets out of the object or out of the field entirely.
+> No. The method only changes what console.log and util.inspect print. JSON.stringify ignores it and serialises the real fields, and any code that reads the property still sees the secret. Treat it as a display convenience for noisy objects. For example, a Secret class can print [Secret] in the console and still show the token under JSON.stringify. The limit of "I will also add toJSON" is the same class of mistake. toJSON changes serialisation, and direct property access still works. Keep the secret out of the object, or out of the field, if it must not be readable.
 
 ## Cheat-card
 
-- **inspect:** `util.inspect(x, { depth: Infinity, colors: true, sorted: true })`. Default depth is 2 (deeper → `[Object]`); `breakLength` + `compact: true` for one line; `maxArrayLength` default 100; `showHidden` for non-enumerables; `getters: true` runs getters.
-- **Custom print:** `obj[util.inspect.custom] = (d, opts, inspect) => '…'` (or `Symbol.for('nodejs.util.inspect.custom')`); not a redaction tool.
-- **format:** `%s` string · `%d` Number · `%i` parseInt · `%f` parseFloat · `%j` JSON (`[Circular]`) · `%o` inspect+hidden · `%O` inspect · `%c` drop CSS · `%%` literal `%`. Extra args appended; missing args left in place.
-- **types:** `util.types.isPromise/isDate/isMap/isProxy/…` read internal slots → correct across realms, unlike `instanceof`. `util.types.isNativeError` deprecated (v24.2.0) → use `Error.isError`.
-- **deprecate:** `deprecate(fn, msg, 'CODE')` → one warning per code, async, via `'warning'`. Flags: `--no-deprecation`, `--trace-deprecation`, `--throw-deprecation`.
-- **inherits:** legacy; `util.inherits(C, Super)` links prototypes + `C.super_`, but not statics. Use `class extends`.
-- **styleText:** `styleText('green'|['bold','red']|'#ff5733', text[, { validateStream, stream }])`; stable v23.5.0/v22.13.0; respects TTY + `NO_COLOR`/`FORCE_COLOR`; `'none'` is a no-op.
-- **promisify:** `promisify(errFirstFn)`; override via `fn[util.promisify.custom]`; deprecated on already-async functions (DEP0174).
+- inspect(value, { depth, colors, sorted }). Default depth is 2, and deeper values print as [Object]. compact true plus breakLength forces one line. maxArrayLength defaults to 100. showHidden shows non-enumerables. getters true runs getters.
+- Custom print: assign util.inspect.custom, or Symbol.for('nodejs.util.inspect.custom'). It is not a redaction tool.
+- format: percent s string, d Number, i parseInt, f parseFloat, j JSON with [Circular] for cycles, o inspect plus hidden, O inspect, c drops a CSS argument, doubled percent is a literal percent. Extra arguments are appended. Missing ones stay in the string.
+- types.isPromise, isDate, isMap, isProxy, and the rest read internal slots, so they work across realms. instanceof does not.
+- deprecate(fn, msg, code) warns once per code, asynchronously, through the warning event. Flags: --no-deprecation, --trace-deprecation, --throw-deprecation.
+- inherits is legacy. It links prototypes and sets super_, not statics. Use class extends.
+- promisify wraps an error-first callback. Override it with util.promisify.custom. Promisifying a function that already returns a promise is deprecated, DEP0174.
+
+## Good to know
+
+- “Your CLI prints color codes into a redirected log file. What is the fix?” Use util.styleText. By default it checks whether the target stream is a TTY and honours NO_COLOR and FORCE_COLOR, so a pipe or a file gets plain text. Do not concatenate ANSI codes by hand, and do not pass validateStream false unless you mean to force the codes.
+
+- util.types.isNativeError is deprecated as of v24.2.0. Use the global Error.isError, which is also correct across realms.
+- styleText was added in v21.7.0 and v20.12.0, and it has been stable since v23.5.0 and v22.13.0. Hex colors such as #ff5733 were added in v24.16.0. The no-op format none was added in v24.2.0. NO_COLOR and FORCE_COLOR have been honoured since v22.8.0.
+- Promisifying a function that already returns a promise is deprecated as DEP0174 since v20.8.0.
+- The doubled percent in a format string is not reduced when that string is the only argument and no other specifier needs satisfying. format returns the string untouched in that case.
 
 ---
 

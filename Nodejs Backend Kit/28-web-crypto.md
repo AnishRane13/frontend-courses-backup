@@ -13,60 +13,54 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Web Crypto is the standard async cryptography API on crypto.subtle: you get a CryptoKey that is tied to one algorithm and a list of allowed uses, and every operation returns a promise. Node implements the same API browsers, Deno, Bun, and edge workers ship, so a verifier written against it can run in all of them. The trade-off is that it is promise-only and not streaming, the AES-GCM tag is glued onto the ciphertext, and an ECDSA signature will not verify in node:crypto until you ask for the raw r-then-s format.
+
 ## Why it matters
 
-Lesson 27 uses `node:crypto`: `createHash`, `createHmac`, `createCipheriv`, `scrypt`. That API exists only in Node. Browsers, Deno, Bun, Cloudflare Workers and other edge runtimes ship a different, standard API instead: **Web Crypto**, reached through `globalThis.crypto.subtle`. Node implements it too (added in v15.0.0, stable since v19.0.0 for everything except the Ed/X curves, `crypto` global no longer experimental in v23.0.0). So a JWT verifier, a webhook signature check or an encrypted-cookie helper written against `crypto.subtle` runs unchanged on all of them.
+Lesson 27 uses node:crypto: createHash, createHmac, createCipheriv, scrypt. That API exists only in Node. Browsers, Deno, Bun, Cloudflare Workers, and other edge runtimes ship Web Crypto, reached through globalThis.crypto.subtle. Node implements it too, so a JWT verifier, a webhook signature check, or an encrypted-cookie helper written against crypto.subtle runs unchanged on all of them.
 
-It also differs in ways that cause real bugs when you move code between the two APIs:
-
-- every operation returns a promise;
-- keys are opaque `CryptoKey` objects tied to one algorithm and a list of allowed usages;
-- an AES-GCM auth failure is a bare `OperationError` with no details;
-- ECDSA signatures use a different byte format from `node:crypto`'s default, so a signature made in one API fails to verify in the other unless you set one option.
+It also differs in ways that cause real bugs when code moves between the two APIs. Every operation returns a promise. Keys are opaque CryptoKey objects tied to one algorithm and a list of allowed usages. An AES-GCM auth failure is a bare OperationError with no details. ECDSA signatures use a different byte layout from node:crypto's default, so a signature made in one API fails in the other unless you set one option.
 
 ## The concept, simply
 
-Web Crypto is a small set of async functions on `crypto.subtle` (a `SubtleCrypto` instance) plus one key type.
+Web Crypto is a small set of async functions on crypto.subtle, a SubtleCrypto instance, plus one key type.
 
-- **`CryptoKey`**: a handle to key material. You cannot read the bytes through it. It has:
-  - `type`: `'secret'`, `'private'` or `'public'`;
-  - `algorithm`: for example `{ name: 'AES-GCM', length: 256 }`;
-  - `usages`: what the key may do, such as `['encrypt', 'decrypt']`;
-  - `extractable`: whether `exportKey`/`wrapKey` may ever give the bytes out.
+A CryptoKey is a handle to key material. You cannot read the bytes through it. It has type, secret, private, or public. It has algorithm, for example AES-GCM with length 256. It has usages, such as encrypt and decrypt. It has extractable, whether exportKey or wrapKey may ever give the bytes out. All four are read-only.
 
-  All four are read-only.
-- **Key functions**: `generateKey(algorithm, extractable, usages)`, `importKey(format, data, algorithm, extractable, usages)` and `exportKey(format, key)`. The formats are `'raw'` (bytes), `'jwk'` (JSON Web Key object), `'spki'` (DER public key) and `'pkcs8'` (DER private key).
-- **Operation functions**: `digest`, `sign`/`verify`, `encrypt`/`decrypt`, `deriveBits`/`deriveKey`, `wrapKey`/`unwrapKey`. Each takes an algorithm object such as `{ name: 'AES-GCM', iv }`, a `CryptoKey` and data (`ArrayBuffer`, any typed array, `DataView` or `Buffer`). Each resolves to an `ArrayBuffer`, except `verify`, which resolves to a boolean.
-- **Two non-subtle helpers** on `crypto` itself: `crypto.getRandomValues(typedArray)` (at most 65,536 bytes per call) and `crypto.randomUUID()`.
+Key functions: generateKey(algorithm, extractable, usages), importKey(format, data, algorithm, extractable, usages), and exportKey(format, key). The formats are raw for bytes, jwk for a JSON Web Key object, spki for a DER public key, and pkcs8 for a DER private key.
 
-The algorithm names are the Web Crypto spellings: `'SHA-256'`, not `'sha256'`; `'ECDSA'` with `namedCurve: 'P-256'`, not `'prime256v1'`. On Node v24.19.0 the stable set includes SHA-1/256/384/512, HMAC, AES-GCM/CBC/CTR/KW, ECDSA and ECDH (P-256/384/521), RSA-PSS, RSASSA-PKCS1-v1_5, RSA-OAEP, PBKDF2, HKDF, Ed25519 and X25519. **Ed25519 and X25519 became stable in v23.5.0 and v22.13.0** (added in v18.4.0 and v16.17.0 as experimental). `Ed448`/`X448` and the "Modern Algorithms" additions (ML-DSA, ML-KEM, ChaCha20-Poly1305, SHA-3, Argon2, AES-OCB, KMAC, all added in v24.7.0 or later) are still **Stability 1.1 – Active development**.
+Operation functions: digest, sign and verify, encrypt and decrypt, deriveBits and deriveKey, wrapKey and unwrapKey. Each takes an algorithm object such as name AES-GCM plus an iv, a CryptoKey, and data that can be an ArrayBuffer, a typed array, a DataView, or a Buffer. Each resolves to an ArrayBuffer, except verify, which resolves to a boolean.
+
+Two helpers sit on crypto itself, not on subtle. crypto.getRandomValues fills a typed array, at most 65,536 bytes per call. crypto.randomUUID makes an id.
+
+Algorithm names are the Web Crypto spellings. SHA-256, not sha256. ECDSA with namedCurve P-256, not prime256v1.
 
 ## How it works
 
-1. **Get a key.** `generateKey` creates fresh key material: a `CryptoKey` for symmetric algorithms, or a `{ publicKey, privateKey }` pair for asymmetric ones. `importKey` wraps bytes or a JWK you already have. Both fix the algorithm, the usages and `extractable` for the key's whole life.
-2. **Call an operation with an algorithm object.** The object names the algorithm and carries its per-call parameters: `iv` and `additionalData` for AES-GCM, `hash` for ECDSA, `saltLength` for RSA-PSS, `salt`/`iterations`/`hash` for PBKDF2, `salt`/`info`/`hash` for HKDF.
-3. **The implementation checks the key against the call.** The algorithm name must match the key's, and the usage must be in `key.usages`. A mismatch rejects with `InvalidAccessError`. An unknown name rejects with `NotSupportedError`.
-4. **The promise settles** with an `ArrayBuffer` (or a boolean for `verify`). Failures are `DOMException`s told apart by `name`. The examples below hit `OperationError`, `InvalidAccessError`, `NotSupportedError` and `SyntaxError`.
-5. **Export only if allowed.** `exportKey` rejects for a key created with `extractable: false`. Public keys of a generated pair are always extractable, whatever you pass.
+1. Get a key. generateKey creates fresh material: one CryptoKey for a symmetric algorithm, or a publicKey and privateKey pair for an asymmetric one. importKey wraps bytes or a JWK you already have. Both fix the algorithm, the usages, and extractable for the life of the key.
+2. Call an operation with an algorithm object. The object names the algorithm and carries the per-call parameters: iv and additionalData for AES-GCM, hash for ECDSA, saltLength for RSA-PSS, salt, iterations, and hash for PBKDF2, salt, info, and hash for HKDF.
+3. The implementation checks the key against the call. The algorithm name must match the key, and the usage must be in key.usages. A mismatch rejects with InvalidAccessError. An unknown name rejects with NotSupportedError.
+4. The promise settles with an ArrayBuffer, or a boolean for verify. Failures are DOMExceptions told apart by name. The examples hit OperationError, InvalidAccessError, NotSupportedError, and SyntaxError.
+5. Export only if allowed. exportKey rejects for a key created with extractable false. Public keys of a generated pair are always extractable, whatever you passed.
 
-**AES-GCM in Web Crypto: the tag is inside the ciphertext.** `createCipheriv('aes-256-gcm')` in lesson 27 gives you the ciphertext and, separately, `getAuthTag()`. `subtle.encrypt({ name: 'AES-GCM', iv })` returns one `ArrayBuffer`: ciphertext followed by the tag (16 bytes by default, set with `tagLength` in bits). `subtle.decrypt` expects the same layout and checks the tag before it returns anything. On any mismatch (changed ciphertext, wrong `iv`, wrong `additionalData`, missing tag, wrong key) it rejects with a `DOMException` named `OperationError` and a generic message, and returns no partial plaintext. The `iv` must be unique for every encryption under one key (the docs: "must be unique for every encryption operation using a given key"). Use 12 random bytes per message and store the IV next to the ciphertext.
+AES-GCM in Web Crypto: the tag is inside the ciphertext. createCipheriv in lesson 27 gives you the ciphertext and, separately, getAuthTag. subtle.encrypt with name AES-GCM and an iv returns one ArrayBuffer: ciphertext followed by the tag, 16 bytes by default, set with tagLength in bits. subtle.decrypt expects that same layout and checks the tag before it returns anything. On any mismatch, changed ciphertext, wrong iv, wrong additionalData, missing tag, or wrong key, it rejects with a DOMException named OperationError and a generic message, and it returns no partial plaintext. The iv must be unique for every encryption under one key. Use 12 random bytes per message and store the IV next to the ciphertext.
 
-**ECDSA signature format.** Web Crypto ECDSA signatures are raw `r || s` (IEEE P1363), 64 bytes for P-256. `node:crypto`'s `sign`/`verify` default to DER (ASN.1, 70–72 bytes). Pass `dsaEncoding: 'ieee-p1363'` on the Node side to interoperate (Example 8). JWTs (`ES256`) also use the raw `r || s` form.
+ECDSA signatures from Web Crypto are raw r followed by s, the IEEE P1363 form, 64 bytes for P-256. node:crypto sign and verify default to DER, which is ASN.1 and about 70 to 72 bytes. Pass dsaEncoding ieee-p1363 on the Node side to interoperate. JWTs with ES256 also use the raw r-then-s form.
 
-**Web Crypto vs `node:crypto` (lesson 27).**
-
-| Job | `node:crypto` (lesson 27) | `crypto.subtle` | Notes |
-|---|---|---|---|
-| Hash | `createHash('sha256').update(d).digest()` (sync, streaming `update`) | `await subtle.digest('SHA-256', d)` | Web Crypto has no incremental `update`: you pass the whole input at once |
-| HMAC | `createHmac('sha256', secret)` | `importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, …)` → `sign('HMAC', key, d)` / `verify` | `subtle.verify` compares for you; with `createHmac` you call `timingSafeEqual` yourself |
-| AES-GCM | `createCipheriv('aes-256-gcm', key, iv)` + `getAuthTag()` / `setAuthTag()` | `encrypt({ name: 'AES-GCM', iv, additionalData }, key, d)` | Web Crypto appends the tag to the ciphertext; Node keeps it separate |
-| Sign / verify | `crypto.sign(alg, d, key)` / `crypto.verify`, `createSign` / `createVerify` | `subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, d)`, `'RSA-PSS'`, `'RSASSA-PKCS1-v1_5'`, `'Ed25519'` | ECDSA: Node DER by default, Web Crypto P1363 |
-| PBKDF2 | `pbkdf2(pw, salt, iters, keylen, 'sha256', cb)` / `pbkdf2Sync` | `importKey('raw', pw, 'PBKDF2', false, ['deriveBits'])` → `deriveBits({ name: 'PBKDF2', salt, iterations, hash }, key, bits)` | Length in **bytes** for Node, in **bits** for Web Crypto |
-| HKDF | `hkdf(digest, ikm, salt, info, keylen, cb)` / `hkdfSync` | `deriveBits({ name: 'HKDF', hash, salt, info }, key, bits)` | Both return an `ArrayBuffer`; same output for the same inputs |
-| Key pairs | `generateKeyPair('ec' / 'rsa' / 'ed25519', opts, cb)` → `KeyObject` or PEM | `generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, …)` → `CryptoKeyPair` | Web Crypto keys are bound to one algorithm and usage list |
-| Key format | `KeyObject`, PEM or DER strings/Buffers, JWK | `CryptoKey`; `raw`/`jwk`/`spki`/`pkcs8` (DER, no PEM) | Convert with `KeyObject.from(cryptoKey)` / `keyObject.toCryptoKey(…)` |
-| scrypt | `scrypt` / `scryptSync` | not available | Web Crypto has PBKDF2 (and Argon2 as Stability 1.1 in v24.8.0+) |
-| Streaming / sync | streams and `*Sync` variants exist | promises only | Use `node:crypto` for streaming hashes of large files |
+| Job | node:crypto | crypto.subtle | Notes |
+| --- | --- | --- | --- |
+| Hash | `createHash('sha256').update(d).digest()` sync, streaming update | `await subtle.digest('SHA-256', d)` | No incremental update. You pass the whole input |
+| HMAC | `createHmac('sha256', secret)` | import an HMAC key, then sign and verify | subtle.verify compares for you. createHmac needs timingSafeEqual |
+| AES-GCM | `createCipheriv` plus getAuthTag and setAuthTag | encrypt with name AES-GCM, iv, and optional additionalData | Web Crypto appends the tag. Node keeps it separate |
+| Sign and verify | `crypto.sign` / `crypto.verify`, or createSign / createVerify | subtle.sign with ECDSA, RSA-PSS, RSASSA-PKCS1-v1_5, or Ed25519 | ECDSA: Node defaults to DER, Web Crypto uses P1363 |
+| PBKDF2 | `pbkdf2` length in bytes | deriveBits length in bits | Import the password as a PBKDF2 key first |
+| HKDF | `hkdf` / `hkdfSync` | deriveBits with name HKDF | Both return an ArrayBuffer |
+| Key pairs | `generateKeyPair` returns a KeyObject or PEM | generateKey returns a CryptoKey pair | Web Crypto keys are bound to one algorithm and a usage list |
+| Key format | KeyObject, PEM, DER, or JWK | CryptoKey, raw, jwk, spki, pkcs8, no PEM | Convert with KeyObject.from or toCryptoKey |
+| scrypt | `scrypt` / `scryptSync` | not in the stable set | Web Crypto has PBKDF2 |
+| Streaming and sync | streams and Sync variants | promises only | Use node:crypto to hash a large file as a stream |
 
 ## Code examples
 
@@ -522,55 +516,64 @@ text
 
 ## Common mistakes & gotchas
 
-- **Node spellings in Web Crypto.** `'sha256'`, `'aes-256-gcm'` and `'prime256v1'` are `node:crypto` names. Web Crypto wants `'SHA-256'`, `{ name: 'AES-GCM' }` with a 256-bit key, and `namedCurve: 'P-256'`. A wrong name rejects with `NotSupportedError`.
-- **Looking for the GCM tag separately.** `subtle.encrypt` appends it, and `subtle.decrypt` expects it at the end. Moving data between Node's `getAuthTag()` and Web Crypto means concatenating or splitting the last 16 bytes yourself.
-- **Reusing an IV.** Same key + same IV leaks `m1 ⊕ m2` and allows tag forgery (Example 4). Fresh random 12-byte IV per message.
-- **Expecting a useful error from `decrypt`.** Every authentication failure is the same `OperationError`. Log context (key id, message id) yourself.
-- **Bits vs bytes.** `deriveBits(…, 256)` and `{ length: 256 }` are bits. `pbkdf2Sync(…, 32, …)`, `hkdfSync(…, 32)` and `saltLength: 32` are bytes.
-- **Destructuring `getRandomValues`.** It needs `this === crypto` and throws `ERR_INVALID_THIS` when detached. Call `crypto.getRandomValues(u8)`, which also caps each call at 65,536 bytes.
-- **Mixing ECDSA signature formats.** Web Crypto produces 64-byte `r || s`. `node:crypto` defaults to DER. Pass `dsaEncoding: 'ieee-p1363'` on the Node side.
-- **Expecting `extractable: false` to hide a key inside Node.** `KeyObject.from()` still exports it in v24 (with DEP0204). It guards against accidents, not against hostile code in the process.
-- **Wrong usages.** A key created with `['sign']` cannot `verify` (`InvalidAccessError`). For key pairs the private key gets `sign` and the public key `verify`.
-- **Hashing large files with `subtle.digest`.** It takes the whole input as one buffer, with no streaming. Use `createHash` with a stream in Node.
+- Node spellings in Web Crypto. sha256, aes-256-gcm, and prime256v1 are node:crypto names. Web Crypto wants SHA-256, an object with name AES-GCM and a 256-bit key, and namedCurve P-256. A wrong name rejects with NotSupportedError.
+- Looking for the GCM tag as a separate value. subtle.encrypt appends it, and subtle.decrypt expects it at the end. Moving data to or from getAuthTag means joining or splitting the last 16 bytes yourself.
+- Reusing an IV. The same key and the same IV leaks the XOR of the two plaintexts and allows tag forgery. Use a fresh random 12-byte IV per message.
+- Expecting a useful error from decrypt. Every authentication failure is the same OperationError. Log your own context, such as a key id or a message id.
+- Bits versus bytes. deriveBits of 256, and length 256, are bits. pbkdf2Sync and hkdfSync lengths, and saltLength, are bytes.
+- Destructuring getRandomValues. It needs this to be crypto and throws ERR_INVALID_THIS when detached. Call crypto.getRandomValues, which also caps each call at 65,536 bytes.
+- Mixing ECDSA formats. Web Crypto produces 64-byte r followed by s. node:crypto defaults to DER. Pass dsaEncoding ieee-p1363 on the Node side.
+- Expecting extractable false to hide a key inside Node. KeyObject.from still exports it in v24, with deprecation DEP0204. It guards against accidents, not against hostile code in the same process.
+- Wrong usages. A key created with sign cannot verify. That is InvalidAccessError. On a key pair the private key gets sign and the public key gets verify.
+- Hashing a large file with subtle.digest. It takes the whole input as one buffer, with no streaming. Use createHash on a stream in Node.
 
 ## Best practices
 
-- **Write portable crypto against `crypto.subtle`** (JWT verification, webhook HMACs, encrypted cookies) and keep `node:crypto` for Node-only needs: streaming hashes, `scrypt`, PEM handling, `timingSafeEqual` on raw buffers.
-- **Generate keys with `extractable: false`** unless you really must export them, and give each key only the usages it needs.
-- **Store `iv || ciphertext+tag` together** (for example base64 of the concatenation) and pass `additionalData` to bind the ciphertext to its context (user id, record id).
-- **Import a shared secret once** and reuse the `CryptoKey`, instead of calling `importKey` on every request.
-- **For passwords, prefer Argon2id or scrypt** (lesson 85). If you must use PBKDF2 (FIPS, or Web-Crypto-only runtimes), use at least the current OWASP iteration count (600,000 for SHA-256 when this lesson was written) and a 16-byte random salt per password.
-- **Move keys between the two APIs with `KeyObject.from` / `toCryptoKey`,** or with SPKI/PKCS#8 DER when the other side is not Node.
+- Write portable crypto against crypto.subtle for JWT checks, webhook HMACs, and encrypted cookies. Keep node:crypto for streaming hashes, scrypt, PEM, and timingSafeEqual on raw buffers.
+- Generate keys with extractable false unless you must export them, and give each key only the usages it needs.
+- Store the IV and the ciphertext-plus-tag together, and pass additionalData to bind the ciphertext to its context, such as a user id.
+- Import a shared secret once and reuse the CryptoKey. Do not call importKey on every request.
+- For passwords, prefer argon2id or scrypt. If you must use PBKDF2, use at least the OWASP iteration count this lesson recorded, 600,000 for SHA-256, and a 16-byte random salt per password.
+- Move keys between the two APIs with KeyObject.from and toCryptoKey, or with SPKI and PKCS#8 DER when the other side is not Node.
 
 ## ⭐ Interview lens
 
 > **Q: “How does AES-GCM in Web Crypto report tampering, and where is the tag?”**  
-> A: `subtle.encrypt` returns the ciphertext with the authentication tag appended (16 bytes by default). `subtle.decrypt` checks the tag first. If the ciphertext, IV, additional data or key is wrong, it rejects with a `DOMException` named `OperationError` and returns no plaintext. *Trap:* in `node:crypto` the tag is separate (`getAuthTag`/`setAuthTag`), so moving data between the two APIs means splitting or joining the last 16 bytes.
+> subtle.encrypt returns one ArrayBuffer: the ciphertext with the authentication tag appended, 16 bytes by default. subtle.decrypt expects that same layout and checks the tag before it returns any plaintext. If the ciphertext, the IV, the additional data, or the key is wrong, it rejects with a DOMException named OperationError and a generic message. You do not get a partial plaintext. In node:crypto the tag is a separate value from getAuthTag and setAuthTag, so moving a message between the two APIs means splitting or joining those last 16 bytes. For example, a cookie encrypted in the browser has to have its tail split off before setAuthTag in Node. The limit is the error. OperationError does not tell you which check failed, so log your own message id.
 
 > **Q: “Why must the IV be unique per encryption with AES-GCM?”**  
-> A: GCM XORs the plaintext with a keystream derived from the key and IV. Two messages under the same key and IV share the keystream, so XOR-ing the ciphertexts gives the XOR of the plaintexts. Knowing one plaintext reveals the other, and the tag's authentication key leaks too, which allows forgeries. Use a random 12-byte IV per message and store it with the ciphertext.
+> GCM XORs the plaintext with a keystream derived from the key and the IV. Two messages under the same key and the same IV share that keystream, so XORing the ciphertexts gives the XOR of the plaintexts. Knowing one plaintext reveals the other, and the tag's authentication key leaks, which allows forgeries. Use a random 12-byte IV for every encryption and store it next to the ciphertext. The IV is not secret. Uniqueness under that key is the requirement. The limit is the same one as in node:crypto: a counter works if it never repeats, and a random IV you repeat does not. Web Crypto will not warn you. It will encrypt.
 
 > **Q: “A signature made with `crypto.subtle` (ECDSA P-256) fails `crypto.verify` in Node. Why?”**  
-> A: Web Crypto emits the 64-byte IEEE P1363 `r || s` form, and `crypto.verify` expects DER by default. Pass `{ key, dsaEncoding: 'ieee-p1363' }`. The key itself converts with `KeyObject.from(cryptoKey)`.
-
-> **Q: “What does `extractable: false` guarantee?”**  
-> A: That `subtle.exportKey` and `wrapKey` refuse to give out the key bytes, while the key still works for its usages. Public keys of a generated pair are always extractable. In Node it is not a hard boundary: `KeyObject.from()` on a non-extractable key still works in v24 (deprecated as DEP0204), so treat it as protection against mistakes, not against code in the same process.
+> Web Crypto emits the 64-byte IEEE P1363 form, r followed by s. crypto.verify in Node expects DER by default, which is a variable-length ASN.1 encoding, about 70 to 72 bytes for P-256, so the verify fails even when the signature is valid. Pass an options object with the key and dsaEncoding set to ieee-p1363. The key itself converts with KeyObject.from(cryptoKey). JWTs that use ES256 already use the raw r-then-s form, which is why this shows up the moment a browser-signed token hits Node. The limit is direction. If Node signed with the default DER, Web Crypto will reject that signature until you convert it to r-then-s.
 
 > **Q: “When would you use `crypto.subtle` instead of `createHash`/`createHmac`?”**  
-> A: When the code must run outside Node too (browser, edge workers, Deno, Bun), or when keys should be non-extractable handles bound to one algorithm. Stay with `node:crypto` for streaming hashes of large inputs, scrypt, and synchronous APIs.
+> Use crypto.subtle when the code must also run outside Node, in a browser, an edge worker, Deno, or Bun, or when you want keys that are non-extractable handles bound to one algorithm and a usage list. Stay with node:crypto for a streaming hash of a large file, for scrypt, and for synchronous APIs. For example, a webhook HMAC that the same package runs in a worker and in Node belongs on subtle. A multi-gigabyte file hash belongs on createHash, because subtle.digest needs the whole input in one buffer. The limit of "subtle everywhere" is also passwords. scrypt is not in the stable Web Crypto set. You use PBKDF2 there, or you call node:crypto when you are on Node.
 
 ## Cheat-card
 
-- **Access:** `globalThis.crypto.subtle` (= `require('node:crypto').webcrypto.subtle`); everything returns a promise.
-- **Digest:** `subtle.digest('SHA-256', data)` → `ArrayBuffer`; names `'SHA-1' | 'SHA-256' | 'SHA-384' | 'SHA-512'`.
-- **HMAC:** `importKey('raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])`; `verify` returns a boolean.
-- **AES-GCM:** `{ name: 'AES-GCM', iv /* 12 random bytes */, additionalData? }`; output = ciphertext + 16-byte tag; failure = `OperationError`.
-- **Signatures:** `ECDSA` + `namedCurve: 'P-256'` + per-call `hash`; `RSA-PSS` + `saltLength` (bytes); `RSASSA-PKCS1-v1_5`; `Ed25519` (stable since v23.5.0 / v22.13.0).
-- **KDFs:** `importKey('raw', secret, 'PBKDF2' | 'HKDF', false, ['deriveBits'])`; `deriveBits(params, key, bits)`; length in bits.
-- **Formats:** `raw` (secret, EC/Ed public), `jwk` (all), `spki` (public DER), `pkcs8` (private DER); no PEM headers.
-- **extractable:false:** `exportKey` → `InvalidAccessError`; public keys always extractable; `KeyObject.from` still exports (DEP0204).
-- **Interop:** `KeyObject.from(cryptoKey)` (v15.0.0); `keyObject.toCryptoKey(alg, ext, usages)` (v23.0.0 / v22.10.0); ECDSA needs `dsaEncoding: 'ieee-p1363'` in `node:crypto`.
-- **Random:** `crypto.getRandomValues(u8)` (≤ 65,536 bytes, don't destructure), `crypto.randomUUID()`.
+- Reach it at globalThis.crypto.subtle, the same object as require('node:crypto').webcrypto.subtle. Everything returns a promise.
+- Digest: subtle.digest('SHA-256', data) returns an ArrayBuffer. Names are SHA-1, SHA-256, SHA-384, and SHA-512.
+- HMAC: importKey raw bytes with name HMAC and a hash, usages sign and verify. verify returns a boolean.
+- AES-GCM: name AES-GCM, a 12-byte random iv, optional additionalData. Output is ciphertext plus a 16-byte tag. Failure is OperationError.
+- Signatures: ECDSA with namedCurve P-256 and a per-call hash, RSA-PSS with saltLength in bytes, RSASSA-PKCS1-v1_5, or Ed25519.
+- KDFs: import the secret as PBKDF2 or HKDF with usage deriveBits. deriveBits takes a length in bits.
+- Formats: raw, jwk, spki for public DER, pkcs8 for private DER. No PEM headers.
+- extractable false makes exportKey throw InvalidAccessError. Public keys of a pair are always extractable.
+- ECDSA interop with node:crypto needs dsaEncoding ieee-p1363.
+- Random: crypto.getRandomValues, at most 65,536 bytes, and do not destructure it. crypto.randomUUID for ids.
+
+## Good to know
+
+- “What does `extractable: false` guarantee?” subtle.exportKey and wrapKey refuse to give out the bytes, and the key still works for its usages. Public keys of a generated pair are always extractable. In Node, KeyObject.from on a non-extractable key still works in v24 and is deprecated as DEP0204, so it protects against mistakes, not against code in the same process.
+
+- Web Crypto was added in Node in v15.0.0 and has been stable since v19.0.0, except the Ed and X curves. The crypto global stopped being experimental in v23.0.0.
+- On Node v24.19.0 the stable set includes SHA-1, SHA-256, SHA-384, SHA-512, HMAC, AES-GCM, AES-CBC, AES-CTR, AES-KW, ECDSA and ECDH on P-256, P-384, and P-521, RSA-PSS, RSASSA-PKCS1-v1_5, RSA-OAEP, PBKDF2, HKDF, Ed25519, and X25519.
+- Ed25519 and X25519 became stable in v23.5.0 and v22.13.0. They were added as experimental in v18.4.0 and v16.17.0.
+- Ed448, X448, and the newer algorithms ML-DSA, ML-KEM, ChaCha20-Poly1305, SHA-3, Argon2, AES-OCB, and KMAC, added in v24.7.0 or later, are still Stability 1.1, active development. Argon2 as Stability 1.1 is called out for v24.8.0 and later.
+- KeyObject.from(cryptoKey) was added in v15.0.0. keyObject.toCryptoKey was added in v23.0.0 and v22.10.0.
+- DEP0204 is listed as a documentation-only deprecation changed in v24.15.0 that will throw in a future version, and v24.19.0 already emitted a runtime DeprecationWarning from KeyObject.from on a non-extractable key.
+- Algorithm names are matched without regard to case, but sha256 without the hyphen is not a Web Crypto name and rejects with NotSupportedError. MD5 is not offered.
 
 ---
 

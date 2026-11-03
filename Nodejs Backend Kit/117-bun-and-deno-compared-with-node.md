@@ -13,18 +13,25 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Bun and Deno are other programs that run JavaScript on a server, including a lot of Node code and npm packages. Node and Deno embed V8, the engine from Chrome. Bun embeds JavaScriptCore, the engine from Safari. Each one also bundles a test runner and a package manager, and both Bun and Deno run TypeScript without a separate build. You look at them when someone asks whether to leave Node. The trade-off is compatibility. A server that starts is not the same as Worker limits, native addons, and permissions behaving as they do on Node.
+
 ## Why it matters
 
-Node is no longer the only server-side JavaScript runtime that can run npm packages. **Bun** and **Deno** both run most Node code, both ship a test runner and a package manager in the same binary, and both run TypeScript files directly. Sooner or later someone on your team will ask "should we switch?". Answering it needs facts that are easy to get wrong:
+Node is no longer the only server-side JavaScript runtime that can run npm packages. Bun and Deno both run most Node code, both ship a test runner and a package manager in the same binary, and both run TypeScript files directly. Someone will ask whether to switch. A few facts are easy to get wrong.
 
-- **"It runs on Bun" can mean "the server starts".** In this lesson the same Express 5 app answered all four test requests identically on all three runtimes, but Deno refused to even load Express until the process was given environment access, and Bun silently ignored a `Worker` memory limit.
-- **The runtimes report misleading versions.** Bun 1.4.3 says `process.version` is `v26.3.0` and `process.versions.v8` is `14.6.202.34-node.20`, although its engine is JavaScriptCore, not V8.
-- **The tools collide.** `bun test`, `deno test` and `node --test` each picked up the other runtimes' test files in the same folder and failed on them.
-- **Benchmarks need care.** The benchmark in this lesson, run on a laptop shared with other jobs, put the three runtimes in three different orders across its five rounds.
+"It runs on Bun" can mean "the server starts". In this lesson the same Express 5 app answered all four test requests the same way on all three runtimes. Deno refused to load Express until the process was given environment access. Bun silently ignored a Worker memory limit.
+
+The runtimes report misleading versions. Bun 1.4.3 says `process.version` is `v26.3.0` and `process.versions.v8` is `14.6.202.34-node.20`, although its engine is JavaScriptCore, not V8.
+
+The tools collide. `bun test`, `deno test`, and `node --test` each picked up the other runtimes' test files in the same folder and failed on them.
+
+Benchmarks need care. The benchmark here, on a laptop shared with other jobs, put the three runtimes in three different orders across five rounds.
 
 ## The concept, simply
 
-All three are programs that embed a JavaScript engine and add what the engine lacks: files, sockets, timers, processes, a module loader. They differ in which engine they embed, which language the runtime layer is written in, how much of Node's API they copy, and what they bundle into the one binary.
+All three are programs that embed a JavaScript engine and add what the engine lacks: files, sockets, timers, processes, and a module loader. They differ in which engine they embed, which language the runtime layer is written in, how much of Node's API they copy, and what they bundle into the one binary.
 
 text
 
@@ -47,7 +54,7 @@ The rows come from each binary's `--help`, `process.versions` and the projects' 
 ## How it works
 
 1. **The engine runs your JavaScript.** Node and Deno embed V8, the engine from Chrome. Bun embeds JavaScriptCore, the engine from Safari; its docs say "Bun is powered by the JavaScriptCore engine, which is developed by Apple for Safari". The engine compiles and optimises your code and runs the garbage collector, so the same program can use memory and CPU differently on the two engines.
-2. **The runtime layer provides I/O.** Node's is C++ plus JavaScript on top of libuv ([lesson 07](07-libuv-the-thread-pool.md)). The Deno README says Deno is "built on V8, Rust, and Tokio" (Tokio is Rust's async I/O library). Bun was written in Zig until the pull request "Rewrite Bun in Rust" (#30412) was merged on 2026-05-14. The last release before it was v1.3.14 (2026-05-13); v1.4.0 (2026-08-20) was the first release after it. The Bun README now says "It's written in Rust and powered by JavaScriptCore". Bun 1.4.3 still lists a `zig` entry in `process.versions` (Example 2).
+2. **The runtime layer provides I/O.** Node's is C++ plus JavaScript on top of libuv ([lesson 07](07-libuv-the-thread-pool.md)). The Deno README says Deno is "built on V8, Rust, and Tokio" (Tokio is Rust's async I/O library). Bun was written in Zig until it was rewritten in Rust. The dates are in Good to know. The Bun README now says "It's written in Rust and powered by JavaScriptCore". Bun 1.4.3 still lists a `zig` entry in `process.versions` (Example 2).
 3. **Each runtime provides its own version of Node's APIs.** Bun implements each module and publishes a per-module status page that "reflects the latest version of Bun's compatibility with Node.js v26". It marks `node:fs` and `node:http` 🟢 "Fully implemented", and `node:worker_threads`, `node:crypto`, `node:v8` and `node:inspector` 🟡 partial, with the gaps listed. Deno "provides Node's built-in APIs through a compatibility layer" that you import with the `node:` prefix. Both runtimes report a Node version in `process.version` (`v26.3.0`, `v26.5.1`), not their own version.
 4. **npm packages come from the npm registry either way.** Bun reads `package.json`, installs into `node_modules` and writes `bun.lock`. Deno resolves `npm:express@5.3.0` specifiers (directly in an import, or through an `imports` map in `deno.json`) into its own cache (`DENO_DIR`), or from `package.json` dependencies (the Deno docs list npm packages as "Supported, via npm: specifiers or package.json").
 5. **TypeScript is handled at load time.** Node v24.19.0 strips type annotations and rejects syntax that needs code generation, such as `enum` (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`; [lesson 95](95-typescript-with-node.md)). Bun and Deno transpile TypeScript fully. None of the three type-checks when it *runs* a file: a type error still runs. Type checking is a separate command (`tsc`, `bun check`, `deno check`), although `deno test` type-checks local modules before running them (Example 7).
@@ -80,7 +87,7 @@ The rows come from each binary's `--help`, `process.versions` and the projects' 
 | Situation | Suggestion | Why |
 |---|---|---|
 | Large production Express/Nest app, native addons, APM agents, V8 heap tooling | Stay on Node | Every agent, profiler and addon targets Node first; a gap shows up in production, not in a quick test (Example 5). |
-| You need a supported LTS line and long patch windows | Stay on Node | Node 24 is Active LTS until 2026-10-20 and Node 26 becomes LTS on 2026-10-28; check each runtime's own support policy before you commit. |
+| You need a supported LTS line and long patch windows | Stay on Node | Check each runtime's own support policy before you commit. The Node dates from this lesson are in Good to know. |
 | Scripts, CLIs, internal tools written in TypeScript | Bun or Deno are worth trying | Both run `.ts` with enums and other transforms with no build step; Deno adds fmt/lint/check in the same binary. |
 | Running code you do not fully trust (plugins, generated code, CI helpers) | Deno, or Node with `--permission` | Deno denies by default and names the missing grant; Node's model must be switched on. Neither is a full sandbox for hostile code. |
 | Slow installs or test runs in CI | Try `bun install` / `bun test` while keeping Node for production | The tools can be adopted one at a time; `bun build --target=node` output ran on Node in Example 8. |
@@ -785,16 +792,16 @@ What it shows: the same runtime varied between rounds by a factor of about 2.4 (
 ## ⭐ Interview lens
 
 > **Q: “What are the main architectural differences between Node, Bun and Deno?”**  
-> A: Engine and runtime layer. Node embeds V8 and does I/O through libuv, with its core written in C++ and JavaScript. Deno embeds V8 too, but its runtime is Rust on Tokio, with permissions on by default and fmt/lint/test/check built in. Bun embeds JavaScriptCore (Safari's engine) and was written in Zig until its Rust rewrite was merged in May 2026; it bundles a package manager, test runner and bundler. Both Bun and Deno provide Node's APIs through their own implementations and report a Node version (v26.x) in `process.version`. *Trap:* reading `process.versions.v8` under Bun: it prints a V8 version although the engine is JavaScriptCore.
+> A: All three embed a JavaScript engine and then add files, sockets, and a module loader. Node embeds V8, the engine from Chrome, and does I/O through libuv. Its runtime layer is C++ and JavaScript. Deno also embeds V8. Its README says it is built on V8, Rust, and Tokio, which is Rust's async I/O library. Permissions are on by default, and fmt, lint, test, and check are in the binary. Bun embeds JavaScriptCore, the engine from Safari. It was written in Zig until the pull request "Rewrite Bun in Rust" was merged on 2026-05-14. The last release before that was 1.3.14 on 2026-05-13. 1.4.0 on 2026-08-20 was the first release after it. Bun 1.4.3 still lists a `zig` entry in `process.versions`. Both Bun and Deno implement Node's APIs themselves, and both report a Node version in `process.version`: Bun said v26.3.0, Deno said v26.5.1. The trap is `process.versions.v8` under Bun. It printed `14.6.202.34-node.20` even though the engine is JavaScriptCore. Detect the runtime with `globalThis.Bun` or `globalThis.Deno`.
 
 > **Q: “Can I run my Express app on Bun or Deno?”**  
-> A: Often, yes: in this lesson the same Express 5.3.0 app returned identical responses on all three. But check three things: the runtime's compatibility page for the Node modules you use (Bun ignores `Worker` `resourceLimits` silently), native addons and Node-specific tooling such as APM agents, and in Deno, permissions: Express's `debug` dependency needed `--allow-env` just to load. Run the full test suite on the target runtime, not just a smoke test.
+> A: Often the server starts, and that is not the whole answer. In this lesson one Express 5.3.0 app, with `express.json()`, `node:fs/promises`, `node:crypto`, and an async route that throws, returned the same four responses on Node v24.19.0, Bun 1.4.3, and Deno 2.9.7, including the 500 and the same SHA-256. Three things still break. A gap in a Node module: Bun's status page marks `worker_threads`, `crypto`, `v8`, and `inspector` partial, and Example 5 hit a missing `crypto.encapsulate`, an `http.Server` that is not a `net.Server`, and a Worker `resourceLimits` that was ignored, so the limit came back `undefined` and nothing threw. Native addons, `.node` files, were not tested here. Deno's docs say `--allow-ffi` loads them. And permissions: Deno would not even load Express until `--allow-env`, because a dependency read the environment at import time. Run the test suite on that runtime. A smoke test of four routes is how this lesson started, not how it decided.
 
 > **Q: “How does Deno's permission model compare with Node's?”**  
-> A: Deno denies file, network, environment, subprocess and FFI access by default; you grant it with `--allow-read=…`, `--allow-net=host:port`, `--allow-env=VAR` and so on, and `--deny-*` carves out exceptions. A refused operation throws `NotCapable`, naming the flag. Node's model is opt-in with `--permission` plus `--allow-fs-read/-write`, `--allow-child-process`, `--allow-worker`; it throws `ERR_ACCESS_DENIED`, and it does not cover environment variables. Bun has none. Neither is a sandbox for hostile code.
+> A: Deno starts with no access. The security docs say you must grant files, network, environment, and the rest with flags, or answer a prompt. `--allow-read`, `--allow-net=host:port`, `--allow-env=VAR`, and the matching `--deny-*` flags are the grants. A refused operation throws `NotCapable` and names the flag. `--allow-run` and `--allow-ffi` step outside that model, because they run other programs or load native code. Node is the other way around. The process can read any file and any environment variable the OS user can, unless you pass `--permission` and then `--allow-fs-read`, `--allow-fs-write`, `--allow-child-process`, and `--allow-worker`. A refusal throws `ERR_ACCESS_DENIED`. Node's model does not cover environment variables. Bun has no permission flags. Neither model is a sandbox you would trust with hostile code. The practical limit on Deno is granting too narrowly. `listen(port)` binds `[::]`, not only `0.0.0.0`, and a dependency may enumerate all of `process.env` at import, so a per-variable grant fails before your route runs.
 
 > **Q: “Bun is faster, so should we switch?”**  
-> A: Measure first, on your app and on quiet hardware. In this lesson's run on a shared laptop, the medians for a hello-world Express route were within about 1% of each other and individual rounds varied by up to 240×, so no ranking was possible. Even a real speed-up has to be weighed against compatibility gaps, tooling (APM, profilers), team familiarity and support windows. Adopting `bun install` or `bun test` alone is a lower-risk first step.
+> A: Measure your own app first, on a quiet machine, with the load generator somewhere else, and run several rounds. Example 11 was a hello-world Express route on a shared laptop. The medians were 14,862 requests per second for Node, 15,015 for Bun, and 14,849 for Deno, within about 1 percent. Individual rounds were not. Deno ranged from 7,476 to 17,662, about 2.4 times. Bun ranged from 999 to 30,241, about 30 times. Node ranged from 82 to 20,053, about 240 times, and its last round collapsed while the load average rose to 19.66. Deno was fastest in rounds 1 and 5, Bun in rounds 2 to 4, and each runtime was slowest at least once. That run cannot rank them. Even a real speed-up has to be weighed against APM agents, V8 profilers, native addons, and who on the team knows the runtime. A lower-risk first step is the tool, not the production process: `bun install` or `bun test`, while the service still runs on Node. `bun build --target=node` output ran on Node in Example 8.
 
 ## Cheat-card
 
@@ -808,7 +815,14 @@ What it shows: the same runtime varied between rounds by a factor of about 2.4 (
 - **TS:** `node` strips (no `enum`); `bun`/`deno run` transform; none type-checks on run; `bun check`, `deno check`, `tsc`.
 - **Tools:** Bun = install/add/test/build/check; Deno = install/add/test/fmt/lint/check/bundle/compile.
 - **Known Bun gaps hit here:** `http.Server` not `net.Server`, no `crypto.encapsulate`, `Worker` `resourceLimits` ignored.
-- **Benchmarks:** only your own, with method, machine and load stated.
+- **Benchmarks:** only your own, with the method, the machine, and the load stated.
+
+## Good to know
+
+- Node 24 is Active LTS until 2026-10-20, and Node 26 becomes LTS on 2026-10-28. Check each runtime's own policy before you commit.
+- At 12 Oct 2026 the latest GitHub releases were Bun 1.4.3, published 2026-10-10, and Deno 2.9.7, published 2026-09-17. Bun's reported `process.version` was v26.3.0 and its `v8` string was `14.6.202.34-node.20`. Deno's was v26.5.1, real V8 `15.0.245.2-rusty`, TypeScript 6.0.3. Bun listed TypeScript 7.0.2 and `uv` 1.48.0. Deno and Node listed `uv` 1.52.1.
+- Bun's Rust rewrite, PR 30412, merged 2026-05-14. Last Zig-era release v1.3.14 was 2026-05-13. First release after the rewrite was v1.4.0 on 2026-08-20. Bun 1.4.3 still has a `zig` field in `process.versions`.
+- Example 11 load average at the end was 19.66, 10.85, 7.96. autocannon printed `TimeoutNegativeWarning: -78 is a negative number` and set the duration to 1.
 
 ---
 

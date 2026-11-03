@@ -13,43 +13,47 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`node:readline` watches a stream of text for a line ending and hands you each finished line as a string, even when a chunk cuts a line or a character in half. It exists so you can scan a huge log, or ask a question at the terminal, without loading the whole input into memory. The trade-off is that it starts reading the moment you create it, so a late listener loses lines, and a hand-written splitter can be faster when you only need lines inside a pipeline.
+
 ## Why it matters
 
-Two jobs come up again and again, and `node:readline` is Node's built-in answer to both. The first is reading a text stream one line at a time — a log file too big to hold in memory, `stdin` from a Unix pipe, a child process's output — where you want each line as a string and you do not want to load the whole thing with `fs.readFileSync`. The second is asking a person a question at the terminal: a scaffolding CLI that prompts for a project name, a `y/n` confirmation before a destructive command, a REPL-like loop.
+Two jobs keep coming back. One is reading text one line at a time: a log too big for memory, standard input from a pipe, or a child process's output. You want each line as a string, and you do not want `fs.readFileSync` to load the whole file. The other is asking a person something at the terminal: a project name, a yes or no before a destructive command, or a small read-eval-print loop.
 
-Without it you end up re-implementing a line splitter by hand, and line splitting has more edge cases than it looks: a chunk can cut a line in half, a chunk can cut a multi-byte UTF-8 character in half, the last line often has no trailing newline, and Windows files end lines with `\r\n` instead of `\n`. `readline` handles all of those. This lesson shows the line-reading side, the promise-based prompt side (with a timeout), the history that terminal mode keeps, and where a hand-written stream splitter is still the better tool.
+Splitting lines yourself is full of edges. A chunk can cut a line in half. A chunk can cut a multi-byte character in half. UTF-8 is the text encoding that uses one to four bytes per character. The last line often has no trailing newline. Windows files end a line with a carriage return and a line feed, written `\r\n`, instead of only a line feed, `\n`. readline handles those cases. This lesson covers line reading, promise-based prompts with a timeout, terminal history, and when a hand-written splitter is still the better tool.
 
 ## The concept, simply
 
-`readline.createInterface(options)` builds an **Interface** object that sits on top of a Readable `input` stream (and optionally a Writable `output`). It watches the input for end-of-line markers (`\n`, `\r`, or `\r\n`) and turns the bytes between them into complete-line strings. Each finished line is delivered two ways: as a `'line'` event, and through an async iterator so you can write `for await (const line of rl)`.
+`readline.createInterface(options)` builds an Interface. It sits on a Readable input, a source you read from, and optionally a Writable output, a sink you write to. It watches for end-of-line markers, `\n`, `\r`, or `\r\n`, and turns the bytes between them into complete line strings. Each finished line arrives as a `'line'` event, and also through an async iterator, so you can write `for await (const line of rl)`.
 
-The real parts are:
+The options you actually set:
 
-- **`input`** — the Readable to read from (a file stream, `process.stdin`, a socket). Required.
-- **`output`** — the Writable to echo to, used for prompts and for terminal editing. Optional.
-- **`crlfDelay`** — how long to wait after a lone `\r` for a following `\n` before treating the `\r` as its own line ending. Set it to `Infinity` so every `\r\n` is always one break (the right choice for files). **Default:** `100` (coerced to at least `100`).
-- **`terminal`** — whether to treat the streams as a TTY, with ANSI editing and history. **Default:** whether `output.isTTY` is true.
-- **`history`**, **`historySize`**, **`removeHistoryDuplicates`** — the command history, which only exists in terminal mode.
+- **input** is the Readable: a file stream, `process.stdin`, or a socket. Required.
+- **output** is the Writable used for prompts and for echoing what the person types. Optional.
+- **crlfDelay** is how long to wait after a lone carriage return for a following line feed before treating that carriage return as its own line ending. Set it to `Infinity` so every `\r\n` is one break. That is the right choice for files. The default is 100 milliseconds, and Node raises anything smaller up to 100.
+- **terminal** says whether to treat the streams as a TTY, a real terminal, with editing keys and history. The default follows `output.isTTY`.
+- **history**, **historySize**, and **removeHistoryDuplicates** are the command history. They only work in terminal mode.
 
-There are two module entry points. `node:readline` is the callback/event API (`rl.question(query, cb)`). `node:readline/promises` is the promise API (`await rl.question(query)`), which was marked stable in v24.0.0. The line-reading side (`createInterface` + `for await`) is the same on both.
+`node:readline` is the callback and event API: `rl.question(query, callback)`. `node:readline/promises` is the promise API: `await rl.question(query)`. Line reading with `createInterface` and `for await` is the same on both.
 
-Line reading with `for await` is one producer feeding one consumer, so there is a flow rule worth stating up front: **the interface starts consuming the input as soon as you create it.** If you create the interface and then `await` something else before attaching your `'line'` listener or starting the `for await`, lines that arrive in the meantime are gone. Attach the consumer in the same synchronous turn as `createInterface`.
+The interface starts consuming input as soon as you create it. If you then `await` something else before you attach `'line'` or start `for await`, lines that arrive in between are gone. Attach the consumer in the same synchronous turn as `createInterface`.
 
 ## How it works
 
-1. **You create the interface** with an `input` stream. `createInterface` immediately resumes the input and starts reading.
-2. **Bytes arrive in chunks.** readline decodes them to text (holding back a partial multi-byte character), appends to its internal buffer, and scans for end-of-line markers.
-3. **Each complete line is emitted** as a `'line'` event and offered to the async iterator. The newline itself is stripped; a trailing `\r` before `\n` is stripped too.
-4. **The input ends.** If the last bytes had no trailing newline, readline emits them as one final line anyway, then emits `'close'`.
-5. **In terminal mode only**, keystrokes are interpreted (arrows, backspace), the line is echoed to `output`, and completed lines are pushed onto the history ring, which fires a `'history'` event.
+1. You create the interface with an input stream. `createInterface` resumes the input and starts reading immediately.
+2. Bytes arrive in chunks. readline decodes them to text, holds back a partial multi-byte character, appends to an internal buffer, and scans for line endings.
+3. Each complete line is emitted as `'line'` and offered to the async iterator. The newline is stripped. A `\r` that sat just before `\n` is stripped too.
+4. When the input ends, a final line with no trailing newline is still emitted, then `'close'` fires.
+5. In terminal mode only, keystrokes are interpreted, the line is echoed to output, and completed lines go onto the history ring, which fires `'history'`.
 
-**Line endings, concretely.** With the default `crlfDelay` of 100 ms, a `\r` and a `\n` that arrive in the same chunk are one break, but a `\r` and `\n` split across chunks more than 100 ms apart become two breaks (an empty line appears between them). A lone `\r` with no following `\n` — the old classic-Mac line ending — is always its own break. Setting `crlfDelay: Infinity` means "a `\r` is never its own line ending if a `\n` could still follow", which is what you want for reading `\r\n` files reliably.
+With the default `crlfDelay` of 100 ms, a `\r` and a `\n` in the same chunk are one break. Split across chunks more than 100 ms apart, they become two breaks, and an empty line appears between them. A lone `\r`, the old classic-Mac ending, is always its own break. `crlfDelay: Infinity` means a `\r` is never its own ending if a `\n` could still follow. That is what you want for `\r\n` files.
 
-**History lives only in terminal mode.** The `history`, `historySize` and `removeHistoryDuplicates` options do nothing unless `terminal` is true (checked from `output.isTTY`, or forced with `terminal: true`). When a pipe feeds `stdin`, `isTTY` is undefined, so history is off and arrow-key bytes like `\x1b[A` are delivered as plain text instead of recalling a previous line.
+History does nothing unless `terminal` is true, either because `output.isTTY` is true or because you passed `terminal: true`. When a pipe feeds stdin, `isTTY` is undefined, history is off, and arrow-key bytes such as `\x1b[A` arrive as plain text.
 
 ## Code examples
 
-**Example 1 — reading a file line by line with `for await`.**
+**Example 1: reading a file line by line with `for await`.**
 
 javascript
 
@@ -82,9 +86,9 @@ await rm('access.log');
 //   lines: 4
 ```
 
-The empty middle line comes back as `""`, and the last line (`GET /c 404`) is delivered even though the file does not end in a newline. Memory stays flat because `createReadStream` feeds the interface in chunks; the whole file is never held at once.
+The empty middle line comes back as an empty string, and the last line is delivered even though the file does not end in a newline. Memory stays flat because `createReadStream` feeds the interface in chunks.
 
-**Example 2 — edge case: CRLF, split line endings, lone `\r`, and a multi-byte character cut in half.**
+**Example 2: edge case: CRLF, split line endings, lone `\r`, and a multi-byte character cut in half.**
 
 javascript
 
@@ -121,9 +125,9 @@ console.log('UTF-8 char split across chunks        :', await lines([Buffer.from(
 //   UTF-8 char split across chunks        : ["zoë"]
 ```
 
-The second line is the gotcha: a `\r` and `\n` that arrive more than `crlfDelay` apart produce an extra empty line (`["a","","b"]`). `crlfDelay: Infinity` fixes it. A lone `\r` is always its own break. A trailing `\n` does not create a phantom empty final line, but a *second* trailing `\n` does — because the text between the two newlines really is an empty line. The `ë` (two UTF-8 bytes) is cut across the two chunks, and readline still reassembles it: it decodes with an internal `StringDecoder`, so a split multi-byte character is held back until its second byte arrives.
+A `\r` and `\n` more than `crlfDelay` apart become an empty line in the middle. `Infinity` joins them. A lone `\r` is always a break, a second trailing `\n` is a real empty line, and a split `ë` is reassembled by the internal `StringDecoder`.
 
-**Example 3 — a prompt with `readline/promises` and a per-question timeout.**
+**Example 3: a prompt with `readline/promises` and a per-question timeout.**
 
 javascript
 
@@ -147,7 +151,7 @@ try {
 rl.close();
 ```
 
-`rl.question` returns a promise, so each prompt is a plain `await`. Passing `{ signal }` lets you cancel a question; with `AbortSignal.timeout(2000)` it rejects after two seconds. The rejection is Node's `AbortError` (`code 'ABORT_ERR'`) with a `TimeoutError` in `err.cause` — the same shape lesson 22 documents for every signal-aware core API.
+`rl.question` returns a promise, so each prompt is a plain `await`. `{ signal: AbortSignal.timeout(2000) }` cancels the question after two seconds. The rejection is an `AbortError` with code `ABORT_ERR`, and `err.cause` is a `TimeoutError`, the same shape lesson 22 documents for signal-aware core APIs.
 
 This is interactive, so it is driven here with `script -qec` to give it a real TTY. First a full run where all three answers come in time, with the terminal escape codes stripped for readability:
 
@@ -178,11 +182,11 @@ Create it (y/n)?
 -> no answer: AbortError (ABORT_ERR), cause: TimeoutError
 ```
 
-The empty `Port [3000]?` answer falls back to `3000`; the timeout answer rejects as an `AbortError`.
+The empty port answer falls back to 3000. The timed-out answer rejects as an `AbortError`.
 
-**Example 4 — a pipe-safe prompt loop that does not lose lines.**
+**Example 4: a pipe-safe prompt loop that does not lose lines.**
 
-The prompt above assumes a human. If you drive a script non-interactively by piping all the answers at once (`printf 'a\nb\nc\n' | node ...`), the input can arrive and end faster than the prompts are issued. Pulling one line at a time from the async iterator keeps every line queued, so it works for both a TTY and a pipe:
+The prompt above assumes a person. If you pipe every answer at once, the input can arrive and end before the next prompt is issued. Pulling one line at a time from the async iterator queues every line, so the same code works for a TTY and for a pipe:
 
 javascript
 
@@ -228,9 +232,9 @@ Project name? Port [3000]? Create it (y/n)?
 -> input ended before an answer to "Create it (y/n)?"
 ```
 
-The prompts run back to back because the piped input is already waiting; every line is still matched to the right question, and a short input ends with a clear error instead of hanging.
+The prompts run back to back because the piped input is already waiting. Each line still matches the right question, and a short input ends with a clear error instead of hanging.
 
-**Example 5 — history: the `'history'` event, `historySize`, and keeping a secret out of history.**
+**Example 5: history: the `'history'` event, `historySize`, and keeping a secret out of history.**
 
 javascript
 
@@ -281,9 +285,9 @@ rl.close();
 //   line: "whoami"
 ```
 
-History is newest-first and capped at `historySize` (3 here, so `pwd` drops off). `removeHistoryDuplicates` moves a repeated `git status` back to the front instead of keeping two copies. The `'history'` event (added in v15.8.0, v14.18.0) hands you the live array; mutating it changes what is stored, which is how you keep a secret out of history — here `shift()` drops `secret-token` before it is kept, so the next entry (`whoami`) pushes a clean list. The up-arrow (`\x1b[A`) recalls a previous line, which is why `git status` is submitted twice.
+History is newest-first and capped at `historySize`, so `pwd` drops off at 3. Duplicates move to the front. The `'history'` listener gets the live array, and `shift()` drops `secret-token` before it is kept. The up-arrow bytes recall a previous line.
 
-**Example 6 — edge case: attaching the `'line'` listener one tick too late.**
+**Example 6: edge case: attaching the `'line'` listener one tick too late.**
 
 javascript
 
@@ -321,11 +325,11 @@ await rm('nums.txt');
 //   C  'line' attached right away      : 1000 of 1000 lines
 ```
 
-In case A, awaiting a real I/O operation (`readFile`) before attaching the `'line'` listener lets the file stream flow and the lines are emitted to nobody — the handler sees **0 of 1000**. In case C the listener is attached in the same tick, so it catches all 1000. (A `for await (const line of rl)` started after the same await hangs forever instead, because the iterator is still waiting for lines that already went by.) Not every await loses data: awaiting a microtask or `setImmediate` is early enough; it is a real timer or I/O wait that lets the stream drain first. The safe rule is to attach the consumer immediately.
+Awaiting real I/O before `'line'` yields 0 of 1000 lines. Attaching in the same turn yields all 1000. A `for await` started after that await hangs. A microtask or `setImmediate` is early enough. A timer or I/O wait is not.
 
-**Example 7 — readline vs a hand-written stream splitter.**
+**Example 7: readline vs a hand-written stream splitter.**
 
-readline is not the only way to split a byte stream into lines, and it is not always the best. Lesson 37's corrected `createCsvParser()` shows the hand-written pattern: a `StringDecoder` to hold back a split multi-byte character, a carried `tail` string for the incomplete last line, and a `flush` that emits whatever is left when the input ends. That is exactly what readline does internally — so a Transform built the same way gives the same lines:
+A Transform can split lines the same way readline does internally: a `StringDecoder`, a carried tail, and a `flush`, which is the shape of lesson 37's CSV parser.
 
 javascript
 
@@ -372,9 +376,57 @@ for (const s of ['a\nb', 'a\r\nb\r\n', 'a\n\n', 'a\rb', '']) {
 //   ""            readline=[]             splitter=[]
 ```
 
-They agree everywhere except the lone `\r`: readline treats a bare `\r` as a line break, the splitter above only breaks on `\n`. That is the one behavioural difference to know. Choose readline when you want a drop-in line reader with TTY editing and history for free. Choose a hand-written Transform when you need to plug line splitting into a `pipeline` next to other transforms (as lesson 37 does with CSV), when you want a different delimiter, or when you measured readline as the bottleneck.
+They agree everywhere except a lone `\r`. readline treats a bare `\r` as a line break. The splitter above only breaks on `\n`. Use readline when you want a line reader with TTY editing and history. Use the Transform when line splitting has to sit inside a `pipeline` next to other transforms, when the delimiter is not a newline, or when you measured readline as the bottleneck.
 
-**And it can be the bottleneck.** On this machine (Node v24.19.0, 8-core i5-1135G7), splitting a 102 MiB, 2-million-line log file into lines and summing their lengths, best of several runs:
+## Common mistakes & gotchas
+
+- **Forgetting `crlfDelay: Infinity` for files.** A `\r` and `\n` that land in separate chunks become two breaks and insert empty lines. Pass `Infinity` for any file that might use Windows line endings.
+- **Attaching `'line'` late.** The interface starts reading when you create it. An `await` of real I/O before `'line'` or `for await` drops the lines that arrive in between (Example 6). Attach the consumer in the same synchronous turn.
+- **Expecting history from a pipe.** History needs `terminal: true`. When stdin is a pipe, `isTTY` is undefined, so history is off and arrow-key bytes arrive as text.
+- **Not handling the input stream's `'error'`.** `createInterface` does not swallow errors on `input`. A missing file surfaces as a rejection from `for await`, so wrap it in `try/catch`, or as a readline `'error'` event in the callback style.
+- **Confusing `readline` and `readline/promises`.** `rl.question(q, cb)` is the callback module. `await rl.question(q)` is the promises module. The wrong import gives you the wrong `question` shape.
+- **Dropping a last line that has no newline.** readline emits that final line (Example 1). A splitter that only emits when it sees `\n` will silently drop it.
+
+## Best practices
+
+- **Use `for await (const line of rl)` for files and pipes.** It is the clearest form and it slows the source when you are slow. The docs note it is a little slower than the `'line'` event. Use the event when a measurement says line throughput is the bottleneck.
+- **Pass `crlfDelay: Infinity` when the source may be a file.**
+- **Prefer `readline/promises` for prompts**, and pass `{ signal }` for deadlines, matching the AbortSignal pattern from lesson 22.
+- **Pull from the async iterator for scripted prompts**, as in Example 4, so a person and a pipe both work.
+- **Scrub secrets in the `'history'` listener**, or set `historySize: 0`, so a password is not recalled with the up arrow.
+- **Call `rl.close()`** when you are done prompting, or the process stays alive waiting on stdin.
+
+## ⭐ Interview lens
+
+> **Q: “How would you process a 10 GB log file line by line in Node?”**  
+A: I would not load the file with `fs.readFile` or `readFileSync`. Those build one Buffer for the whole file, and 10 GB will exhaust the heap. `readline.createInterface` takes a Readable input, here `fs.createReadStream(path)`, and turns the bytes into complete lines. I pass `crlfDelay: Infinity` so a Windows carriage return plus line feed is always one break, even when those two bytes land in different chunks. Then `for await (const line of rl)` pulls one line, runs the handler, and pulls the next, so the file stream pauses when the handler is slow. Memory stays about the size of the stream buffer plus the current line. The limit is timing: the interface starts reading the moment you create it, so the loop has to start in that same turn, or the early lines are already gone.
+
+> **Q: “Your `rl.on('line', …)` handler never fires. What is wrong?”**  
+A: The interface starts consuming the input as soon as `createInterface` returns. If the `'line'` listener is attached after an `await` of real file or network work, the stream can finish in that gap and emit every line to nobody. Attach `'line'`, or start `for await`, in the same synchronous turn as `createInterface`. A microtask or `setImmediate` is still early enough. A timer or an I/O wait is not. Also check that the input actually has data, and that you imported the module whose `question` shape you meant to call. The limit is that a `for await` started after the lines have already passed does not catch up. It hangs, waiting for lines that will not come.
+
+> **Q: “What does `crlfDelay` do, and why `Infinity`?”**  
+A: `crlfDelay` is the wait, in milliseconds, after a lone carriage return before readline decides that `\r` is a line ending by itself. The default is 100. A `\r` and a `\n` in the same chunk are one break. If they arrive in different chunks more than 100 ms apart, you get two breaks and a phantom empty line. `Infinity` means a `\r` is never a break on its own while a `\n` might still follow, so every `\r\n` is one line. That is the setting for files. The limit is a lone `\r` with no `\n` after it, the old Mac ending. That is always its own break, even with `Infinity`.
+
+> **Q: “readline vs writing your own line splitter — when each?”**  
+A: readline is the built-in line reader. `createInterface` splits a Readable on line endings, and in terminal mode it also gives you editing keys and a history ring. A hand-written Transform does the same split with a `StringDecoder`, a carried tail, and a `flush`, which is the shape of lesson 37's CSV parser. Use readline when you want lines quickly, especially for a person at a terminal. Use the Transform when the splitter has to sit inside a `pipeline` beside other stages, when the delimiter is not a newline, or when you measured readline as the slow part. The limit is a bare carriage return: readline breaks on it, and the simple `\n` splitter does not.
+
+## Cheat-card
+
+- **Line reading:** `createInterface({ input: fs.createReadStream(p), crlfDelay: Infinity })`, then `for await (const line of rl)`.
+- **crlfDelay:** default 100. Use `Infinity` for files so `\r\n` is one break. A lone `\r` is always its own break.
+- **Last line:** emitted even with no trailing newline. A second trailing `\n` is a real empty line.
+- **Prompts:** `node:readline/promises`, `await rl.question('q? ')`, plus `{ signal: AbortSignal.timeout(ms) }`. That rejects with `AbortError` and cause `TimeoutError`.
+- **Pipe-safe prompts:** pull one `.next()` at a time from `rl[Symbol.asyncIterator]()`.
+- **History, terminal mode only:** `history` is newest first, `historySize` defaults to 30, `removeHistoryDuplicates` collapses repeats. The `'history'` event hands you the live array. Mutate it to drop secrets.
+- **Gotcha:** attach `'line'` or start `for await` in the same turn as `createInterface`.
+- **Close:** `rl.close()`, or the process hangs on stdin.
+- **vs splitter:** a Transform with `StringDecoder`, a carried tail, and `flush` composes in a `pipeline`. readline breaks on a lone `\r`. The simple splitter does not.
+
+## Good to know
+
+- `node:readline/promises` was marked stable in v24.0.0.
+- The `'history'` event was added in v15.8.0 and v14.18.0. The readline `'error'` event was added in v16.0.0.
+- On Node v24.19.0, an 8-core i5-1135G7, splitting a 102 MiB, 2-million-line log and summing lengths, best of several runs:
 
 text
 
@@ -386,57 +438,9 @@ Transform splitter  ~0.34 s      65 MiB
 readFile + split    ~0.44 s     344 MiB
 ```
 
-The hand-written Transform was the fastest and leanest; `for await` over readline was the slowest, matching the docs' own note that iteration lags the `'line'` event. Reading the whole file and `split('\n')` was competitive on speed but held the entire file plus the array of lines in memory (344 MiB vs tens of MiB), which is the memory blow-up streams exist to avoid. Numbers will differ on other hardware; measure your own before optimizing.
+Numbers differ by machine. Measure before you optimize. The Transform was fastest and leanest. `for await` was slowest. `readFile` plus `split` was close on time and held the whole file, 344 MiB against tens of MiB.
 
-## Common mistakes & gotchas
-
-- **Forgetting `crlfDelay: Infinity` for files.** Without it, a `\r` and `\n` that land in separate chunks (which happens on large files) become two line breaks, inserting phantom empty lines. For any file that might be CRLF, pass `Infinity`.
-- **Attaching `'line'` late.** The interface starts reading when you create it. An `await` of real I/O before you attach `'line'` or start `for await` drops the lines that arrive in between (Example 6). Attach the consumer in the same synchronous turn.
-- **Expecting history from a pipe.** History needs `terminal: true`. When `stdin` is a pipe, `isTTY` is undefined, so history is off and `\x1b[A` arrives as literal text instead of recalling a line.
-- **Not handling the input stream's `'error'`.** `createInterface` does not swallow errors on `input`. A missing file makes the readable emit `'error'`, which surfaces as a rejection from `for await` (so wrap it in `try/catch`) or as a `readline` `'error'` event (added in v16.0.0) in the callback style.
-- **Confusing `readline` and `readline/promises`.** `rl.question(q, cb)` is the callback module; `await rl.question(q)` is the promises module. Importing the wrong one gives you the wrong `question` shape.
-- **Assuming the last line needs a trailing newline.** readline emits a final line with no trailing newline (Example 1). A hand-written `split('\n')` on a buffered read also does this, but a naive chunk-by-chunk splitter that only emits on `\n` will silently drop it.
-
-## Best practices
-
-- **Use `for await (const line of rl)` for file and pipe reading.** It is the clearest form and backpressures naturally. The docs note it is a little slower than the `'line'` event; reach for the event only when a measurement says line throughput is the bottleneck.
-- **Always pass `crlfDelay: Infinity` when the source may be a file.** It is the difference between correct and subtly-wrong on Windows-authored input.
-- **Prefer `readline/promises` for prompts**, and pass `{ signal }` for deadlines and cancellation, matching the AbortSignal pattern from lesson 22.
-- **Pull from the async iterator for scripted prompts**, as in Example 4, so the same code works whether a human types or a pipe supplies the answers.
-- **Scrub secrets in the `'history'` event listener** (or set `historySize: 0`) so passwords are not recalled with the up arrow.
-- **Call `rl.close()`** when you are done prompting, or the process stays alive waiting on `stdin`.
-
-## ⭐ Interview lens
-
-> **Q: “How would you process a 10 GB log file line by line in Node?”**  
-> A: `createInterface({ input: fs.createReadStream(path), crlfDelay: Infinity })` and `for await (const line of rl)`. The file streams in chunks, so memory stays flat; `crlfDelay: Infinity` handles CRLF correctly. *Trap:* `fs.readFileSync` then `split('\n')` loads the whole file into memory — fine for a config, fatal for 10 GB.
-
-> **Q: “Your `rl.on('line', …)` handler never fires. What is wrong?”**  
-> A: Most likely the listener was attached after an `await` of real I/O, so the stream already flowed and the lines were emitted before anyone was listening. Attach `'line'` (or start the `for await`) in the same synchronous turn as `createInterface`. Also check the input actually has data and that you are not confusing the callback and promises modules.
-
-> **Q: “What does `crlfDelay` do, and why `Infinity`?”**  
-> A: It is the window after a lone `\r` to wait for a following `\n`. With the default 100 ms, a `\r` and `\n` split across chunks more than 100 ms apart become two line breaks (a phantom empty line). `Infinity` means a `\r` is never a break on its own when a `\n` could still follow, so every `\r\n` is one line — the correct setting for files.
-
-> **Q: “How do you put a timeout on a terminal prompt?”**  
-> A: Use `node:readline/promises` and pass `{ signal: AbortSignal.timeout(ms) }` to `rl.question`. It rejects with an `AbortError` whose `cause` is a `TimeoutError`. Catch it and fall back to a default or abort the command.
-
-> **Q: “readline vs writing your own line splitter — when each?”**  
-> A: readline for a quick line reader, especially interactive ones (it gives TTY editing and history for free). A hand-written Transform (StringDecoder + carried tail + flush, like lesson 37's CSV parser) when you need it inside a `pipeline`, a non-newline delimiter, or maximum throughput — it was the fastest and leanest in the benchmark above.
-
-## Cheat-card
-
-- **Line reading:** `const rl = readline.createInterface({ input: fs.createReadStream(p), crlfDelay: Infinity }); for await (const line of rl) {…}`.
-- **crlfDelay:** default `100`; use `Infinity` for files so `\r\n` is always one break. A lone `\r` is always its own break.
-- **Last line:** emitted even with no trailing newline. A second trailing `\n` yields a real empty final line.
-- **Prompts:** `node:readline/promises`, `const a = await rl.question('q? ')`; add `{ signal: AbortSignal.timeout(ms) }` for a deadline (rejects `AbortError`, cause `TimeoutError`). Stable since v24.0.0.
-- **Pipe-safe prompts:** pull from `rl[Symbol.asyncIterator]()` one `.next()` at a time.
-- **History (terminal mode only):** `history` (newest first), `historySize` (default 30), `removeHistoryDuplicates`; `'history'` event (v15.8.0) gives the live array — mutate it to scrub secrets.
-- **Gotcha:** attach `'line'` / start `for await` in the same synchronous turn as `createInterface`, or lines are lost.
-- **Close:** call `rl.close()` or the process hangs on `stdin`.
-- **vs splitter:** a Transform with StringDecoder + carried tail + flush (lesson 37 CSV) is faster/leaner and composes in a `pipeline`; readline breaks on a lone `\r`, the simple splitter does not.
-
----
-
+- How do you put a timeout on a terminal prompt? Use `node:readline/promises` and pass `{ signal: AbortSignal.timeout(ms) }` to `rl.question`. It rejects with an `AbortError` whose `cause` is a `TimeoutError`.
 ## Learn More
 
 - [Readline nodejs.org v24 docs](https://nodejs.org/docs/latest-v24.x/api/readline.html)

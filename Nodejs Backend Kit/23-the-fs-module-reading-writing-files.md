@@ -13,35 +13,39 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+The fs module is Node's file-system API, and it comes in three forms that do the same jobs: synchronous methods that block the thread until the disk answers, callback methods that hand the work to a thread pool and call you later, and promise methods you can await. It exists because almost every server reads config, writes logs, or stores uploads. The trade-off is that the synchronous form freezes every other request while it waits, and reading a whole large file at once can use as much memory as the file.
+
 ## Why it matters
 
-Almost every real backend touches the file system. You read a config file at boot, stream an uploaded avatar to disk, write structured logs, generate a PDF invoice, cache a rendered template, or serve a static asset. Node's built-in `fs` module is the single door to all of that, and how you open that door decides whether your server stays responsive under load or freezes for every user at once.
+Almost every backend touches the file system. You read config at boot, stream an upload to disk, write logs, generate a PDF, cache a template, or serve a static file. How you call fs decides whether the server stays responsive or freezes for every user at once.
 
-The `fs` module is also the place where the difference between *blocking* and *non-blocking* code becomes concrete and unforgiving. JavaScript on the server runs your application logic on a single main thread. A file read that blocks that thread does not just slow down the one request that asked for the file — it stops *every* concurrent request, every timer, and every incoming connection until the disk answers. Interviewers probe `fs` precisely because it is where candidates reveal whether they truly understand Node's execution model or have only memorised syntax. Getting this right is foundational; getting it wrong quietly caps your throughput at one slow disk operation at a time.
+JavaScript on the server runs your application logic on one main thread. A file read that blocks that thread does not only slow the request that asked for the file. It stops every other request, every timer, and every new connection until the disk answers. Interviews use fs to see whether you understand that model.
 
 ## The concept, simply
 
-The `fs` module ships in three flavours that do the same jobs with different control flow. **Synchronous** methods (`readFileSync`) run to completion and return the result directly, blocking the thread while they wait. **Callback** methods (`fs.readFile(path, cb)`) hand the work to Node's internal thread pool and call you back later with an error-first callback. **Promise** methods, imported from `node:fs/promises`, do the same non-blocking work but return a promise you can `await`, which reads like synchronous code but never blocks.
+fs ships in three flavours that do the same jobs with different control flow. Synchronous methods such as readFileSync run to completion and return the result directly, blocking the thread while they wait. Callback methods such as fs.readFile hand the work to Node's thread pool and call you later with an error-first callback. Promise methods, imported from node:fs/promises, do the same non-blocking work but return a promise you can await. The source reads like synchronous code and does not block.
 
-The mental model: sync is a phone call where you hold the line until you have your answer; async is texting a request and getting on with your day until a reply buzzes back. On a server serving many people, you always want the second one.
+Sync is a phone call where you hold the line until you have the answer. Async is texting a request and getting on with other work until the reply arrives. On a server with many users, you want the second one.
 
 ![Three columns comparing readFileSync, callback readFile, and fs/promises readFile](assets/i18_01_2357b581.svg)
 
-The same file read expressed three ways. Only the sync form freezes the thread; both async forms keep the event loop free.
+The same read, three ways. Only the sync form freezes the thread. Both async forms leave the event loop free. The event loop is the loop that runs queued callbacks once the current stack is empty.
 
 ## How it works (deep)
 
-When you call an asynchronous `fs` method, Node does not read the file on the main thread. File-system calls are handed to **libuv**, the C library underneath Node, which maintains a small pool of worker threads (four by default, tunable with the `UV_THREADPOOL_SIZE` environment variable). A worker performs the actual blocking `read()` or `write()` syscall while your main thread keeps running other JavaScript. When the worker finishes, libuv queues your callback (or resolves your promise) so the event loop can run it on the next available tick. This is why "non-blocking" is accurate from JavaScript's point of view even though the underlying OS call is blocking — the blocking simply happens on a thread that is not yours.
+An asynchronous fs method does not read the file on the main thread. File-system calls go to libuv, the C library under Node, which keeps a small pool of worker threads. The default size is four, and you can change it with the UV_THREADPOOL_SIZE environment variable. A worker performs the blocking read or write system call while your main thread keeps running other JavaScript. When the worker finishes, libuv queues your callback, or resolves your promise, so the event loop can run it. Non-blocking is accurate from JavaScript's point of view even though the operating-system call blocks. The blocking happens on a thread that is not yours.
 
-Synchronous methods skip all of that. `readFileSync` performs the syscall directly on the main thread and does not return until the kernel hands back the bytes. During that window nothing else in your process advances: no HTTP requests are accepted, no timers fire, no promises resolve. On a laptop reading a 2 KB config this is microseconds and invisible; under a server handling hundreds of requests per second against a slow network drive it is a self-inflicted outage.
+Synchronous methods skip that. readFileSync performs the system call on the main thread and does not return until the kernel hands back the bytes. During that window nothing else in the process advances: no HTTP requests are accepted, no timers fire, no promises resolve. Reading a 2 KB config on a laptop is microseconds and invisible. Under hundreds of requests per second against a slow network drive, it is an outage you caused.
 
 ![Timeline showing readFileSync stalling all requests versus async serving other requests during the disk wait](assets/i18_02_ee4d6eee.svg)
 
-Sync I/O serialises everyone behind the disk. Async lets the single thread serve other requests while the read is in flight.
+Sync I/O lines everyone up behind the disk. Async lets the single thread serve other requests while the read is in flight. I/O means input and output.
 
-The `fs/promises` API is not a thin wrapper you bolt on yourself — it is a first-class, separately maintained surface (`node:fs/promises`) that returns native promises directly from libuv completions. Under the hood it uses the same thread pool as the callback API, so it carries no extra cost; it simply gives you `async/await` ergonomics, real `try/catch` error handling, and clean composition with other async work. For code written today, it is the default you should reach for.
+node:fs/promises is not a wrapper you bolt on. It is a separate surface that returns native promises from libuv completions. It uses the same thread pool as the callback API, so it is not slower. It gives you async/await, real try/catch, and clean composition. For code written today, it is the default.
 
-One more layer worth knowing: reading an entire file with `readFile` buffers the whole thing into memory before you see a single byte. That is perfect for small files but ruinous for large ones — a 2 GB file becomes a 2 GB allocation. For large or unbounded data you switch to **streams** (`fs.createReadStream` / `createWriteStream`), which move data in small chunks with built-in back-pressure so memory stays flat regardless of file size.
+readFile buffers the whole file in memory before you see a byte. That is right for small files and ruinous for large ones. A 2 GB file becomes a 2 GB allocation. For large or unbounded data, use streams, fs.createReadStream and createWriteStream, which move data in small chunks with back-pressure so memory stays flat. Back-pressure means the reader slows down when the consumer is not keeping up.
 
 ## Code examples
 
@@ -137,58 +141,62 @@ try {
 
 ## Common mistakes & gotchas
 
-- **Using `*Sync` methods inside a request handler.** It works in every test with one user and collapses under real concurrency because it blocks the whole event loop. Sync is fine at startup or in CLI scripts; it is a bug in a hot server path.
-- **Forgetting the encoding and being surprised by a `Buffer`.** `await readFile('x.txt')` returns a `Buffer`; `JSON.parse` on it happens to work (it stringifies) but `.trim()` or string comparisons will not behave as expected. Pass `'utf8'` when you want text.
-- **The check-then-act (TOCTOU) race.** Calling `existsSync` or `access` and *then* reading/writing invites a race: the file can vanish or appear between the two calls. Just attempt the operation and handle the error code (`ENOENT`, `EEXIST`). `fs.exists` is deprecated for exactly this reason.
-- **Swallowing the error-first callback's first argument.** In callback style, `(err, data) => { use(data) }` that ignores `err` will read `undefined` data and crash later with a confusing stack. Always check `err` first.
-- **Reading a huge file with `readFile`.** It allocates the entire file in memory at once. A few concurrent large reads can OOM the process. Stream anything that is not comfortably small and bounded.
-- **Assuming `writeFile` is atomic.** A crash mid-write can leave a truncated file. For durability, write to a temp file and `rename` it into place — `rename` is atomic on the same filesystem.
-- **Relative paths depending on the current working directory.** `readFile('data.json')` resolves against `process.cwd()`, not the file's own folder, so it breaks when the process is launched from elsewhere. Anchor paths to `import.meta.dirname` (or `__dirname`).
+- Sync methods inside a request handler work in a one-user test and collapse under real concurrency, because they block the event loop. Sync is fine at startup or in a CLI script.
+- await readFile('x.txt') with no encoding returns a Buffer. JSON.parse happens to accept it, but trim and string comparisons will not. Pass utf8 when you want text.
+- Checking existsSync or access and then reading or writing races: the file can appear or vanish between the two calls. This is a time-of-check to time-of-use race. Attempt the operation and handle the error code, ENOENT or EEXIST. fs.exists is deprecated for this reason.
+- A callback that ignores its first argument uses undefined data and crashes later. Check err first.
+- readFile on a huge file allocates the whole file. A few concurrent large reads can run the process out of memory. Stream anything that is not small and bounded.
+- writeFile is not atomic. A crash mid-write leaves a truncated file. Write a temp file in the same directory and rename it into place. rename on one filesystem is atomic.
+- A relative path is resolved against process.cwd(), not the file's own folder, so it breaks when the process is launched from somewhere else. Anchor paths to import.meta.dirname, or to __dirname in CommonJS.
 
 ## Best practices
 
-- **Default to `node:fs/promises` with `async/await`.** It is non-blocking, composes cleanly, and gives you real `try/catch`.
-- **Reserve `*Sync` for startup and scripts.** Loading config before the server listens, or one-off CLI tooling, is exactly where sync is acceptable and even clearer.
-- **Stream anything large or of unknown size,** using `stream/promises` `pipeline` so errors and back-pressure are handled for you.
-- **Branch on `err.code`, not on message strings.** Codes like `ENOENT`, `EACCES`, `EEXIST` are stable; human-readable messages are not.
-- **Build paths with the `path` module and anchor to `import.meta.dirname`,** never by concatenating strings with `/`.
-- **Write-then-rename for files that must not be seen half-written.** Temp file plus atomic `rename` gives you crash-safety cheaply.
-- **Prefer attempting an operation over pre-checking existence,** to avoid TOCTOU races and an extra syscall.
+- Default to node:fs/promises and async/await. It does not block, and try/catch works.
+- Reserve Sync for startup and scripts, such as loading config before the server listens.
+- Stream large or unknown sizes with pipeline from stream/promises, so errors and back-pressure are handled.
+- Branch on err.code, not on the message. ENOENT, EACCES, and EEXIST stay stable. Messages do not.
+- Build paths with the path module and anchor them to import.meta.dirname. Do not glue strings with a slash.
+- For a file that must not be seen half-written, write a temp file and rename it.
+- Attempt the operation instead of pre-checking existence, so you avoid the race and an extra system call.
 
 ## ⭐ Interview lens
 
 > **Q: What is the real difference between `fs.readFileSync` and `fs.readFile`?** `readFileSync` blocks the main thread until the OS returns the bytes, so nothing else in the process runs meanwhile. `readFile` hands the work to libuv's thread pool and invokes your callback later, keeping the event loop free to serve other requests. The trap is claiming sync is "faster" — for one isolated read the latency is similar, but on a server sync destroys concurrency.
+> readFileSync blocks the main thread until the operating system returns the bytes, so no other request, timer, or promise runs during that wait. readFile hands the work to libuv's thread pool and runs your callback later, so the event loop stays free to serve other requests. The latency of one isolated read is similar either way. The difference shows up on a server: sync destroys concurrency, async does not. For example, a config load before listen can be sync and clear. The same call inside a request handler stalls every connection. The limit of "async is free" is the pool. The default is four workers, so many large reads queue even though your JavaScript looks parallel.
 
 > **Q: If Node is single-threaded, how does async file I/O actually run in parallel?** Your JavaScript is single-threaded, but I/O is delegated to libuv's thread pool (default size 4). Those worker threads perform the blocking syscalls; when they finish, the completion callback is queued back onto the single main thread. So the parallelism is in the C layer, not in your JS.
-
-> **Q: Why prefer `fs/promises` over the callback API if they use the same thread pool?** They have identical performance because the mechanism is the same. The win is purely ergonomic: `await` avoids callback nesting, `try/catch` handles errors naturally, and it composes with other promises. There is no runtime downside.
+> Your JavaScript is single-threaded. The file work is not done on that thread. libuv keeps a pool of worker threads, four by default, set with UV_THREADPOOL_SIZE. Those workers perform the blocking system calls. When one finishes, the completion is queued back onto the single main thread as a callback or a resolved promise. So the parallelism is in the C layer, and your JavaScript still runs one callback at a time. For example, five readFile calls start, four workers run, and the fifth waits for a worker. Network sockets do not use this pool. They use the operating system's own event notification. The limit is that raising the pool size helps file and crypto throughput only until you run out of disk or CPU. It does not make JavaScript itself multi-threaded.
 
 > **Q: You must read a 4 GB file and transform it. How?** Never `readFile` it — that would try to allocate 4 GB. Use `createReadStream` and process chunks, ideally via `pipeline` so back-pressure and error handling are automatic. Memory stays flat regardless of file size.
-
-> **Q: How do you check if a file exists before reading it?** The trick answer: usually you should not. Pre-checking with `access`/`existsSync` then reading opens a TOCTOU race and costs an extra syscall. Just `readFile` and catch `err.code === 'ENOENT'`. This shows you understand races, not just APIs.
+> Do not readFile it. That tries to allocate about 4 GB before you see a byte, and a few of those in parallel can run the process out of memory. Use createReadStream and handle chunks, ideally through pipeline so back-pressure and errors are wired up for you. Memory stays flat no matter how big the file is. Back-pressure means the file reader pauses when your transform is slower than the disk. For example, a CSV transform can parse one chunk, write a row, and let the stream pull the next chunk. The limit is that streams are the wrong tool for a tiny config. readFile of a small bounded file is simpler and fine.
 
 > **Q: How would you make a config write crash-safe?** Write to a temporary file in the same directory, then `rename` it over the target. `rename` within one filesystem is atomic, so a reader ever sees either the old file or the fully new one, never a truncated write.
+> Write the new contents to a temporary file in the same directory, then rename that file over the target. rename within one filesystem is atomic, so a reader sees either the old file or the complete new one, never a half-written one. writeFile alone can crash in the middle and leave a truncated config that the next boot fails to parse. Keep the temp file beside the target so the rename does not cross filesystems, because a cross-device rename is not the same atomic replace. The limit is readers that already have the old file open. They keep their old file descriptor. New opens see the new name.
 
 ## Cheat-card
 
-- `import { readFile, writeFile } from 'node:fs/promises'` — the default modern API.
-- Pass `'utf8'` for a string; omit it for a raw `Buffer`.
-- Async = libuv thread pool (default 4, set `UV_THREADPOOL_SIZE`); main thread stays free.
-- `*Sync` only at startup / in scripts — never in a request handler.
-- Large or unbounded data → `createReadStream` + `pipeline`, not `readFile`.
-- Switch on `err.code`: `ENOENT` (missing), `EACCES` (permissions), `EEXIST` (already there).
-- `mkdir(dir, { recursive: true })` is idempotent; `appendFile` creates + never truncates.
-- Crash-safe write = temp file + atomic `rename`.
-- Anchor paths to `import.meta.dirname`, never `process.cwd()`.
-- `stat` follows symlinks; `lstat` describes the link. `throwIfNoEntry: false` on `fsPromises.stat` since v24.15.0.
-- `readdir(dir, { withFileTypes: true, recursive: true })`: Dirents with `parentPath`; a symlink is neither `isFile()` nor `isDirectory()`.
-- `unlink` = one name (not dirs, `EISDIR`); `rm(p, { recursive, force })` = `rm -rf`, never follows links.
-- `copyFile(src, dst, COPYFILE_EXCL)` for one file; `cp(src, dst, { recursive, filter })` for trees (stable since v22.3.0).
-- `glob` / `globSync` stable since v24.0.0; the promise form is an async iterator (`Array.fromAsync`).
-- `FileHandle`: positional `read`/`write`, always `close()` (or `await using`); GC close prints `DEP0137`.
-- Broken symlink: `existsSync` is `false`, `'wx'` gives `EEXIST`, `'w'` creates the target.
-- Mode bits: `(stat.mode & 0o777).toString(8)`; umask trims new files; root ignores read/write bits.
-- `fs.watch(dir, { recursive: true })` on Linux (v19.1.0+): one inotify watch per entry, duplicate events, `filename` may be `null`, debounce.
+- Import readFile and writeFile from node:fs/promises. That is the default for new code.
+- Pass utf8 for a string. Omit the encoding for a Buffer.
+- Async file work uses the libuv pool, four threads by default, UV_THREADPOOL_SIZE. The main thread stays free.
+- Sync only at startup or in scripts. Never in a request handler.
+- Large or unbounded data: createReadStream and pipeline, not readFile.
+- Switch on err.code: ENOENT missing, EACCES permissions, EEXIST already there.
+- mkdir with recursive true is safe to repeat. appendFile creates the file and does not truncate it.
+- A crash-safe write is a temp file plus rename on the same filesystem.
+- Anchor paths to import.meta.dirname, not to process.cwd().
+- Do not check existence and then act. Attempt the operation and handle the error code.
+
+## Good to know
+
+- Why prefer `fs/promises` over the callback API if they use the same thread pool? They have the same performance, because both use the libuv thread pool. The gain is await, try/catch, and composition. There is no runtime downside.
+
+- How do you check if a file exists before reading it? Usually you should not. access or existsSync and then a read is a time-of-check to time-of-use race and an extra system call. readFile and catch err.code === 'ENOENT'.
+- Additional examples: 10 Oct 2026, examples verified on Node v24.19.0.
+- readdir with recursive true, which returns paths relative to the directory, was added in v20.1.0 and v18.17.0.
+- `rm(path, options)`: added in v14.14.0.
+- `copyFile(src, dest, mode)`: added in v8.5.0.
+- `cp(src, dest, options)`: added in v16.7.0.
+- `followSymlinks: true`: added in v24.16.0.
 
 ---
 
@@ -202,8 +210,6 @@ try {
 ---
 
 ## Additional topics
-
-*Added 10 Oct 2026 · examples verified on Node v24.19.0*
 
 All examples below ran on Linux as an ordinary user (uid 1001, umask `0002`) in a scratch directory on tmpfs. Each one is a standalone `.mjs` file you can run with `node file.mjs`.
 
@@ -260,7 +266,7 @@ console.log('throwIfNoEntry: false ->', await stat('demo/missing.txt', { throwIf
 `readdir(dir)` returns the names in a directory, without `.` and `..`, in whatever order the file system returns them. Two options change what you get back:
 
 - **`withFileTypes: true`** returns `fs.Dirent` objects instead of strings (added in v10.10.0 for `fs.readdir`, v10.11.0 for `fsPromises.readdir`). Each Dirent has `name`, `parentPath` (added in v21.4.0, v20.12.0 and v18.20.0; stable since v24.0.0) and the same `isFile()`/`isDirectory()`/`isSymbolicLink()` methods as Stats. Linux reports the entry type in the directory listing itself, so no extra `stat` call is made per entry (strace of a `withFileTypes` read showed two `getdents64` calls and no `stat` calls for the entries).
-- **`recursive: true`** walks the whole tree and returns paths relative to `dir` (added in v20.1.0 and v18.17.0).
+- **`recursive: true`** walks the whole tree and returns paths relative to `dir`.
 
 How it works:
 
@@ -317,7 +323,7 @@ console.log('files only:', files.sort());
 
 ### `rm` and `unlink`
 
-`unlink(path)` removes one directory entry: a file name or a symlink. The data is freed when no other hard link and no open file descriptor refers to it any more. It refuses directories. `rm(path, options)` (added in v14.14.0) is the higher-level remover, modelled on `rm -rf`: it removes files, removes whole trees with `recursive: true`, and ignores a missing path with `force: true`.
+`unlink(path)` removes one directory entry: a file name or a symlink. The data is freed when no other hard link and no open file descriptor refers to it any more. It refuses directories. `rm(path, options)` is the higher-level remover, modelled on `rm -rf`: it removes files, removes whole trees with `recursive: true`, and ignores a missing path with `force: true`.
 
 How it works:
 
@@ -371,7 +377,7 @@ console.log('left in trash/:', await readdir('trash'));
 
 ### `copyFile` and `cp`
 
-`copyFile(src, dest, mode)` copies one file's bytes (added in v8.5.0). On Linux libuv asks the kernel to do the copy: strace showed one `copy_file_range(2)` call for a 100,000-byte file, so the bytes never passed through JavaScript. `mode` is a bit mask: `COPYFILE_EXCL` fails if `dest` exists, `COPYFILE_FICLONE` asks for a copy-on-write clone where the file system supports it. `cp(src, dest, options)` (added in v16.7.0) copies files **and directory trees**, with `recursive`, `filter`, `force`, `errorOnExist`, `dereference`, `preserveTimestamps` and `verbatimSymlinks`. It was experimental at first. The docs' history says "This API is no longer experimental" in v22.3.0, so on v24 `fs.cp`, `fs.cpSync` and `fsPromises.cp` are stable.
+`copyFile(src, dest, mode)` copies one file's bytes. On Linux libuv asks the kernel to do the copy: strace showed one `copy_file_range(2)` call for a 100,000-byte file, so the bytes never passed through JavaScript. `mode` is a bit mask: `COPYFILE_EXCL` fails if `dest` exists, `COPYFILE_FICLONE` asks for a copy-on-write clone where the file system supports it. `cp(src, dest, options)` copies files **and directory trees**, with `recursive`, `filter`, `force`, `errorOnExist`, `dereference`, `preserveTimestamps` and `verbatimSymlinks`. It was experimental at first. The docs' history says "This API is no longer experimental" in v22.3.0, so on v24 `fs.cp`, `fs.cpSync` and `fsPromises.cp` are stable.
 
 How it works:
 
@@ -425,7 +431,7 @@ try {
 How it works:
 
 1. Node reads the directories the pattern can reach, starting at `cwd`, and matches each entry name against the matching segment of the pattern.
-2. `**` matches zero or more directory levels. It does not follow symlinks to directories unless you pass `followSymlinks: true` (added in v24.16.0).
+2. `**` matches zero or more directory levels. It does not follow symlinks to directories unless you pass `followSymlinks: true`.
 3. Paths are yielded relative to `cwd` (default `process.cwd()`).
 4. `exclude` removes matches. A directory that matches `exclude` is not read at all: with `exclude: ['node_modules']`, strace showed no `open` of `proj/node_modules`.
 

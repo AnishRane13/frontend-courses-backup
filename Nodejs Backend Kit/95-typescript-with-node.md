@@ -13,66 +13,66 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+TypeScript on Node is two jobs: a compiler named tsc checks your type annotations, and something else has to turn the file into JavaScript because Node only runs JavaScript. You can let Node strip the types and run the file directly, or compile first with tsc. The trade-off is that stripping is instant and checks nothing, so a project that never runs tsc ships type errors and meets them later as a TypeError in the logs.
+
 ## Why it matters
 
-TypeScript adds a static type layer on top of JavaScript: a compiler (`tsc`) reads your annotations, checks every call, property access and return value against them, and reports mismatches before the code runs. Node itself only executes JavaScript, so a `.ts` file has to be turned into JavaScript somewhere: by Node, by a loader package, or by a build step. Which of these you choose decides how your app starts, what syntax you may write, how your imports must look, and whether anything type-checks your code at all.
+TypeScript adds a static type layer on top of JavaScript. The compiler, `tsc`, reads your annotations, checks every call, property access, and return value, and reports mismatches before the code runs. Node only executes JavaScript, so a `.ts` file is turned into JavaScript by Node itself, by a loader package, or by a build step. That choice decides how the app starts, which syntax you may write, how imports look, and whether anything type-checks the code at all.
 
-Getting it wrong produces errors that look unrelated to types: `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` on an `enum`, `ERR_MODULE_NOT_FOUND` for an import that the editor accepted, `does not provide an export named 'User'` for an interface, `__filename is not defined in ES module scope` in a file that compiled cleanly. The most expensive mistake is silent. Every runtime option below **removes** types without checking them, so a project that never runs `tsc` ships type errors to production and learns about them from a `TypeError` in the logs.
+Getting it wrong looks unrelated to types: `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` on an `enum`, `ERR_MODULE_NOT_FOUND` for an import the editor accepted, `does not provide an export named 'User'` for an interface, and `__filename is not defined in ES module scope` in a file that compiled cleanly. The expensive mistake is silent. Every runtime option below removes types without checking them.
 
 ## The concept, simply
 
-TypeScript on Node has two separate jobs:
+Two jobs stay separate.
 
-1. **Type checking.** Only `tsc` does this (TypeScript's own compiler). It reads `tsconfig.json`, loads type definitions such as `@types/node`, and exits non-zero on any type error. It can also write `.js` files, or be told not to (`--noEmit`).
-2. **Running.** Something has to hand Node plain JavaScript. The choices differ in what syntax they accept and whether a build step exists.
+1. **Type checking.** Only `tsc` does this, and `ts-node` does it unless you set `transpileOnly`. `tsc` reads `tsconfig.json`, loads type definitions such as `@types/node`, and exits non-zero on a type error. It can write `.js` files, or you can pass `--noEmit` and only check.
+2. **Running.** Something must hand Node plain JavaScript. The choices differ in syntax and in whether a build step exists.
 
-| Option | What it is | Type-checks? | Accepts `enum`, `namespace`, parameter properties? | Reads `tsconfig.json`? | Build output |
-|---|---|---|---|---|---|
-| Built-in type stripping (`node file.ts`) | Node replaces type annotations with spaces before running the file | No | No (throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`), unless you add `--experimental-transform-types` | No | None |
-| `tsx` 4.23.15 (`npx tsx file.ts` or `node --import tsx file.ts`) | A package that registers module hooks and compiles each file with esbuild as it loads | No | Yes | Partly (esbuild reads some options, such as `paths`) | None |
-| `ts-node` 10.9.2 | A package that compiles each file with the TypeScript compiler API as it loads | Yes, unless `transpileOnly` | Yes | Yes | None |
-| `tsc` to `dist/` | The TypeScript compiler writes `.js` (and `.js.map`) files that you run with plain `node` | Yes | Yes | Yes | `dist/*.js` |
-| A bundler such as `esbuild` 0.28.2 | Strips types and joins your files into one output file; no type checking | No | Yes | Partly | One bundle file |
+`node file.ts` replaces type annotations with spaces and runs the file. It does not type-check, it does not read `tsconfig.json`, and it throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` on syntax that has to generate JavaScript, such as `enum`, unless you add `--experimental-transform-types`.
 
-Two facts from this table drive the rest of the lesson. First, only `tsc` and `ts-node` check types, so you run `tsc --noEmit` in CI no matter how you run the code. Second, `ts-node` 10.9.2 was published on 8 Dec 2023 and calls the classic TypeScript compiler API. TypeScript 7 (7.0.2 is `latest` on npm today) is a native compiler without that API, and ts-node crashes against it. See the gotchas section for the output.
+`tsx` registers module hooks and compiles each file with esbuild as it loads. It does not type-check. It accepts `enum`, namespaces, and parameter properties. It reads some `tsconfig` options, such as `paths`. It writes no build output.
+
+`ts-node` compiles each file with the TypeScript compiler API as it loads. It type-checks unless `transpileOnly` is set, it accepts that same syntax, and it reads `tsconfig.json`. It writes no build output. It calls the classic compiler API, so it crashes against TypeScript 7, which is a native compiler without that API.
+
+`tsc` writing `dist/` type-checks, accepts that syntax, reads `tsconfig.json`, and you run the `.js` files with plain `node`.
+
+A bundler such as esbuild strips types and joins files into one output. It does not type-check. It accepts `enum`. It reads some `tsconfig` options.
+
+Only `tsc` and `ts-node` check types. Run `tsc --noEmit` in continuous integration no matter how you run the code.
 
 ## How it works
 
-**What `node file.ts` does (type stripping).** On Node v24.19.0 this works with no flag:
+**What `node file.ts` does.** On Node v24.19.0 this needs no flag.
 
-1. Node sees the `.ts`, `.mts` or `.cts` extension. It decides ESM or CommonJS the same way it does for `.js`: `.mts` is always ESM, `.cts` is always CommonJS, and `.ts` follows the nearest `package.json` `"type"` field.
-2. It parses the file with a bundled TypeScript parser (Amaro, which wraps SWC) and replaces every piece of type-only syntax with whitespace: annotations, `interface`, `type`, `import type`, `satisfies`, `as`, generics.
-3. Because each type is replaced by spaces of the same length, line and column numbers do not move. Node generates no source map and needs none.
-4. The resulting JavaScript runs as normal. Nothing checks the types and `tsconfig.json` is never read.
-5. If the file contains TypeScript syntax that *generates* JavaScript (`enum`, a `namespace` with values, constructor parameter properties, `import x = require()`), stripping cannot express it with whitespace, so Node throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
+1. Node sees `.ts`, `.mts`, or `.cts`. It picks ESM or CommonJS the same way as `.js`. `.mts` is always ESM. `.cts` is always CommonJS. `.ts` follows the nearest `package.json` `"type"` field.
+2. A bundled parser, Amaro, which wraps SWC, replaces type-only syntax with whitespace of the same length: annotations, `interface`, `type`, `import type`, `satisfies`, `as`, and generics.
+3. Line and column numbers do not move, so Node generates no source map.
+4. The JavaScript runs. Nothing checks the types, and `tsconfig.json` is never read.
+5. Syntax that generates JavaScript cannot be expressed as whitespace: `enum`, a `namespace` with values, constructor parameter properties, and `import x = require()`. Node throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
 
-**Version history and stability** (from the docs' History tables):
+Node will not strip `.ts` files under `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so packages must publish JavaScript. `tsconfig` `paths` aliases are not applied. Subpath imports that start with `#` are the closest Node feature. `.tsx` is unsupported, and so is TypeScript in the REPL and in `node --check`.
 
-- Type stripping was added in v22.6.0 behind `--experimental-strip-types`.
-- `--experimental-transform-types` (added in v22.7.0) also converts `enum`, namespaces and parameter properties, and turns on `--enable-source-maps`.
-- Changed in v23.6.0 / v22.18.0: type stripping is enabled by default.
-- Changed in v24.3.0 / v22.18.0: it no longer prints an `ExperimentalWarning`.
-- Changed in v24.12.0 / v25.2.0: **Stability: 2 - Stable**. The opt-out flag was renamed from `--no-experimental-strip-types` to `--no-strip-types`; on v24.19.0 both spellings still work.
-- `--experimental-transform-types` is still **Stability 1.2 - Release candidate** on v24.19.0 and prints an `ExperimentalWarning`. The current docs list "v26.0.0: Removed `--experimental-transform-types` flag", so do not build on it.
-- `process.features.typescript` reports the mode: `'strip'` by default, `'transform'` with the transform flag, `false` with `--no-strip-types`.
+**The `tsconfig.json` that matches stripping** exists for `tsc --noEmit` and for the editor, so `tsc` rejects what Node would reject.
 
-**What stripping refuses beyond `enum`.** Node will not strip `.ts` files under `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so packages must still publish JavaScript. `tsconfig` `paths` aliases are not applied (subpath imports starting with `#` are the closest Node feature). `.tsx` is unsupported, and so is TypeScript in the REPL and in `node --check`.
+`"module": "nodenext"` and `"moduleResolution": "nodenext"` make `tsc` use Node's rules. It reads `"type"` to decide ESM or CommonJS, honours package `"exports"`, and requires file extensions on relative ESM imports. The error for a missing extension is TS2835.
 
-**The `tsconfig.json` that matches stripping.** When Node runs the source directly, `tsconfig.json` exists only for `tsc --noEmit` and for your editor. Its job is to make `tsc` reject anything Node would reject:
+`"target"` sets which JavaScript syntax `tsc` emits and which built-in library types it assumes. Node 24 implements the ES2025 built-ins that this lesson checked, so `"es2025"` emits your code unchanged. Type stripping ignores `target`.
 
-- **`"module": "nodenext"` and `"moduleResolution": "nodenext"`.** `tsc` applies Node's own rules: it reads `"type"` from `package.json` to decide whether each file is ESM or CommonJS, honours package `"exports"`, and requires file extensions on relative ESM imports (error TS2835).
-- **`"target"`** sets which JavaScript syntax `tsc` emits and which built-in library types it assumes. Node 24 implements the ES2025 built-ins (`Promise.try`, `Iterator.prototype.map`, `Set.prototype.union`, `RegExp.escape` all exist on v24.19.0), so `"es2025"` emits your code unchanged. Type stripping ignores `target` entirely.
-- **`"strict": true`** turns on the strict family of checks (`strictNullChecks`, `noImplicitAny`, …). It became the default in TypeScript 6.0, but writing it explicitly keeps older compilers and readers in agreement.
-- **`"verbatimModuleSyntax": true`** makes `tsc` keep every import exactly as written, except those marked `type`. That is how Node behaves, so an interface imported without `type` becomes a compile error (TS1484) instead of a runtime crash.
-- **`"erasableSyntaxOnly": true`** (added in TypeScript 5.8) makes `tsc` reject the syntax that stripping cannot handle (TS1294). TypeScript 5.7.3 rejects the option with `TS5023: Unknown compiler option 'erasableSyntaxOnly'`; 5.8.3, 6.0.3 and 7.0.2 accept it.
-- **`"rewriteRelativeImportExtensions": true`** (added in TypeScript 5.7) lets you write `import './env.ts'` and makes `tsc` emit `import './env.js'` when it builds `dist/`. It implies `allowImportingTsExtensions` (`tsc --showConfig` lists both). `allowImportingTsExtensions` alone permits `.ts` specifiers but only together with `noEmit`, `emitDeclarationOnly` or `rewriteRelativeImportExtensions` (TS5096), because emitted `.js` files would otherwise import `.ts` files.
-- **`"types": ["node"]`** loads `@types/node`. Since TypeScript 6.0, `types` defaults to `[]`, so without this line `process`, `Buffer` and `node:fs` are unknown (TS2591). TypeScript 5.9.3 and older still loaded every `@types/*` package automatically.
+`"strict": true` turns on the strict family, including `strictNullChecks` and `noImplicitAny`.
 
-**`@types/node`.** Node's API types are not bundled with TypeScript. They come from the `@types/node` package (DefinitelyTyped), whose major version follows the Node major. A bare `npm i -D @types/node` installed 26.6.4 here, the types for Node 26, which describe APIs that Node 24 does not have. Pin the major to your runtime: `npm i -D @types/node@24` installed 24.19.1.
+`"verbatimModuleSyntax": true` makes `tsc` keep every import as written, except imports marked `type`. Node does the same. An interface imported without `type` becomes TS1484 at check time instead of a runtime crash.
 
-**Import extensions.** Node's ESM loader never guesses extensions, and type stripping does not rewrite specifiers. So under stripping you write the real file name, `./env.ts`. Writing `./env.js` would make Node look for a file that does not exist. When `tsc` builds `dist/`, `rewriteRelativeImportExtensions` turns `./env.ts` into `./env.js`, so the same source works both ways. It only rewrites relative specifiers (`./`, `../`). A subpath import such as `#lib/v.ts` is emitted unchanged, and `tsc` reports `error TS2877: This import uses a '.ts' extension to resolve to an input TypeScript file, but will not be rewritten during emit because it is not a relative path.` The Node docs add that `require('./file.ts')` also needs the extension.
+`"erasableSyntaxOnly": true` makes `tsc` reject syntax stripping cannot handle, reported as TS1294.
 
-**Source maps and debugging.** Stripping keeps positions, so stack traces point at the right `.ts` line with no map. A `tsc` build moves code around (interfaces disappear, lines are re-wrapped), so the line numbers in `dist/*.js` no longer match your source. `"sourceMap": true` writes a `.js.map` next to each file, and `node --enable-source-maps` makes stack traces use it. `node --inspect src/price.ts` starts the inspector as usual, and positions match the `.ts` file. In the `node inspect` command-line debugger, the source listing showed the stripped code, with blank lines where the `interface` had been.
+`"rewriteRelativeImportExtensions": true` lets you write `import './env.ts'` and makes `tsc` emit `import './env.js'` in `dist/`. It only rewrites relative specifiers, `./` and `../`. A subpath import such as `#lib/v.ts` is emitted unchanged, and `tsc` reports TS2877. `allowImportingTsExtensions` alone is not enough: it must sit with `noEmit`, `emitDeclarationOnly`, or `rewriteRelativeImportExtensions`, or `tsc` reports TS5096, because emitted `.js` would otherwise import `.ts` files.
+
+`"types": ["node"]` loads `@types/node`. Pin that package's major to your Node major. A bare install can pull types for a newer Node than you run, and the compiler will accept APIs your runtime lacks.
+
+**Import extensions.** Node's ESM loader never guesses extensions, and stripping does not rewrite specifiers. Under stripping you write `./env.ts`. `./env.js` looks for a file that is not there. When `tsc` builds `dist/`, `rewriteRelativeImportExtensions` turns the relative `.ts` specifier into `.js`, so the same source works both ways. `require('./file.ts')` also needs the extension.
+
+**Source maps.** Stripping keeps positions, so stack traces point at the `.ts` line with no map. A `tsc` build moves code, so line numbers in `dist/*.js` no longer match. `"sourceMap": true` writes a `.js.map`, and `node --enable-source-maps` makes stack traces use it. `node --inspect src/price.ts` starts the inspector with positions that match the `.ts` file.
 
 ## Code examples
 
@@ -592,45 +592,63 @@ ReferenceError: __filename is not defined in ES module scope
 
 ## Best practices
 
-- **Run `tsc --noEmit` in CI and in a pre-push hook.** Make it a `typecheck` script. Its non-zero exit code is the only type gate you have.
-- **Use stripping-compatible settings even if you build.** `erasableSyntaxOnly` and `verbatimModuleSyntax` keep the code runnable by `node`, `tsx`, esbuild and `tsc` alike, so you can switch runners later without rewriting code.
-- **Use ESM for TypeScript on Node.** Set `"type": "module"` and import relative files with their real `.ts` extension. Add `rewriteRelativeImportExtensions` if you also build to `dist/`.
-- **Pin `@types/node` to your Node major** and add `"types": ["node"]` explicitly.
-- **Validate the environment once, at startup,** into a typed object (Example 4). Do not widen `NodeJS.ProcessEnv` with non-optional fields.
+- **Run `tsc --noEmit` in CI and in a pre-push hook.** Its non-zero exit is the only type gate if you run by stripping.
+- **Use `erasableSyntaxOnly` and `verbatimModuleSyntax`** so the same source can run under `node`, `tsx`, esbuild, and `tsc`.
+- **Use ESM.** Set `"type": "module"` and import relative files with their real `.ts` extension. Add `rewriteRelativeImportExtensions` if you also build `dist/`.
+- **Pin `@types/node` to your Node major** and set `"types": ["node"]`.
+- **Validate the environment once, at startup,** into a typed object. Do not widen `NodeJS.ProcessEnv` with non-optional fields.
 - **Type Express handlers with the generics** `Request<Params, ResBody, ReqBody, Query>` and `Response<Body>`, and include `undefined` in the body type on Express 5.
-- **In production, either run `.ts` with stripping or run the build with `--enable-source-maps`.** Either way, stack traces point at source lines.
-- **Avoid `--experimental-transform-types` for new code.** It is a release candidate that prints a warning on v24, and the v26 docs record its removal.
+- **In production, run `.ts` with stripping or run the build with `--enable-source-maps`.** Either way, stack traces point at source lines.
+- **Avoid `--experimental-transform-types` for new code.** It is still a release candidate on the Node version this lesson used, and the v26 docs record its removal.
 
 ## ⭐ Interview lens
 
 > **Q: “Node can run `.ts` files now. Why do we still need `tsc`?”**  
-> A: Node's type stripping only replaces type syntax with whitespace so the remaining JavaScript can run. It never checks types and never reads `tsconfig.json`. `tsc --noEmit` is the step that finds type errors, so it runs in CI. The same is true of tsx and esbuild. *Trap:* saying "Node 24 compiles TypeScript". It strips, and with the default settings it refuses anything that needs real code generation.
+> A: Node's type stripping finds type-only syntax and replaces it with spaces of the same length, so the remaining JavaScript runs and the line numbers do not move. It uses a bundled parser, it never checks that your types are right, and it never reads `tsconfig.json`. `tsc --noEmit` is the step that loads the config and `@types/node` and exits non-zero on a mismatch, so that step belongs in continuous integration. `tsx` and esbuild also strip or compile without checking. For example, a file can say a field is a string and still return null at runtime, and `node file.ts` will serve it. The limit is syntax that has to generate code. An `enum`, a namespace with values, parameter properties, and `import x = require()` cannot be turned into spaces, so Node throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. Saying "Node compiles TypeScript" is the trap. With the default settings it strips, and it refuses anything that needs real code generation.
 
 > **Q: “Why does `enum` fail under `node file.ts` but an `interface` works?”**  
-> A: An interface is erasable: delete it and the program behaves the same. An `enum` produces a runtime object, so turning it into whitespace would break every `Status.Active` reference, and Node throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` instead. The same applies to value namespaces, parameter properties and `import x = require()`. `erasableSyntaxOnly` makes `tsc` reject them too.
+> A: An interface is erasable. Delete it and the program behaves the same, so replacing it with whitespace is safe. An `enum` produces a runtime object. Turning it into spaces would break every `Status.Active` reference, so Node throws `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX` instead of guessing. The same rule hits a namespace that holds values, constructor parameter properties, and `import x = require()`. Stripping keeps line and column positions because each removed type is replaced by spaces of the same length. For example, a status enum fails under `node file.ts`, and an interface next to it runs. The limit of "just avoid enum" is that `tsc` will still accept it unless you set `erasableSyntaxOnly`, which reports TS1294. `--experimental-transform-types` can convert enums, and it is the wrong default for new code because this lesson's Node still treats it as a release candidate and the v26 docs record the flag's removal.
 
 > **Q: “What does `verbatimModuleSyntax` do and why does type stripping need it?”**  
-> A: It makes `tsc` keep every import and export as written and drop only those marked `type`. Node behaves the same way: it cannot know `User` is an interface unless the import says `type`, so an unmarked type import fails at link time with "does not provide an export named". The option makes `tsc` report that case as TS1484.
+> A: `verbatimModuleSyntax` tells `tsc` to keep every import and export exactly as written, and to drop only the ones marked `type`. That matches Node. Node cannot know `User` is an interface unless the import says `type`. If you write `import { User } from './user.ts'` and `User` is only a type, Node keeps the import, finds no runtime export, and throws a syntax error that the module does not provide an export named `User`. With the option on, `tsc` reports that case as TS1484 before you run anything. For example, a type-only `User` used in a function signature must be `import { type User }` or `import type`. The limit is that this option is a check-time rule. It does not change Node's loader. You still need it, together with `erasableSyntaxOnly`, if you want `tsc --noEmit` to reject the files stripping cannot run. It also pairs with writing the real `.ts` extension on relative imports, because stripping does not rewrite specifiers.
 
 > **Q: “How do you type `process.env`?”**  
-> A: Leave `NodeJS.ProcessEnv` as `string | undefined` values. Parse it once at startup into a typed config object, convert numbers, check enumerations and throw a clear error on bad input. Augmenting `ProcessEnv` with `DATABASE_URL: string` only changes the type. `tsc` passes and the app crashes when the variable is missing.
-
-> **Q: “Your stack traces point at `dist/server.js:212`. How do you get TypeScript lines?”**  
-> A: Emit source maps (`"sourceMap": true`) and start Node with `--enable-source-maps`, or run the `.ts` source with type stripping, which keeps line and column positions unchanged and needs no map.
+> A: Leave `NodeJS.ProcessEnv` as values that are `string | undefined`. At startup, read the variables once, convert numbers, check enumerations, and throw a clear error if something required is missing or malformed. The result is a typed config object the rest of the app uses. Augmenting `ProcessEnv` so `DATABASE_URL` is typed as a plain `string` only changes the type the compiler sees. `tsc` passes, and the process still crashes when the variable is missing, because nothing checked it at runtime. For example, a boot function that requires the URL and the port, and refuses to listen until both parse, fails the deploy in a way you can log. The limit is declaration merging that makes the type lie. Types are erased before Node runs, so a non-optional annotation is not a default and not a presence check. On TypeScript 6 and 7 you also need `"types": ["node"]`, or `process` itself is an unknown name.
 
 ## Cheat-card
 
-- **Run:** `node file.ts` (stable since v24.12.0 / v25.2.0, on by default since v23.6.0 / v22.18.0). It strips types and never checks them.
-- **Rejected by stripping:** `enum`, value `namespace`, parameter properties, `import =`. `--experimental-transform-types` allows them (RC, warns, removed in v26).
-- **Check:** `tsc --noEmit` in CI. Nothing else in the run path checks types.
-- **tsconfig:** `module`/`moduleResolution: nodenext`, `target: es2025`, `strict`, `verbatimModuleSyntax`, `erasableSyntaxOnly` (TS ≥ 5.8), `rewriteRelativeImportExtensions` (TS ≥ 5.7), `types: ["node"]` (needed on TS ≥ 6).
-- **Imports:** `import './env.ts'` plus `rewriteRelativeImportExtensions` for builds, and `import { type X }` for types.
-- **ESM:** set `"type": "module"`, otherwise `tsc` and Node disagree about the file.
-- **`@types/node`:** pin it to your Node major.
-- **Env:** validate once into a typed object. `ProcessEnv` augmentation does not check anything at runtime.
+- **Run:** `node file.ts` strips types and never checks them. On this lesson's Node it is on by default.
+- **Stripping rejects:** `enum`, value `namespace`, parameter properties, `import =`.
+- **Check:** `tsc --noEmit` in CI. Nothing else in the run path checks types, except ts-node without `transpileOnly`.
+- **tsconfig for stripping:** `module` and `moduleResolution` set to `nodenext`, `target` `es2025`, `strict`, `verbatimModuleSyntax`, `erasableSyntaxOnly`, `rewriteRelativeImportExtensions`, `"types": ["node"]`.
+- **Imports:** `import './env.ts'` while running source. Mark type imports with `type`.
+- **ESM:** set `"type": "module"`, or `tsc` and Node can disagree about the file.
+- **`@types/node`:** pin the major to your Node major.
+- **Env:** validate once into a typed object. Widening `ProcessEnv` does not check anything at runtime.
 - **Express 5:** `Request<Params, ResBody, ReqBody, Query>`, `Response<Body>`, and `req.body` may be `undefined`.
-- **Stack traces:** stripping keeps positions. Builds need `sourceMap` plus `node --enable-source-maps`.
-- **ts-node 10.9.2** crashes with TypeScript 7. Use tsx or stripping to run, and `tsc` to check.
+- **Stack traces:** stripping keeps positions. Builds need `"sourceMap": true` and `node --enable-source-maps`.
+- **ts-node 10.9.2** crashes on TypeScript 7. Run with tsx or stripping, and check with `tsc`.
+
+## Good to know
+
+- **Your stack traces point at `dist/server.js:212`.** Emit source maps with `"sourceMap": true` and start Node with `--enable-source-maps`, or run the `.ts` source with stripping, which keeps line and column positions and needs no map.
+- **Type stripping was added in v22.6.0** behind `--experimental-strip-types`.
+- **`--experimental-transform-types` was added in v22.7.0.** It also converts `enum`, namespaces, and parameter properties, and it turns on `--enable-source-maps`.
+- **Type stripping is enabled by default** as of v23.6.0 and v22.18.0.
+- **The ExperimentalWarning for stripping stopped** as of v24.3.0 and v22.18.0.
+- **Stripping is Stability 2, Stable,** as of v24.12.0 and v25.2.0. The opt-out was renamed from `--no-experimental-strip-types` to `--no-strip-types`. On v24.19.0 both spellings still work.
+- **`--experimental-transform-types` is Stability 1.2, release candidate,** on v24.19.0 and prints an ExperimentalWarning. The docs this lesson used list its removal in v26.0.0.
+- **`process.features.typescript`** is `'strip'` by default, `'transform'` with the transform flag, and `false` with `--no-strip-types`.
+- **Versions in the comparison:** tsx 4.23.15, ts-node 10.9.2 published on 8 Dec 2023, esbuild 0.28.2, and TypeScript 7.0.2 was `latest` on npm when this lesson was written.
+- **`"strict": true` became the default in TypeScript 6.0.** Writing it keeps older compilers in agreement.
+- **`erasableSyntaxOnly` was added in TypeScript 5.8.** TypeScript 5.7.3 rejects it with TS5023. 5.8.3, 6.0.3, and 7.0.2 accept it.
+- **`rewriteRelativeImportExtensions` was added in TypeScript 5.7.** It implies `allowImportingTsExtensions`. `tsc --showConfig` lists both.
+- **Since TypeScript 6.0, `types` defaults to `[]`.** TypeScript 5.9.3 and older still loaded every `@types` package automatically.
+- **A bare `npm i -D @types/node` installed 26.6.4** on the Node 24 machine used here. `npm i -D @types/node@24` installed 24.19.1.
+- **Node 24 ES2025 built-ins checked here:** `Promise.try`, `Iterator.prototype.map`, `Set.prototype.union`, and `RegExp.escape` all exist on v24.19.0.
+- **In the `node inspect` command-line debugger,** the source listing showed the stripped code, with blank lines where the interface had been.
+- **With typescript 5.9.3 in a `"type": "module"` project,** `npx ts-node src/bad.ts` printed `x` for `const n: number = "x"` because Node's stripping ran the file. With `NODE_OPTIONS=--no-strip-types` the same command failed with `ERR_UNKNOWN_FILE_EXTENSION`.
+- **CommonJS escape hatches fail under stripping.** `import fs = require('node:fs')` is rejected by `erasableSyntaxOnly` (TS1294) and by Node. A plain `require` in a `.cts` file is typed `any`.
 
 ---
 

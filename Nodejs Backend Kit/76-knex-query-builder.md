@@ -13,58 +13,37 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Knex is a query builder: you chain method calls that describe a SQL statement, and when you await the chain it compiles to SQL with the values sent as separate parameters so they cannot change the statement's shape. It exists so filters, joins, and migrations stay composable without gluing strings together, and without an object mapper hiding the SQL. You still write the joins yourself, and a row comes back as a plain object.
+
 ## Why it matters
 
-Raw SQL strings in a Node service break down in three predictable ways:
+Raw SQL strings in a Node service fail in three predictable ways. Someone concatenates a value into the string. A list endpoint grows optional filters until the code is a pile of if statements gluing fragments. The schema changes and nobody has a record of which change ran where.
 
-- someone concatenates a value into the string;
-- a list endpoint grows ten optional filters and the code becomes a pile of `if`s that glue string fragments together;
-- the schema changes and nobody has a record of which change ran where.
-
-An ORM solves these by hiding the SQL. A query builder solves them while keeping the SQL visible.
-
-Knex is the long-standing query builder for Node. It gives you:
-
-- a chainable API that compiles to parameterised SQL;
-- a migration and seed CLI with a bookkeeping table;
-- transactions with savepoints for nested calls.
-
-It does not give you models, relations or an identity map. A row comes back as a plain object, and loading a post's comments is a second query you write yourself. That trade-off is the subject of this lesson. It uses the same five tables, seed and canonical query as [lesson 79](79-sequelize-and-typeorm.md), so you can put the generated SQL side by side.
+An ORM hides the SQL to solve that. A query builder solves it and leaves the SQL visible. Knex is the long-standing query builder for Node. You get a chainable API that compiles to parameterized SQL, a migration and seed CLI with a bookkeeping table, and transactions with savepoints. You do not get models, relations, or an identity map. Loading a post's comments is a second query you write yourself.
 
 ## The concept, simply
 
-A Knex query is an object that describes SQL. `knex('posts').where({ published: true }).orderBy('id')` sends nothing to the database yet. It records the clauses you called. Two things can happen to it:
+A Knex query is an object that describes SQL. `knex('posts').where({ published: true }).orderBy('id')` sends nothing yet. It records the clauses. You can inspect it: `toSQL()` gives the SQL text and the bindings, and `toString()` inlines the bindings for a log line. Or you can run it. A builder is a thenable, so await compiles it for the dialect, borrows a pooled connection, sends the SQL with the bindings as separate parameters, and resolves to an array of row objects.
 
-- **You inspect it.** `.toSQL()` compiles it to `{ sql, bindings }`, and `.toString()` inlines the bindings for a log line.
-- **You run it.** A builder is a *thenable*, so `await` (or `.then`) compiles it for the configured dialect, borrows a pooled connection, sends the SQL with the bindings as separate parameters, and resolves with an array of row objects.
-
-Around the builder sit three more pieces:
-
-- `knex.schema` builds DDL.
-- The **CLI** (`knex migrate:*`, `knex seed:*`) runs migration and seed files and records them in `knex_migrations`.
-- `knex.transaction()` pins a sequence of queries to one connection.
+Three pieces sit around the builder. `knex.schema` builds DDL, the statements that change tables. The CLI, `knex migrate` and `knex seed`, runs migration and seed files and records migrations in `knex_migrations`. `knex.transaction()` pins a sequence of queries to one connection.
 
 ## How it works
 
-What happens when `await knex('posts').where('published', true).limit(10)` runs:
+When you await `knex('posts').where('published', true).limit(10)`:
 
-1. `knex('posts')` creates a QueryBuilder and stores `from = posts`. Each chained call (`where`, `join`, `orderBy`, `limit`) appends an entry to the builder's internal statement list. No SQL exists yet.
-2. `await` calls the builder's `then`. The client's query compiler turns the statement list into SQL for the dialect, here PostgreSQL. Identifiers are quoted (`"posts"`). Every value becomes a binding, written as `?` in Knex's own form and rewritten to `$1, $2…` for the `pg` driver (`toSQL().toNative()` shows that form).
-3. Before sending, Knex checks the bindings. An `undefined` value throws `Undefined binding(s) detected…`, and no SQL is sent (Example 9).
-4. Knex acquires a connection from its pool (tarn.js, configured by `pool` in the knexfile), emits a `query` event with `{ sql, bindings }`, and calls the driver. Every query count in this lesson comes from that event.
-5. The driver returns rows, and Knex resolves with `rows` for a select, or with what `.returning()` asked for on an insert or update. Then it releases the connection.
+1. `knex('posts')` creates a builder and stores the from clause. Each call such as where, join, orderBy, or limit appends to an internal list. No SQL exists yet.
+2. await calls then. The compiler turns that list into SQL for the dialect. Identifiers are quoted. Every value becomes a binding. Knex writes `?` in its own form and rewrites that to `$1`, `$2` for the pg driver. `toSQL().toNative()` shows the driver form.
+3. Before sending, an undefined binding throws, and no SQL is sent.
+4. Knex takes a connection from its pool (tarn, configured by `pool` in the knexfile), emits a query event with the SQL and bindings, and calls the driver. Query counts in this lesson come from that event.
+5. The driver returns rows. A select resolves to those rows. An insert or update resolves to whatever `returning()` asked for. Then the connection is released.
 
-**Bindings vs `toString()`.** `toSQL()` returns placeholders plus a bindings array. That is what goes over the wire, and it is why a value can never change the shape of the SQL. `toString()` inlines the values with escaping, for display only. Do not send its output to the database. Identifiers such as table and column names are quoted by the builder, but they are not bindings. When a column name comes from user input, map it through an allow-list yourself.
+**Bindings versus toString.** `toSQL()` is placeholders plus a bindings array. That is what goes on the wire, so a value cannot change the shape of the SQL. `toString()` inlines values for logs only. Do not send that string to the database. Table and column names are quoted, but they are not bindings. If a column name comes from user input, map it through an allow-list.
 
-**`knex.raw` and its bindings.** `knex.raw(sql, bindings)` takes `?` positional or `:name` named placeholders (and `??` for an identifier), and binds them the same way as the builder. You can use a `knex.raw` fragment inside a builder (`.select(knex.raw('count(distinct c.id)::int as n'))`), so you only drop to raw SQL for the parts the builder has no method for, such as window functions, `FILTER`, casts or `array_agg`.
+**knex.raw.** `knex.raw(sql, bindings)` takes `?` or named `:name` placeholders, and `??` for an identifier. You can drop a raw fragment inside a builder, for a window function, a FILTER clause, a cast, or array_agg, and the bindings still hold.
 
-**Migrations.** A migration file exports `up(knex)` and `down(knex)`. Here is what the CLI does:
-
-1. It reads `knexfile.js`, using the environment named by `NODE_ENV`, or `development`.
-2. It creates `knex_migrations` (`id`, `name`, `batch`, `migration_time`) and `knex_migrations_lock` if they are missing.
-3. It takes the lock row, so that two deploys cannot migrate at once.
-4. It runs each pending file in name order. Each one runs inside a transaction unless the file exports `config = { transaction: false }`, or the knexfile sets `disableTransactions`.
-5. It records the files with a new batch number. `migrate:latest` runs everything pending as one batch, and `migrate:up` runs only the next file. `migrate:rollback` undoes the **last batch** by calling `down()` in reverse order.
+**Migrations.** A file exports `up(knex)` and `down(knex)`. The CLI reads knexfile.js for the environment named by NODE_ENV, or development. It creates `knex_migrations` (id, name, batch, migration_time) and `knex_migrations_lock` if they are missing. It takes the lock so two deploys cannot migrate at once. It runs each pending file in name order, each inside a transaction unless the file sets `config = { transaction: false }` or the knexfile sets `disableTransactions`. It records them under one new batch number. `migrate:latest` runs everything pending as one batch. `migrate:up` runs only the next file. `migrate:rollback` undoes the last batch by calling down in reverse.
 
 text
 
@@ -75,9 +54,10 @@ id name                  batch  ────────────────
 2  …_add_posts_feed_index 2     ← runs as batch 2   ← down() runs, row deleted
 ```
 
-Seeds are different. A seed file exports `seed(knex)`. `seed:run` runs every file in the seeds directory, in name order, **every time**, and records nothing. A seed must therefore reset its own tables, here with `TRUNCATE … RESTART IDENTITY CASCADE`.
 
-**Transactions and savepoints.** `knex.transaction(async (trx) => { … })` acquires one connection and sends `BEGIN`. `trx` is a builder factory bound to that connection: `trx('posts')` instead of `knex('posts')`. When the callback resolves, Knex sends `COMMIT`. When it throws, Knex sends `ROLLBACK` and rejects with your error. Calling `trx.transaction(...)` inside starts a **savepoint**:
+Seeds are different. A seed file exports `seed(knex)`. `seed:run` runs every file in the seeds directory, in name order, every time, and records nothing. A seed must reset its own tables first, here with TRUNCATE and RESTART IDENTITY CASCADE.
+
+**Transactions.** `knex.transaction(async (trx) => { ... })` takes one connection and sends BEGIN. `trx('posts')` is a builder bound to that connection. If the callback resolves, Knex sends COMMIT. If it throws, Knex sends ROLLBACK and rejects with your error. Calling `trx.transaction` inside starts a savepoint.
 
 text
 
@@ -91,15 +71,16 @@ BEGIN;
 COMMIT;                           ← outer work ('Kept') is saved
 ```
 
-Without a callback, `await knex.transaction()` returns a `trx` that you finish yourself with `trx.commit()` or `trx.rollback()`.
 
-**When a query builder beats an ORM.** An ORM is a good fit when a request loads an object graph by id, changes a few fields and saves. A query builder fits better when the result has no class of its own. The canonical query here is a good example: a projection of four tables with two aggregates. In Knex it is one `GROUP BY` query whose SQL you can read line by line (Example 4). Lesson 79 needed a `literal()` sub-query in Sequelize and a `@VirtualColumn` in TypeORM to get the same count. Three cases where the builder is the better tool:
+A real BEGIN happens only once on that connection. If the inner callback throws, Knex rolls back to the savepoint, which undoes only the inner statements, and the outer transaction can still commit. Without a callback, `await knex.transaction()` returns a trx you finish yourself with commit or rollback.
 
-- **Reporting and aggregate queries.** `count(distinct …)`, `array_agg … FILTER`, `GROUP BY` (Example 4).
-- **Dynamic filters.** Each optional filter adds one parameterised clause, and `.modify()` keeps it in one chain (Example 5).
-- **CTEs and window functions.** `.with()` plus `knex.raw` for the window expression, with bindings intact (Example 6).
+**When a builder beats an ORM.** An ORM fits load-by-id, change a few fields, save. A builder fits a result that has no class of its own: a projection across tables, dynamic filters, or a GROUP BY. Three cases:
 
-What you give up: relation loading is your code (Example 7 batches it by hand), and nothing maps rows to classes or tracks changes.
+- Reporting and aggregates: count distinct, array_agg with FILTER, GROUP BY.
+- Dynamic filters: each optional filter adds one parameterized clause, and `modify` keeps it one chain.
+- CTEs and window functions: `with` plus `knex.raw` for the window expression, bindings intact.
+
+What you give up: relation loading is your code, and nothing maps rows to classes or tracks changes.
 
 ## Code examples
 
@@ -682,55 +663,62 @@ const { knex, queries } = require('./db');
 
 ## Common mistakes & gotchas
 
-- **Forgetting that a builder is lazy and reusable.** Nothing runs until `await` or `.then`. A builder you `await` twice runs twice. Build a fresh one per call (`listPosts(filters)` in Example 5).
-- **Using `toString()` output as SQL.** It is for logs. Execution always uses `{ sql, bindings }`.
-- **Interpolating values into `knex.raw` or `whereRaw`.** Pass `?`, `:name` or `??` bindings, never `` `…${value}…` ``.
-- **Counting across two 1-N joins.** Comments × tags fan out, so `count(c.id)` gave 4 for a post with 2 comments. Use `count(distinct …)` or a sub-query.
-- **`whereIn` with an empty array.** It does not throw. It silently matches nothing (`1 = 0`), and `whereNotIn([])` matches everything (`1 = 1`).
-- **Expecting numbers from `count()`.** It returns `'4'`, a string.
-- **Running a query with `knex` inside a transaction callback.** Only `trx(...)` queries are in the transaction. `knex(...)` uses another connection (Example 8, part 3).
-- **Seeds that append.** `seed:run` re-runs every seed file each time, so a seed without a `TRUNCATE`/`del()` first duplicates rows or hits unique constraints.
-- **`CREATE INDEX CONCURRENTLY` in a normal migration.** PostgreSQL rejects it inside a transaction, so the file needs `exports.config = { transaction: false }`.
-- **N+1 through a loop of `first()` calls.** Batch with `whereIn` and group in JS, or JOIN.
+- **A builder is lazy and reusable.** Nothing runs until await or then. Awaiting the same builder twice runs it twice. Build a fresh one per call.
+- **Sending toString() to the database.** It is for logs. Execution uses the SQL plus the bindings array.
+- **Interpolating into knex.raw or whereRaw.** Pass `?`, `:name`, or `??`. Never splice the value into the string.
+- **Counting across two one-to-many joins.** Comments times tags fans out. Use count distinct, or a subquery.
+- **whereIn with an empty array.** It does not throw. It matches nothing (`1 = 0`). whereNotIn of an empty list matches everything (`1 = 1`).
+- **Expecting a number from count().** It returns a string, because PostgreSQL count is bigint and pg returns that as text.
+- **Using knex inside a transaction callback.** Only `trx(...)` is in the transaction. `knex(...)` uses another connection.
+- **Seeds that append.** seed:run re-runs every file every time. Without a TRUNCATE or delete first, rows duplicate or hit a unique constraint.
+- **CREATE INDEX CONCURRENTLY inside a normal migration.** PostgreSQL rejects it inside a transaction. That file needs `exports.config = { transaction: false }`.
+- **A loop of first() calls.** That is N+1. Batch with whereIn and group in JavaScript, or join.
 
 ## Best practices
 
-- Create one Knex instance per process (`db.js`) and share it. It owns the pool, so call `knex.destroy()` on shutdown.
-- Subscribe to `knex.on('query')` in development and tests to log and count queries per request.
-- Keep migrations small and reversible. Write a real `down()`, and test `migrate:rollback` followed by `migrate:latest` in CI.
-- Opt out of the migration transaction only for statements that require it (`CONCURRENTLY`), and make such files idempotent (`IF NOT EXISTS`).
-- Make seeds reset their own tables, and never run them against production data.
-- Use the builder for structure and `knex.raw` fragments for SQL features it lacks (window functions, `FILTER`, casts), always with bindings.
-- Use the callback form `knex.transaction(async (trx) => …)` so commit and rollback cannot be forgotten. Use nested `trx.transaction()` when part of the work may fail without undoing the rest.
-- Cast aggregates in SQL (`::int`) when the value fits in a JS number.
+- One Knex instance per process. It owns the pool. Call `knex.destroy()` on shutdown.
+- In development and tests, subscribe to the query event so you can log and count queries per request.
+- Small, reversible migrations. Write a real down, and test rollback then latest.
+- Turn the migration transaction off only for statements that require it, such as CONCURRENTLY, and make those files idempotent with IF NOT EXISTS.
+- Seeds reset their own tables. Do not run them against production data.
+- Use the builder for structure and knex.raw, with bindings, for the SQL it has no method for.
+- Prefer the callback form of `knex.transaction` so commit and rollback cannot be forgotten. Nested `trx.transaction` is the savepoint when part of the work may fail without undoing the rest.
+- Cast aggregates in SQL when the value fits in a JavaScript number.
 
 ## ⭐ Interview lens
 
 > **Q: “Query builder or ORM: how do you choose?”**
-> A: An ORM is a good fit for load-by-id, change and save flows over an object graph, where it handles relation loading and persistence. A query builder fits reporting and list endpoints, where the result is a projection, the filters are dynamic, or you need CTEs, window functions or `GROUP BY`. In those cases you want to read and control the SQL. Knex keeps every value a binding and gives you migrations and transactions, but relation loading and row-to-object mapping are your code. *Trap:* "query builders are just raw SQL with extra steps". The builder's job is composing clauses safely, which string templates do badly.
+> A: An ORM maps tables to objects. It fits load by id, change a few fields, and save, because it loads relations and writes the updates for you. A query builder such as Knex fits when the result is a projection: a report, a list with optional filters, a GROUP BY, a CTE, or a window function. You chain methods, and await compiles one parameterized statement you can read. For example, a published-posts page that joins author, comments, and tags is one GROUP BY in Knex, with each filter added only if the caller sent it, and every value stays a binding. The limit is what you take back on. Knex does not load relations or track changes. A loop of queries per row is still N+1, and you fix it yourself with whereIn or a join. "A query builder is just raw SQL with extra steps" misses the point. The job is composing clauses safely, which string templates do badly.
 
 > **Q: “What does `whereIn('id', [])` generate in Knex?”**
-> A: `where 1 = 0`, so it matches no rows and does not throw. `whereNotIn('id', [])` generates `where 1 = 1`, which matches every row. Treat an empty list explicitly before you build the query.
+> A: `whereIn('id', [])` compiles to `where 1 = 0`, so it matches no rows and does not throw. The empty list is not sent as a broken `IN ()`. Knex rewrites it into a condition that is always false. `whereNotIn('id', [])` is the opposite: `where 1 = 1`, which matches every row. For example, a filter "posts with these tag ids" fed an empty array from a client silently returns nothing, and the NOT IN form silently returns the whole table. The limit is that Knex will not guess what an empty list means. If empty should mean "no filter", skip the whereIn. If it should mean "no rows", the 1 = 0 behavior is what you want, but decide that in your code before you build the query, especially for a delete or an update.
 
 > **Q: “How do nested transactions work in Knex?”**
-> A: `trx.transaction()` inside a transaction issues `SAVEPOINT <name>`. If the inner callback throws, Knex sends `ROLLBACK TO SAVEPOINT`, which undoes only the inner statements, and the outer transaction can still commit. A real `BEGIN` happens only once per connection.
+> A: A Knex transaction callback takes one pooled connection and sends BEGIN. Queries on the trx argument use that connection. When the callback resolves, Knex sends COMMIT. When it throws, Knex sends ROLLBACK. A nested `trx.transaction` does not send a second BEGIN. It sends SAVEPOINT. If the inner callback throws, Knex rolls back to that savepoint, so only the inner statements are undone, and the outer callback can catch the error and still commit. For example, an insert of a post can succeed while an inner tag insert that violates a foreign key is rolled back to the savepoint, and the post remains. The limit is the connection. A query that uses the global knex object inside the callback runs on another pooled connection, sees only committed data, and is not rolled back. The savepoint name is an internal id. Do not depend on it.
 
 > **Q: “Walk me through `knex migrate:latest` and `migrate:rollback`.”**
-> A: The CLI loads the knexfile and ensures `knex_migrations` and `knex_migrations_lock` exist. It takes the lock, runs every pending file in name order, each in a transaction unless the file opts out, and records them all under one new batch number. `rollback` takes the highest batch, calls each file's `down()` in reverse order, and deletes those rows. Seeds are separate: `seed:run` re-runs every seed file each time and records nothing.
+> A: `migrate:latest` loads the knexfile, creates `knex_migrations` and `knex_migrations_lock` if needed, and takes the lock so two deploys cannot migrate together. It runs every pending file in filename order. Each file runs in a transaction unless that file opts out, which you need for CREATE INDEX CONCURRENTLY. All of those files are recorded under one new batch number. `migrate:rollback` takes the highest batch, calls each file's down in reverse order, and deletes those rows. `migrate:up` is the smaller form: only the next file. For example, up once then latest leaves batch 1 as the first file and batch 2 as the rest, and rollback undoes only batch 2. The limit is seeds. `seed:run` is not a migration. It re-runs every seed file every time and records nothing, so a seed must clear its own tables or it duplicates rows.
 
 ## Cheat-card
 
-- **Version:** Knex 3.3.0 (npm `latest`, stable, 2026-06-26) + `pg` 8.23.1.
-- **Inspect:** `.toSQL()` → `{ sql: '… ?', bindings }`; `.toSQL().toNative()` → `$1…`; `.toString()` = inlined, logs only.
-- **Run:** `await builder` → rows; `.first()` → object or `undefined` (`limit 1`); `count()` → string.
-- **Raw:** `knex.raw('… ? …', [v])`, `:name` named, `??` identifier; mix into builders via `.select(knex.raw(…))`.
-- **Dynamic filters:** `.modify((qb) => { if (f.x) qb.where(...) })`.
-- **CTE:** `knex.with('name', (qb) => …).from('name')`.
-- **Edge cases:** `whereIn([])` → `1 = 0`; `whereNotIn([])` → `1 = 1`; `undefined` binding throws before sending.
-- **Migrations:** `migrate:make`, `migrate:up`, `migrate:latest` (one batch), `migrate:rollback` (last batch), `migrate:list`; `knex_migrations` (id, name, batch, migration_time) + `_lock`; opt out with `exports.config = { transaction: false }`.
-- **Seeds:** `seed:make`, `seed:run` re-runs every seed file each time and records nothing; reset tables first.
-- **Transactions:** `knex.transaction(async (trx) => …)`; nested `trx.transaction()` = `SAVEPOINT`; manual `await knex.transaction()` + `commit()` / `rollback()`.
-- **N+1 fix:** one `whereIn` per relation, then group in JS: 9 queries → 3.
+- **Inspect:** `toSQL()` is SQL with `?` plus bindings. `toNative()` is `$1` style. `toString()` is inlined, for logs only.
+- **Run:** await the builder for rows. `first()` is one object or undefined, and it adds limit 1. `count()` returns a string.
+- **Raw:** `knex.raw` with `?`, `:name`, or `??`. Mix a fragment in with `.select(knex.raw(...))`.
+- **Dynamic filters:** `modify` adds a where only when the filter is present.
+- **CTE:** `knex.with('name', ...).from('name')`.
+- **Empty lists:** whereIn of `[]` is `1 = 0`. whereNotIn of `[]` is `1 = 1`. An undefined binding throws before send.
+- **Migrations:** make, up, latest (one batch), rollback (last batch). History table plus a lock table. Opt out of the transaction per file.
+- **Seeds:** seed:run re-runs every file and records nothing. Reset tables first.
+- **Transactions:** callback form commits or rolls back. Nested trx.transaction is a savepoint.
+- **N+1:** one whereIn per relation, then group in JavaScript. The measured loop was 9 queries, and the batch was 3.
+
+## Good to know
+
+- Knex 3.3.0, published 2026-06-26, is the stable npm latest used here, with pg 8.23.1, Node v24.19.0, and PostgreSQL 18.4.
+- Knex CLI 3.3.0 prints "Using environment: development" three times for one make command.
+- In the sample run the savepoint was named trx4, from Knex's internal transaction id, and the inner failure was SQLSTATE 23503. Do not depend on the savepoint name.
+- An undefined where value throws before SQL is sent. TypeORM 0.3 silently dropped that condition. TypeORM 1.x throws, as Knex does (lesson 79, Example 19).
+- The whereIn batch is the same shape as Sequelize `separate: true` and TypeORM `relationLoadStrategy: 'query'` in lesson 79.
 
 ---
 

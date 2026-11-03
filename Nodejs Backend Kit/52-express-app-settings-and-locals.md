@@ -13,62 +13,53 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`app.set` writes a named setting on the application, and Express reads a handful of those names while it handles a request. `trust proxy` decides whether `req.ip` comes from the socket or from a forwarded header. `query parser` decides whether `req.query` is flat or nested. `app.locals` is one object for the life of the process, and `res.locals` is a new object per request. Settings exist so behavior like that is configuration instead of a fork of Express. The trade-off is that a few settings are read only once, when the first route is added, so changing them later does nothing.
+
 ## Why it matters
 
-A handful of `app.set(...)` lines decide things that look like they belong to your route code:
+A few `app.set` lines change things that look like they belong in your route:
 
-- **Who the client is.** `req.ip`, `req.protocol` and `req.hostname` come from the TCP socket or from `X-Forwarded-*` headers, depending on `trust proxy`. Get it wrong behind a load balancer and every client has the balancer's IP, so a rate limiter keyed on `req.ip` puts all users in one bucket. Set it to `true` on a server that is reachable directly and any client can choose its own `req.ip` by sending a header.
-- **What `req.query` looks like.** Express 5 changed the default query parser from `"extended"` to `"simple"`, so `?filter[status]=open` is no longer a nested object. Code ported from Express 4 silently reads `undefined`.
-- **What the response carries.** `etag`, `x-powered-by` and the `json *` settings change headers and bodies of every response.
-- **Which URLs match.** `case sensitive routing` and `strict routing` decide whether `/Users`, `/users` and `/users/` are the same route, and they only work if they are set at the right moment.
+- **Who the client is.** `req.ip`, `req.protocol`, and `req.hostname` come from the TCP socket, or from `X-Forwarded-*` headers, depending on `trust proxy`. Behind a load balancer, the wrong setting puts every user in one rate-limit bucket, because they all share the balancer's IP. Set it to `true` on a server that is reachable directly, and any client can pick its own `req.ip` by sending a header.
+- **What `req.query` looks like.** Express 5 changed the default query parser from `"extended"` to `"simple"`, so `?filter[status]=open` is no longer a nested object. Code ported from Express 4 reads `undefined`.
+- **What the response carries.** `etag`, `x-powered-by`, and the `json` settings change headers and bodies of every response.
+- **Which URLs match.** `case sensitive routing` and `strict routing` decide whether `/Users`, `/users`, and `/users/` are the same route. They only work if you set them before the first route.
 
-`app.locals` and `res.locals` look alike but have different lifetimes. Putting the current user on `app.locals` shows one user's data to another user as soon as two requests overlap. Example 7 shows it happening.
+`app.locals` and `res.locals` look alike and do not share a lifetime. Putting the current user on `app.locals` shows one user's data to the next as soon as two requests overlap. Example 7 shows it.
 
 ## The concept, simply
 
-Every Express application object has a **settings table**, `app.settings`: a plain object (created with `Object.create(null)`) that maps a name to a value. You write to it with `app.set(name, value)` and read from it with `app.get(name)`. You can store any name you like there (`app.set('title', 'Shop API')`). About a dozen names are **reserved**: Express's own code reads them while it handles a request, so changing them changes behaviour.
+Every Express app has a settings table, `app.settings`. It is a plain object created with `Object.create(null)`. `app.set(name, value)` writes it. `app.get(name)` reads it. You can store any name, such as `app.set('title', 'Shop API')`. About a dozen names are reserved. Express reads them while it handles a request, so changing them changes behavior.
 
-`app.get` has two meanings. With **one argument** it is the settings getter: `app.get('etag')` returns `'weak'`. With **a path and one or more handlers** it registers a route for `GET`: `app.get('/users', handler)`. Express checks the number of arguments to decide which one you meant.
+`app.get` has two meanings. With one argument it reads a setting: `app.get('etag')` returns `'weak'`. With a path and one or more handlers it registers a GET route: `app.get('/users', handler)`. Express tells them apart by the number of arguments.
 
-`app.enable(name)` is `app.set(name, true)` and `app.disable(name)` is `app.set(name, false)`. `app.enabled(name)` and `app.disabled(name)` return `true` or `false` based on whether the stored value is truthy.
+`app.enable(name)` is `app.set(name, true)`. `app.disable(name)` is `app.set(name, false)`. `app.enabled` and `app.disabled` report whether the stored value is truthy.
 
-There are two locals objects:
+There are two locals objects.
 
-- **`app.locals`** is one object per application. It lives as long as the process. Express passes its properties to every template that `res.render` draws. Use it for values that are the same for every request: the site name, a build id, helper functions.
-- **`res.locals`** is a new object for each request. It is discarded with the response. Middleware puts request-specific data on it (the logged-in user, a CSRF token, validated input), and `res.render` passes those to the template as well.
+- `app.locals` is one object per application. It lives as long as the process. `res.render` passes its properties into every template. Use it for values that are the same on every request: the site name, a build id, a helper function.
+- `res.locals` is a new object for each request, discarded with the response. Middleware puts the logged-in user, a CSRF token, or validated input there. `res.render` passes those into the template too.
 
 ## How it works
 
-1. **`express()` fills in the defaults.** The constructor creates `app.settings` and sets: `x-powered-by` `true`, `etag` `'weak'`, `env` from `NODE_ENV` (or `'development'`), `query parser` `'simple'` (`'extended'` in Express 4; changed in v5), `subdomain offset` `2`, `trust proxy` `false`, `views` `path.resolve('views')` (so `<cwd>/views`), `jsonp callback name` `'callback'`, and `view cache` `true` only when `env` is `'production'`. Every other reserved setting (`case sensitive routing`, `strict routing`, `json spaces`, `json replacer`, `json escape`, `view engine`) starts out `undefined`.
-2. **Three settings are compiled.** When you `app.set('etag' | 'query parser' | 'trust proxy', value)`, Express also turns `value` into a function and stores it under a second name: `etag fn`, `query parser fn`, `trust proxy fn`. Request code calls these functions; it never looks at your original value again. That is why one setting can accept a boolean, a string, a number, a list or a function: they all compile into the same kind of function.
-3. **Each setting is read at a fixed moment.**
-   - `trust proxy fn` is read every time you access `req.ip`, `req.ips`, `req.protocol`, `req.secure`, `req.host` or `req.hostname`.
-   - `etag fn` is read by `res.send` (and so by `res.json`) when it sends a body.
-   - `json spaces`, `json replacer` and `json escape` are read by every `res.json` call.
-   - `x-powered-by` is read once per request when the app starts handling it.
-   - `query parser fn` is read every time you access `req.query` in Express 5, because `req.query` is a getter. Express 4 read it once, when the app's router was created.
-   - `case sensitive routing` and `strict routing` are read **once**, when the app's router is created. The router is created by the first `app.use`, `app.get`, `app.route` (or any other route method) call. Changing either setting after that has no effect (Example 9).
-   - `env` is read at construction for `view cache`, and again by the default error handler for each error.
-4. **Mounting links two settings tables.** `app.use('/admin', admin)` emits a `mount` event on `admin`. Express then calls `Object.setPrototypeOf(admin.settings, parent.settings)`. A sub-app therefore inherits a parent setting only where it has **no value of its own**. Because the constructor already gave every sub-app its own `etag`, `query parser`, `x-powered-by`, `env` and `views`, those are not inherited. Settings without a default (`json spaces`, `view engine`, your own names) are inherited. `trust proxy` is a deliberate exception: a sub-app that never set it drops its own default on mount and uses the parent's (Example 8).
-5. **Locals are merged at render time.** `res.render(view, opts)` calls `app.render` with `{ ...app.locals, ...res.locals, ...opts }`. So a value passed to `res.render` overrides `res.locals`, which overrides `app.locals`. `app.locals.settings` is set to `app.settings` by the constructor, which is why every template can see a `settings` variable. `res.locals` is created once per request (`Object.create(null)`) by the first app that handles it. A mounted sub-app reuses the same object, so data set in parent middleware is visible in the sub-app. `app.locals` is never inherited: each app has its own.
+1. `express()` creates `app.settings` and fills the defaults. `x-powered-by` is `true`. `etag` is `'weak'`. `env` comes from `NODE_ENV`, or `'development'`. `query parser` is `'simple'` on Express 5 and `'extended'` on Express 4. `subdomain offset` is `2`. `trust proxy` is `false`. `views` is `path.resolve('views')`, so `<cwd>/views`. `jsonp callback name` is `'callback'`. `view cache` is `true` only when `env` is `'production'`. The other reserved names start `undefined`: `case sensitive routing`, `strict routing`, `json spaces`, `json replacer`, `json escape`, and `view engine`.
+2. Three settings are compiled into functions. When you set `etag`, `query parser`, or `trust proxy`, Express stores a function under `etag fn`, `query parser fn`, or `trust proxy fn`. Request code calls the function. It does not read your original value again. That is why one setting can be a boolean, a string, a number, a list, or a function.
+3. Each setting is read at a fixed moment. `trust proxy fn` is read every time you access `req.ip`, `req.ips`, `req.protocol`, `req.secure`, `req.host`, or `req.hostname`. `etag fn` is read by `res.send`, and so by `res.json`, when it sends a body. `json spaces`, `json replacer`, and `json escape` are read on every `res.json`. `x-powered-by` is read once per request as handling starts. On Express 5, `query parser fn` is read every time you access `req.query`, because `req.query` is a getter. Express 4 read it once, when the app router was created. `case sensitive routing` and `strict routing` are read once, when the router is created, which is the first `app.use`, `app.get`, `app.route`, or other route call. Changing them after that does nothing. Example 9 shows it. `env` is read at construction for `view cache`, and again by the default error handler.
+4. Mounting links the two settings tables. `app.use('/admin', admin)` makes Express call `Object.setPrototypeOf(admin.settings, parent.settings)`. The sub-app inherits a parent setting only where it has no value of its own. The constructor already set `etag`, `query parser`, `x-powered-by`, `env`, and `views` on the sub-app, so those are not inherited. Settings with no default, such as `json spaces`, `view engine`, and your own names, are inherited. `trust proxy` is the exception. A sub-app that never set it drops its own default on mount and uses the parent's. Example 8 shows this.
+5. Locals are merged when you render. `res.render` passes `{ ...app.locals, ...res.locals, ...opts }`. A value passed to `res.render` wins over `res.locals`, which wins over `app.locals`. The constructor sets `app.locals.settings` to `app.settings`, so every template can see `settings`. `res.locals` is created once per request, with `Object.create(null)`, by the first app that handles it. A mounted sub-app reuses that same object, so parent middleware is visible in the sub-app. `app.locals` is never inherited. Each app has its own.
 
-**`trust proxy` values.** The setting tells Express which addresses belong to proxies you control. `X-Forwarded-For` is a list that each proxy appends to: `client, proxy1, proxy2`. Express (through the `proxy-addr` package) walks the list from the right, starting with the socket's address, and stops at the first address that is **not** trusted. That address becomes `req.ip`. `req.ips` is every address from the client up to (not including) the socket address. When the socket address itself is trusted, `req.protocol` reads `X-Forwarded-Proto` and `req.hostname` reads `X-Forwarded-Host`. The accepted values:
+**`trust proxy`.** This names which addresses are proxies you control. `X-Forwarded-For` is a list each proxy appends to: `client, proxy1, proxy2`. Express, through the `proxy-addr` package, walks that list from the right, starting at the socket address, and stops at the first address that is not trusted. That address is `req.ip`. `req.ips` is every address from the client up to, but not including, the socket address. When the socket address itself is trusted, `req.protocol` reads `X-Forwarded-Proto` and `req.hostname` reads `X-Forwarded-Host`. The values are `false`, which trusts nothing, `true`, which trusts every hop so the client can write the left-most address, a number `n` which trusts the `n` hops closest to the server, a string or array of IPs and subnets such as `'10.0.0.0/8'` plus the names `loopback`, `linklocal`, and `uniquelocal`, or a function `(addr, i) => boolean`.
 
-- `false` (default): trust nothing. `req.ip` is the socket address, and `X-Forwarded-*` is ignored.
-- `true`: trust every hop. `req.ip` is the left-most address, which the client can write itself.
-- a number `n`: trust the `n` hops closest to the server.
-- a string, comma-separated string or array of IPs and subnets (`'10.0.0.0/8'`), plus the names `loopback`, `linklocal` and `uniquelocal`.
-- a function `(addr, i) => boolean`, called for each hop.
+**`etag`.** An ETag is a short id of the response body. A client that cached the body sends it back as `If-None-Match`. If it still matches, Express answers `304 Not Modified` with no body. The default weak tag looks like `W/"<length in hex>-<base64 of a SHA-1, first 27 characters>"` and comes from the `etag` package. `'strong'` drops the `W/` prefix. `false` stops Express adding the header. A function `(body, encoding) => string` computes your own. This covers bodies sent by `res.send` and `res.json` only. `express.static` has its own `etag` option.
 
-**`etag` values.** An ETag is a short identifier of a response body. A client that cached the body sends it back as `If-None-Match`. When it still matches, Express answers `304 Not Modified` with no body. The default weak tag (`W/"<length in hex>-<base64 SHA-1, first 27 chars>"`) comes from the `etag` package. `'strong'` drops the `W/` prefix, and `false` stops Express adding the header. A function `(body, encoding) => string` computes your own. These settings apply only to bodies sent by `res.send`/`res.json`; `express.static` has its own `etag` option.
+**`query parser`.** `'simple'` uses Node's `node:querystring`. Repeated keys become arrays, and brackets stay in the key. `'extended'` uses the `qs` package, so `a[b]=c` becomes `{ a: { b: 'c' } }`. `false` disables parsing and `req.query` is `{}`. A function receives the raw query string and returns the object.
 
-**`query parser` values.** `'simple'` uses Node's `node:querystring`: repeated keys become arrays, and brackets stay part of the key. `'extended'` uses the `qs` package: `a[b]=c` becomes `{ a: { b: 'c' } }`. `false` disables parsing, so `req.query` is `{}`. A function receives the raw query string and returns the object.
+**Views.** `views` is the folder, or an array of folders, where `res.render` looks for templates. `view engine` is the extension Express adds when you call `res.render('home')` with no extension. `app.engine(ext, fn)` registers a function `(filePath, options, callback)` for an extension. Lesson 59 covers real engines.
 
-**`views` and `view engine`.** `views` is the folder, or array of folders, where `res.render` looks for templates. `view engine` is the file extension Express adds when you write `res.render('home')` without one. `app.engine(ext, fn)` registers a function `(filePath, options, callback)` for an extension. Lesson 59 ([Template engines and server-side rendering](59-template-engines-and-server-side-rendering.md)) covers real engines.
+**Routing and JSON.** `case sensitive routing` makes `/Users` and `/users` different. `strict routing` makes `/users` and `/users/` different. `json spaces` and `json replacer` are the third and second arguments to `JSON.stringify`. `json escape` replaces `<`, `>`, and `&` in JSON so a browser that wrongly treats the body as HTML cannot open a tag. `x-powered-by` adds `X-Powered-By: Express`. Turning it off hides one fingerprint. It is not a security control.
 
-**Routing and JSON settings.** `case sensitive routing` makes `/Users` and `/users` different routes. `strict routing` makes `/users` and `/users/` different. `json spaces` and `json replacer` are passed to `JSON.stringify` as its third and second arguments. `json escape` replaces `<`, `>` and `&` in JSON output with `<`, `>` and `&`, so a JSON body that a browser wrongly treats as HTML cannot open a tag. `x-powered-by` adds `X-Powered-By: Express` to every response. Turning it off hides one fingerprint, but it is not a security control.
-
-**`env`.** `app.get('env')` is `process.env.NODE_ENV` at construction time, or `'development'`. With `'production'` Express enables `view cache` and the default error handler sends a generic `Internal Server Error` page instead of the stack trace. With `'test'` the default error handler stops logging errors to stderr (Example 10).
+**`env`.** `app.get('env')` is `process.env.NODE_ENV` at construction, or `'development'`. `'production'` turns on `view cache`, and the default error handler sends a generic Internal Server Error page instead of the stack. `'test'` stops the default error handler from logging to stderr. Example 10 shows both.
 
 ## Code examples
 
@@ -618,57 +609,57 @@ With `NODE_ENV=production` the default 500 page hides the stack and `view cache`
 
 ## Common mistakes & gotchas
 
-- **`trust proxy` set to `true` on a server reachable without the proxy.** The client writes `X-Forwarded-For: 1.2.3.4` and `req.ip` becomes `1.2.3.4`. Rate limits, audit logs and IP allow-lists then trust a value the attacker chose. Use the hop count or the proxy's subnet.
-- **`trust proxy` left at `false` behind a load balancer.** Every `req.ip` is the balancer's address and `req.protocol` is `http` even for HTTPS clients, so `secure` cookies and HTTPS redirects misbehave.
-- **Porting Express 4 code that reads nested query objects.** Express 5's default `'simple'` parser gives `{ 'filter[status]': 'open' }`. Set `app.set('query parser', 'extended')` explicitly if you rely on brackets (lesson 48).
-- **Routing settings after the first route.** `case sensitive routing` and `strict routing` are read when the router is created, so setting them after the first `app.use` or `app.get` does nothing (Example 9).
-- **Assuming a sub-app inherits everything.** Settings that have defaults (`etag`, `x-powered-by`, `query parser`) are not inherited. `app.disable('x-powered-by')` on the parent does not remove the header from routes inside a mounted sub-app (Example 8).
-- **Per-request data on `app.locals`.** It is shared by every request, so concurrent requests overwrite each other (Example 7). Use `res.locals`.
-- **Calling `app.get('/path')` with one argument and expecting a route.** One argument means "read the setting named `/path`". It returns `undefined` and registers nothing.
-- **Expecting `etag: false` to affect static files.** `express.static` has its own `etag` option. The `etag` setting covers `res.send`/`res.json` only.
+- **`trust proxy` set to `true` on a server that is reachable without the proxy.** The client sends `X-Forwarded-For: 1.2.3.4` and `req.ip` becomes `1.2.3.4`. Rate limits, audit logs, and IP allow-lists then trust a value the attacker chose. Use a hop count or the proxy subnet.
+- **`trust proxy` left `false` behind a load balancer.** Every `req.ip` is the balancer, and `req.protocol` stays `http` for HTTPS clients, so secure cookies and HTTPS redirects misbehave.
+- **Porting Express 4 code that reads nested query objects.** Express 5's default `'simple'` parser gives `{ 'filter[status]': 'open' }`. Set `app.set('query parser', 'extended')` if you rely on brackets. Lesson 48 shows the shapes.
+- **Routing settings after the first route.** `case sensitive routing` and `strict routing` are read when the router is created. Setting them after the first `app.use` or `app.get` does nothing. Example 9 shows it.
+- **Assuming a sub-app inherits everything.** Settings that have defaults, such as `etag`, `x-powered-by`, and `query parser`, are not inherited. `app.disable('x-powered-by')` on the parent does not remove the header from a mounted sub-app. Example 8 shows it.
+- **Per-request data on `app.locals`.** It is shared, so concurrent requests overwrite each other. Example 7 shows it. Use `res.locals`.
+- **`app.get('/path')` with one argument.** That reads the setting named `/path`. It returns `undefined` and registers no route.
+- **Expecting `etag: false` to affect static files.** `express.static` has its own `etag` option. The setting covers `res.send` and `res.json` only.
 
 ## Best practices
 
-- **Put every `app.set` at the top of the file that creates the app**, before the first `app.use` or route. Routing settings must be set there, and reading the configuration in one place is easier.
-- **Set `trust proxy` to exactly your proxy topology:** a hop count (`1` for a single load balancer) or the proxy subnets. Never `true` unless the app is unreachable except through the proxy.
-- **Set `query parser` explicitly** (`'simple'` or `'extended'`), so the behaviour does not depend on the Express major version.
-- **Keep `app.locals` for constants** (site name, asset version, formatting helpers) and put anything derived from the request on `res.locals`.
-- **Configure each sub-app or Router itself** for routing options and for `x-powered-by`. Don't rely on inheritance for settings that have defaults.
-- **Set `NODE_ENV=production` in production.** Without it, the default error handler sends stack traces to clients.
-- **Use your own setting names sparingly.** `app.set('title', …)` works, but a config module that you import is easier to type-check and test.
+- Put every `app.set` at the top of the file that creates the app, before the first `app.use` or route. Routing settings only work there.
+- Set `trust proxy` to your real topology. A hop count of `1` for one load balancer, or the proxy subnets. Do not use `true` unless the app is unreachable except through the proxy.
+- Set `query parser` to `'simple'` or `'extended'` explicitly, so a major upgrade does not change it under you.
+- Keep `app.locals` for constants. Put anything derived from the request on `res.locals`.
+- Configure routing options and `x-powered-by` on each sub-app or Router. Do not rely on inheritance for settings that have defaults.
+- Set `NODE_ENV=production` in production. Without it, the default error handler sends stack traces to clients.
+- Use your own setting names sparingly. `app.set('title', ...)` works, but a config module you import is easier to test.
 
 ## ⭐ Interview lens
 
 > **Q: “What does `app.get('trust proxy')` return, and how is that different from `app.get('/x', fn)`?”**  
-> A: With one argument `app.get` reads the settings table, so it returns the stored value (`false` by default). With a path and a handler it registers a `GET` route. Express decides by the argument count. *Trap:* `app.get('/x')` with no handler is a settings read that returns `undefined`.
+> A: With one argument, `app.get` reads the settings table. `app.get('trust proxy')` returns the stored value, which is `false` until you change it. With a path and a handler, `app.get('/x', fn)` registers a GET route. Express decides by the argument count. The same split is why `app.set('json spaces', 2)` changes how `res.json` indents, while `app.get('/health', handler)` is a route. The trap is `app.get('/x')` with no handler. That is a settings read of the name `/x`. It returns `undefined` and registers nothing, so a later GET of `/x` is a 404.
 
 > **Q: “Your API runs behind one AWS load balancer and `req.ip` is always 10.x. What do you change, and why not `true`?”**  
-> A: `app.set('trust proxy', 1)`, or the balancer's subnet. Express then skips the one trusted hop and takes the next address from `X-Forwarded-For`, and `req.protocol` reads `X-Forwarded-Proto`. `true` trusts every hop, so the left-most address wins, and a client can put any value there.
+> A: `req.ip` is the socket address while `trust proxy` is `false`, so behind one load balancer every client looks like that balancer, often a `10.x` address. Set `app.set('trust proxy', 1)`, or set the balancer's subnet. Express walks `X-Forwarded-For` from the right, skips the one trusted hop, and takes the next address as `req.ip`. Because the socket is then trusted, `req.protocol` reads `X-Forwarded-Proto` and `req.hostname` reads `X-Forwarded-Host`. Do not set `true`. `true` trusts every hop, so the left-most address wins, and the client can write any IP there. Rate limits and audit logs would then trust an attacker-chosen value.
 
 > **Q: “What is the difference between `app.locals` and `res.locals`?”**  
-> A: `app.locals` is one object per app, kept for the life of the process and merged into every render. `res.locals` is created for each request and dropped with the response. `res.render` merges `app.locals`, then `res.locals`, then the render options, with later values winning. Request data on `app.locals` leaks between concurrent requests.
+> A: `app.locals` is one object per app. It lives for the process, and `res.render` merges it into every template. Use it for the site name or a build id. `res.locals` is created for one request and thrown away with the response. Middleware puts the logged-in user or validated input there. The render merge is `app.locals`, then `res.locals`, then the object you pass to `res.render`, and the later value wins. The limit of `app.locals` for request data is sharing. If Alice's handler sets `app.locals.user` and awaits a database call, Bob's request can overwrite it before Alice reads it back. Example 7 shows that leak. Nothing throws. Both responses are 200.
 
 > **Q: “A team ports an Express 4 app to 5 and `req.query.filter.status` throws. Why?”**  
-> A: Express 5's default query parser is `'simple'` (Node's `querystring`), so `filter[status]=open` stays a flat key `'filter[status]'` and `req.query.filter` is `undefined`. Express 4 defaulted to `'extended'` (`qs`). Fix: `app.set('query parser', 'extended')` before the routes, or change the URL format.
-
-> **Q: “Does a sub-app mounted with `app.use` inherit the parent's settings?”**  
-> A: Only where it has no value of its own: Express links the sub-app's settings to the parent's through the prototype chain on mount. Settings with defaults (`etag`, `x-powered-by`, `query parser`) are already set on the sub-app, so they are not inherited; `trust proxy` is the documented exception. Routing options are read when the sub-app's router is created, which is usually before the mount.
+> A: Express 5's default query parser is `'simple'`, which is Node's `querystring`. `?filter[status]=open` stays one flat key, `'filter[status]'`, so `req.query.filter` is `undefined` and reading `.status` throws. Express 4 defaulted to `'extended'`, the `qs` package, which built `{ filter: { status: 'open' } }`. Fix it with `app.set('query parser', 'extended')` before the routes, or change the client to a flat query. Set the name explicitly either way, so the shape does not depend on the major version. On Express 5 the getter reads the setting on every access. On Express 4 the parser was captured when the router was created, so a late `app.set` does not change it.
 
 ## Cheat-card
 
-- **`app.set(name, value)`** writes `app.settings`; **`app.get(name)`** (one argument) reads it; `app.get(path, fn)` is a route.
-- **`app.enable` / `app.disable`** = set `true` / `false`; **`app.enabled` / `app.disabled`** test truthiness.
-- **Defaults:** `x-powered-by` true, `etag` `'weak'`, `env` NODE_ENV or `'development'`, `query parser` `'simple'` (v4: `'extended'`), `subdomain offset` 2, `trust proxy` false, `views` `<cwd>/views`.
-- **`trust proxy`:** `false` / `true` / hop count / IPs, subnets, `loopback` / function. Affects `req.ip`, `ips`, `protocol`, `secure`, `hostname`.
-- **`etag`:** `'weak'` (default) / `'strong'` / `false` / `(body, encoding) => tag`; `res.send` only, not `express.static`.
-- **`query parser`:** `'simple'` (flat), `'extended'` (nested, `qs`), `false` (`{}`), or a function. v5 reads it per access; v4 once.
-- **Routing settings** (`case sensitive routing`, `strict routing`) must be set before the first route.
-- **JSON:** `json spaces`, `json replacer`, `json escape` (escapes `<` `>` `&`).
-- **Locals:** `app.locals` per app, permanent; `res.locals` per request. Render merge: app → res → options.
-- **Sub-apps** inherit only settings they have not set themselves; `trust proxy` is inherited anyway; `app.locals` never.
-- **`NODE_ENV=production`:** `view cache` on, no stack trace in the default 500 page; `test`: no error logging.
+- `app.set(name, value)` writes `app.settings`. `app.get(name)` with one argument reads it. `app.get(path, fn)` is a route.
+- `app.enable` and `app.disable` set `true` and `false`. `app.enabled` and `app.disabled` test truthiness.
+- Defaults: `x-powered-by` true, `etag` `'weak'`, `env` from `NODE_ENV` or `'development'`, `query parser` `'simple'` on v5 and `'extended'` on v4, `subdomain offset` 2, `trust proxy` false, `views` `<cwd>/views`.
+- `trust proxy`: `false`, `true`, a hop count, IPs or subnets, `loopback`, or a function. It affects `req.ip`, `req.ips`, `req.protocol`, `req.secure`, and `req.hostname`.
+- `etag`: `'weak'`, `'strong'`, `false`, or `(body, encoding) => tag`. It applies to `res.send` and `res.json`, not to `express.static`.
+- `query parser`: `'simple'` is flat, `'extended'` is nested via `qs`, `false` yields `{}`, or pass a function. Express 5 reads it on each access. Express 4 read it once.
+- Set `case sensitive routing` and `strict routing` before the first route.
+- JSON: `json spaces`, `json replacer`, and `json escape`, which escapes `<`, `>`, and `&`.
+- `app.locals` is per app and permanent. `res.locals` is per request. Render merge order is app, then res, then the options you pass.
+- A sub-app inherits only settings it has not set. `trust proxy` is inherited anyway. `app.locals` is never inherited.
+- `NODE_ENV=production` turns `view cache` on and hides the stack in the default 500 page. `test` turns off that error logging.
 
----
+## Good to know
+
+- Does a mounted sub-app inherit the parent's settings? Only where it has no value of its own. Express links `admin.settings` to the parent with `Object.setPrototypeOf` on mount. Defaults already set on the sub-app, including `etag`, `x-powered-by`, and `query parser`, are not inherited. `trust proxy` is the documented exception. Routing options are read when the sub-app's router is created, which is usually before the mount, so a later inherited value does not change matching.
+- `jsonp callback name` defaults to `'callback'`. `view cache` is enabled at construction only when `env` is exactly `'production'`.
 
 ## Learn More
 

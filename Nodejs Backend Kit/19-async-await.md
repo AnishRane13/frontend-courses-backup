@@ -13,41 +13,47 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+async/await is syntax that lets you write promise code top to bottom: an async function always returns a promise, and await pauses that function until the promise settles, then gives you the value or throws the rejection. It exists so try, catch, loops, and early return work with asynchronous results. The trade-off is that the code looks sequential, so independent awaits run one after another unless you start the promises first and wait with Promise.all.
+
 ## Why it matters
 
-`async/await` is how modern Node code reads: top to bottom, like synchronous logic, even though it's fully asynchronous underneath. It removes the nesting of callbacks and the boilerplate of long `.then` chains, and it lets you use ordinary language features — `try/catch`, `for` loops, `if`, early `return` — with asynchronous values. For most day-to-day backend code, this is the pattern you'll write.
+This is the pattern most backend code uses. It removes callback nesting and long then chains, and ordinary try/catch works again.
 
-But its readability is also a trap. Because `await` makes async code *look* sequential, it's dangerously easy to make everything sequential by accident — awaiting three independent requests one after another when they could have run together, turning a 100ms operation into 300ms. Interviewers love this exact scenario: give the candidate a snippet with three awaits and ask how to make it faster. Knowing that `async/await` is just promise syntax, and knowing when to break out of the sequential reading to run things in parallel, is what separates people who *use* it from people who *understand* it.
+The readability is also the trap. Three independent requests awaited one after another take the sum of their times, not the slowest. Interviewers hand you three awaits and ask how to make them overlap. Knowing that this is promise syntax, and when to stop reading it as a straight line, is the point.
 
 ## The concept, simply
 
-Marking a function `async` does two things: it makes the function always return a promise (whatever you return becomes the fulfilment value; whatever you throw becomes the rejection reason), and it allows `await` inside it. `await` takes a promise, pauses the async function until that promise settles, and then evaluates to the fulfilled value — or throws the rejection reason as if it were a normal exception.
+Marking a function async does two things. The function always returns a promise: a returned value becomes the fulfilment, and a throw becomes the rejection. And you may use await inside it.
 
-The key mental correction: `await` **pauses your function, it does not block the thread**. While your function is suspended at an `await`, the event loop is free to run other work — handle other requests, fire timers, process I/O. Nothing is frozen; only *this one function* is parked until its promise is ready.
+await takes a promise, pauses that function until the promise settles, and then evaluates to the fulfilled value. If the promise rejects, await throws the reason like a normal exception.
+
+await pauses your function. It does not block the thread. While this function is parked, the event loop, the loop that runs queued timers and I/O, is free to handle other requests. I/O means input and output. Only this one function is waiting.
 
 ![Left side shows code written with await reading top to bottom; right side shows the engine desugaring it into a .then continuation that suspends the function and frees the event loop](assets/i15_01_55bcdfc8.svg)
 
-await reads like synchronous code but the engine turns it into a suspended continuation — the thread stays free.
+The source reads top to bottom. The engine turns each await into a continuation that leaves the thread free.
 
 ## How it works
 
-An `async` function is a state machine. When execution reaches an `await`, the function *suspends*: it saves its local state, attaches a continuation to the awaited promise (conceptually a `.then`), and returns control to the caller. The rest of the function body becomes that continuation, scheduled as a microtask when the promise settles. So `const u = await getUser()` is, roughly, `getUser().then(u => { /* rest of function */ })`. This is why everything after an `await` runs on a later microtask, never synchronously.
+An async function is a state machine. At an await it saves its local state, attaches the rest of the function to the promise as a continuation, and returns control to the caller. When the promise settles, that continuation is scheduled as a microtask. A microtask runs after the current stack and before the next timer. So const u = await getUser() is roughly getUser().then(u => { the rest of the function }). Everything after an await runs on a later microtask, never on the current stack.
 
-Because the continuation runs as a microtask, the same ordering rules from promises apply: code after an `await` runs before a `setTimeout(fn, 0)` scheduled beforehand. And because a rejected awaited promise *throws* at the `await` point, ordinary `try/catch` works again — the async error handling that callbacks couldn't offer is restored, because the language rethrows the rejection synchronously into your paused function.
+A rejected promise throws at the await line, so try/catch/finally works. An uncaught throw inside an async function rejects the promise that function returned, and the caller has to handle that.
 
 ![Three lanes showing the synchronous call stack draining first, then the microtask queue where await continuations run, then macrotasks like timers](assets/i15_02_11c5707a.svg)
 
-The code after an await resumes as a microtask, ahead of any timer or I/O callback queued at the same time.
+Code after an await resumes as a microtask, ahead of a timer queued at the same time.
 
-The performance model follows directly. Two `await`s in a row mean the second operation doesn't even *start* until the first has finished — that's sequential, and the total time is the sum. To run independent operations concurrently you must **start them all first** (call the functions, collect the promises) and only then `await` them together, typically with `Promise.all`. Then the total time is roughly the slowest single operation.
+Two awaits in a row mean the second job does not even start until the first has finished. The total time is the sum. Independent jobs must be started first, so you have the promises in hand, and then awaited together with Promise.all. The total time is then about the slowest one.
 
 ![Top timeline shows three 100ms tasks awaited one after another totalling 300ms; bottom shows the same three started together and awaited via Promise.all totalling 100ms](assets/i15_03_7088db7b.svg)
 
-Awaiting in a row sums the durations; starting all the promises first and awaiting together takes only as long as the slowest.
+Awaiting in a row adds the durations. Starting the promises first and awaiting them together takes as long as the slowest.
 
-Unbounded parallelism is the failure mode on the far side of the sequential trap. `await Promise.all(tenThousandIds.map(fetchRow))` starts all ten thousand operations at once, opening as many sockets or file handles, and typically collapses under its own weight or trips a downstream rate limit. The middle ground is **bounded concurrency**: run at most N operations in flight at a time. A well-worn library such as `p-limit` does this, but the idea is small enough to hand-roll with a fixed pool of workers pulling from a shared index — which is worth being able to write on a whiteboard.
+The failure on the other side is unbounded parallelism. Promise.all on ten thousand ids starts all ten thousand jobs at once, opens that many sockets or file handles, and often falls over or hits a rate limit. Bounded concurrency means at most N jobs in flight. A library such as p-limit does this. The idea is a fixed pool of workers pulling from a shared index.
 
-A minimal concurrency limiter: N workers drain a shared queue, and results stay in input order because each worker writes to the index it claimed.
+A minimal limiter: N workers drain one shared queue, and each result stays in input order because the worker writes to the index it claimed.
 
 javascript
 
@@ -70,7 +76,7 @@ async function mapLimit(items, limit, fn) {
 const rows = await mapLimit(ids, 5, fetchRow);
 ```
 
-One more subtlety about `await Promise.all`: it rejects with the *first* rejection the instant it arrives, but the other in-flight promises are **not** cancelled — they run to completion and their results are simply discarded. If one of those stragglers later rejects with nothing awaiting it, you can still get an `unhandledRejection` after your `catch` has already run. When partial success is acceptable, prefer `Promise.allSettled` so every outcome is captured and nothing is left dangling.
+await Promise.all rejects on the first rejection and does not cancel the others. They run to completion and their results are discarded. A straggler that rejects with nothing awaiting it can still raise an unhandled rejection after your catch has run. When a partial success is acceptable, use Promise.allSettled so every outcome is captured.
 
 ## Code examples
 
@@ -145,54 +151,55 @@ ids.forEach(async (id) => { await handle(id); }); // don't do this
 
 ## Common mistakes & gotchas
 
-- **The forgotten `await`.** Dropping `await` gives you the pending *promise object*, not the value — so `if (user.isAdmin)` reads a property off a Promise and is silently truthy/undefined. The operation also isn't sequenced.
-- **Accidental sequential awaits.** Awaiting independent operations one per line serialises them needlessly. Start them together and `await Promise.all`.
-- **Floating promise from a missing `await` or `return`.** The function returns before the async work finishes, and any rejection becomes unhandled.
-- **`await` inside `Array.forEach`/`map` without collecting.** `forEach` ignores the returned promise entirely; an `async` callback runs detached. Use `for...of` for sequential or `Promise.all(map(...))` for parallel.
-- **Unbounded parallelism.** `Promise.all(hugeArray.map(fetch))` can open thousands of sockets at once and exhaust resources. Batch or use a concurrency limiter.
-- **`return await` confusion.** Inside a `try` block, `return await fn()` is needed so the `catch` can catch a rejection; outside a `try` it's a harmless minor extra tick.
-- **Top-level `await` availability.** It works in ES modules (`.mjs` or `"type":"module"`) but not in classic CommonJS module scope.
+- A forgotten await gives you the pending promise, not the value, so user.isAdmin reads a property off a promise. The work is also not sequenced.
+- Awaiting independent calls one per line adds their durations. Start them together and await Promise.all.
+- A missing await or return lets the function finish early, and a rejection becomes unhandled.
+- await inside forEach or a map that you do not collect does not wait. forEach ignores the promise its callback returns. Use for...of to go one by one, or Promise.all on a map to run together.
+- Promise.all on a huge array can open thousands of sockets. Batch the work, or cap it with a limiter.
+- Inside a try, return await lets the local catch see a rejection. return x hands the still-pending promise to the caller and skips that catch. Outside a try the difference is an extra microtask.
+- Top-level await works in ES modules, files ending in mjs or a package with type module. It does not work in the body of a classic CommonJS module.
 
 ## Best practices
 
-- Default to `async/await` for readability; drop to `Promise.all` the moment operations are independent.
-- Start independent promises *before* awaiting — collect them, then `await Promise.all`.
-- Use `try/catch/finally` for error handling and cleanup; it works naturally with `await`.
-- Use `for...of` with `await` for ordered/sequential work; never rely on `forEach` to await.
-- Cap concurrency for large collections with batching or a limiter (e.g. p-limit) instead of a bare `Promise.all` over thousands of items.
-- Await or return every promise you create; a lint rule for floating promises catches the rest.
+- Use async/await for readability, and Promise.all as soon as the jobs are independent.
+- Start independent promises before you await them.
+- Use try/catch/finally for errors and cleanup.
+- Use for...of with await for ordered work. Do not expect forEach to wait.
+- Cap concurrency on large collections with batches or a limiter such as p-limit.
+- Await or return every promise you create. A lint for floating promises catches the rest.
 
 ## ⭐ Interview lens
 
 > **Q: Does `await` block the event loop?**  
-> No. It suspends only the current async function and returns control to the event loop, which is free to run other work. The thread is never frozen — a common misconception.
+> No. await suspends only the current async function. It saves that function's state, schedules the rest as a continuation on the promise, and returns control to the caller so the event loop can run other requests, timers, and I/O. The JavaScript thread is not frozen. What people picture, a blocked server until the database answers, is what a synchronous call such as readFileSync does, not what await does. The limit is everything after the await in that same function: that code does not run until the promise settles. Other functions are free. This one is parked.
 
 > **Q: These three awaits take 300ms — make them 100ms.**  
-> They're independent but awaited sequentially, so each waits for the last. Start all three (call the functions to get promises) and `await Promise.all([...])`; total time drops to the slowest single call.
+> Those three awaits are independent, but each one starts only when the previous await resumes, so the times add up to about 300 milliseconds. Call all three functions first, without awaiting, so the three promises are already running, then await Promise.all of that array. The wall time drops to the slowest call, about 100 milliseconds. Do this only when no call needs the previous result. If step two needs the user id from step one, the awaits have to stay in order. The other limit is the opposite mistake: Promise.all on thousands of ids starts thousands of jobs at once and can exhaust sockets. Cap the number in flight.
 
 > **Q: What does an `async` function return?**  
-> Always a promise. A returned value becomes the fulfilment; a thrown error (or a rejected awaited promise) becomes the rejection. Even `return 5` yields `Promise<5>`.
+> Always a promise. If you return 5, the caller receives a promise that fulfils with 5, not the number 5. If you throw, or if an awaited promise rejects and you do not catch it, the returned promise rejects with that reason. That is why a caller can await your function or attach then and catch. It is also why an async function that you forget to await becomes a floating promise: the caller holds no handler, and a rejection can crash the process under Node's default. The limit of the "always a promise" rule is that the executor-style work inside may still throw before it returns if you are not in an async function. Inside an async function, a throw becomes a rejection.
 
 > **Q: Why doesn't `await` work inside `forEach`? (trap)**  
-> `forEach` doesn't look at the promise its callback returns, so it doesn't wait — the loop finishes immediately while the async callbacks run detached. Use `for...of` for sequential or `Promise.all(arr.map(...))` for parallel.
-
-> **Q: What is `async/await` compiled to conceptually?**  
-> A promise-based state machine. Each `await` suspends the function and attaches its continuation to the awaited promise as a microtask — essentially the code after it becomes a `.then` callback.
-
-> **Q: When does `return await x` differ from `return x`?**  
-> Inside a `try` block: `return await` lets the local `catch` handle a rejection, whereas `return x` hands the still-pending promise to the caller and skips your `catch`. Outside a `try` the difference is a negligible extra microtask.
+> forEach does not look at the promise its callback returns. It calls the function for every element and moves on, so the loop finishes immediately while the async work runs detached. There is no way for the surrounding function to await that. Use for...of with await when you want one item at a time, for example to keep order or to limit concurrency. Use Promise.all on arr.map when the items are independent and you want them to overlap. The limit of for...of is that it is sequential on purpose: the next iteration starts only after the body finishes, so it will not speed up independent calls.
 
 ## Cheat-card
 
-- **`async` fn** → always returns a promise; `return` = fulfil, `throw` = reject.
-- **`await`** pauses the function, frees the event loop — never blocks the thread.
-- **Sequential** awaits sum durations; use only for dependent steps.
-- **Parallel:** start promises first, then `await Promise.all([...])`.
-- **Errors:** `try/catch` works because a rejected await throws.
-- **Loops:** `for...of` awaits; `forEach` does not. Cap huge parallelism.
-- **`for await`** drives `[Symbol.asyncIterator]()` → `next()` one item at a time; `break` calls `return()` (generator `finally` runs, a stream is destroyed).
-- **Not for arrays of started promises:** an early rejection there is unhandled and crashes; use `Promise.all` / `allSettled`.
-- **Deadlines:** one `AbortSignal.timeout(ms)` passed to every awaited call; check `signal.aborted` in `catch`.
+- An async function always returns a promise. return fulfils it. throw rejects it.
+- await pauses that function and frees the event loop. It does not block the thread.
+- Sequential awaits add durations. Use them only when a step needs the previous result.
+- For independent work, start the promises, then await Promise.all.
+- A rejected await throws, so try/catch works. Inside try, use return await if the local catch must see the rejection.
+- for...of awaits. forEach does not. Cap a huge Promise.all.
+- Top-level await is for ES modules, not CommonJS module scope.
+
+## Good to know
+
+- What is `async/await` compiled to conceptually? It is a promise state machine. Each await suspends the function and attaches the rest as a microtask continuation, which is the same idea as the code after the await becoming a then callback.
+
+- When does `return await x` differ from `return x`? Inside a try, return await lets the local catch handle a rejection. return x hands the still-pending promise to the caller and skips your catch. Outside a try the difference is one extra microtask.
+- Additional examples: 7 Oct 2026, examples verified on Node v24.19.0.
+- `AbortSignal.timeout(ms)`: added in v17.3.0.
+- `stream.iterator({ destroyOnReturn: false })`: added in v16.3.0, stable since v24.0.0.
 
 ---
 
@@ -207,8 +214,6 @@ ids.forEach(async (id) => { await handle(id); }); // don't do this
 ---
 
 ## Additional topics
-
-*Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### `for await` and async iterators
 
@@ -331,7 +336,7 @@ await rm('log.txt');
 
 ### Timeouts with AbortSignal
 
-`await` waits as long as the promise takes, which can be forever. A timeout in async/await code is a deadline that makes the pending `await` reject, and the right way to build one is an `AbortSignal` from `AbortSignal.timeout(ms)` (added in v17.3.0) passed into every operation the function awaits. The operations then stop their own work at the deadline instead of only being ignored. Full coverage is in [`22-abortcontroller-and-abortsignal.md`](22-abortcontroller-and-abortsignal.md).
+`await` waits as long as the promise takes, which can be forever. A timeout in async/await code is a deadline that makes the pending `await` reject, and the right way to build one is an `AbortSignal` from `AbortSignal.timeout(ms)` passed into every operation the function awaits. The operations then stop their own work at the deadline instead of only being ignored. Full coverage is in [`22-abortcontroller-and-abortsignal.md`](22-abortcontroller-and-abortsignal.md).
 
 How it works:
 
@@ -390,7 +395,7 @@ try {
 
 - **`for await` over an array of already-started promises.** The loop awaits them one at a time, in array order. A later promise that rejects while the loop is still waiting on an earlier one has no handler yet, and the process crashes with an unhandled rejection (see the edge case below). Use `Promise.all` / `Promise.allSettled` for a set of promises; keep `for await` for sources that produce items over time.
 - **Expecting `for await` to run items in parallel.** It is sequential by design: the next `next()` waits for the body to finish.
-- **Breaking out of a stream loop and then reading the stream again.** `break` calls `return()`, which destroys the stream. Use `stream.iterator({ destroyOnReturn: false })` (added in v16.3.0, stable since v24.0.0) if you need to keep it open; in a test run, a second loop over the same stream then read the remaining items.
+- **Breaking out of a stream loop and then reading the stream again.** `break` calls `return()`, which destroys the stream. Use `stream.iterator({ destroyOnReturn: false })` if you need to keep it open; in a test run, a second loop over the same stream then read the remaining items.
 - **Forgetting `finally` in an async generator.** Cleanup written after the loop inside the generator does not run on early `break`; only `finally` does.
 - **A timeout that does not reach the operation.** `Promise.race([op(), timeoutPromise])` throws on time but leaves `op()` running. Pass the signal into `op`.
 

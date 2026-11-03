@@ -13,21 +13,27 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A serverless function, here AWS Lambda, is code the platform starts when an event arrives, freezes between events, and may throw away at any time. You export one async function, the handler. The platform calls it with the event and a context object, and whatever you return is the response. Code at the top of the file runs once per environment, a small sandbox that holds the runtime and your loaded code, so a database client created there is reused on later calls to that same sandbox. The trade-off is the cold start: the first call that has to create a new environment is slower, and with no extensions you get no shutdown signal to flush work.
+
 ## Why it matters
 
-Lessons 101 and 102 end with a container image and a process that shuts down cleanly. The next question is where that code runs, and the choice changes how you write it:
+Lessons 101 and 102 end with a container image and a process that shuts down cleanly. The next question is where that code runs, and the choice changes how you write it.
 
-- **On a function platform (AWS Lambda),** there is no long-running server. The platform starts your code when an event arrives, may freeze it between events, and may throw it away at any time. Code at module scope runs once per environment, not once per request. A database pool of 10 connections per instance becomes 10 connections per *concurrent request*.
-- **On a container platform (ECS on Fargate, Render, Fly),** your Express app runs as it does on your laptop, but the platform stops it with a signal on every deploy. If the app ignores the signal, in-flight requests fail on every release.
-- **On a platform that turns your app into functions (Vercel),** some Express features stop working: Vercel's docs say `express.static()` is ignored there.
+On a function platform such as AWS Lambda, there is no long-running server. The platform starts your code for an event, may freeze it, and may throw it away. Code at module scope runs once per environment, not once per request. A database pool of 10 connections per instance becomes 10 connections per concurrent request, because each concurrent request gets its own environment.
 
-None of these platforms can be tested from this machine, so this lesson does what you can do before deploying: run the handler locally with the same event shape the platform sends, bundle it, and validate the deployment template. The rest comes from each platform's current docs and is marked as such.
+On a container platform such as ECS on Fargate, Render, or Fly, your Express app runs as it does on your laptop, but the platform stops it with a signal on every deploy. If the app ignores the signal, in-flight requests fail on every release.
+
+On Vercel, which turns the app into functions, some Express features stop working. Vercel's docs say `express.static()` is ignored there.
+
+None of these platforms can be tested from this machine. This lesson does what you can do before deploying: run the handler locally with the same event shape the platform sends, bundle it, and validate the deployment template. The rest comes from each platform's current docs and is marked as such.
 
 ## The concept, simply
 
-A Lambda function is a module that exports one async function, the **handler**. Lambda calls it with two arguments: the **event** (what happened: an HTTP request, a queue message, a file upload) and the **context** (facts about this invocation: request ID, time left). Whatever the handler returns becomes the response.
+A Lambda function is a module that exports one async function, the handler. Lambda calls it with two arguments. The event is what happened: an HTTP request, a queue message, or a file upload. The context is facts about this invocation: the request ID and how much time is left. Whatever the handler returns becomes the response.
 
-Lambda runs your code inside an **execution environment**: a small isolated sandbox with the Node runtime and your code loaded. The first request that needs a new environment pays for creating it. This is the **cold start**. Later requests that land on the same environment reuse everything that was already loaded. This is a **warm start**. Each environment handles one request at a time. The AWS docs: "For each concurrent request, Lambda provisions a separate instance of your execution environment."
+Lambda runs that code inside an execution environment: a small isolated sandbox with the Node runtime and your code loaded. The first request that needs a new environment pays for creating it. That wait is the cold start. Later requests that land on the same environment reuse everything already loaded. That is a warm start. Each environment handles one request at a time. The AWS docs say: "For each concurrent request, Lambda provisions a separate instance of your execution environment."
 
 The Lambda invocation lifecycle, from the AWS "execution environment lifecycle" page:
 
@@ -59,20 +65,20 @@ text
  └────────────────────────────────────────────────────┘
 ```
 
-A **container service** is the opposite model: you give the platform an image or a repo, it keeps N copies of your server running behind a load balancer, and it replaces them on deploy by starting new ones, switching traffic, then sending the old ones a stop signal. Your Express app does not change. Your shutdown code (lesson 102) is what decides whether deploys drop requests.
+A container service is the opposite model. You give the platform an image or a repo. It keeps several copies of your server running behind a load balancer, and on deploy it starts new ones, switches traffic, then sends the old ones a stop signal. Your Express app does not change. Your shutdown code from lesson 102 decides whether deploys drop requests.
 
 ## How it works
 
-**What a Lambda invocation looks like, step by step** (AWS Lambda Developer Guide, "Lambda execution environment lifecycle" and "Define Lambda function handler in Node.js"):
+One invocation, from the AWS Lambda Developer Guide pages "Lambda execution environment lifecycle" and "Define Lambda function handler in Node.js":
 
 1. An event arrives. Lambda looks for a frozen environment for this function version. If none is free, it creates one.
-2. **Init phase.** Lambda starts extensions, bootstraps the runtime, and loads your module, which runs everything at the top level of the file. The docs: "The Init phase is limited to 10 seconds." If it does not finish, Lambda retries it during the first invocation, under the function's own timeout.
-3. **Invoke phase.** The runtime calls the exported handler. The **Handler** setting names the file and the export, separated by a dot. The default is `index.handler`, meaning the `handler` export of `index.js` or `index.mjs`.
-4. The handler returns (or its promise resolves). The return value is the response. If the handler throws, the invocation fails.
+2. Init phase. Lambda starts extensions, bootstraps the runtime, and loads your module, which runs everything at the top of the file. The docs say: "The Init phase is limited to 10 seconds." If it does not finish, Lambda retries it during the first invocation, under the function's own timeout.
+3. Invoke phase. The runtime calls the exported handler. The Handler setting names the file and the export, separated by a dot. The default is `index.handler`, the `handler` export of `index.js` or `index.mjs`.
+4. The handler returns, or its promise resolves. That value is the response. If the handler throws, the invocation fails.
 5. Lambda freezes the environment. Timers and open sockets stop. Module-scope variables keep their values.
-6. A later event may thaw the same environment and go straight to step 3. Or Lambda may shut the environment down; with no extensions, the Shutdown phase has a 0 ms limit, so your code gets no signal to clean up.
+6. A later event may thaw the same environment and go straight to step 3. Or Lambda may shut the environment down. With no extensions, the Shutdown phase has a 0 ms limit, so your code gets no signal to clean up.
 
-**The handler shape on Node 24.** The runtime identifier is `nodejs24.x` (Amazon Linux 2023). The AWS runtimes table, read on 12 Oct 2026, lists its deprecation date as Apr 30, 2028, "subject to change". It also lists `nodejs26.x` as a public preview that "should not be used for production workloads". On Node 24, only async handlers are supported (changed in `nodejs24.x`). The AWS docs: "Callback-based function handlers are only supported up to Node.js 22. Starting from Node.js 24, asynchronous tasks should be implemented using async function handlers." So the shape is:
+On Node 24 the runtime identifier is `nodejs24.x`. Only async handlers are supported. The AWS docs say: "Callback-based function handlers are only supported up to Node.js 22. Starting from Node.js 24, asynchronous tasks should be implemented using async function handlers." The shape is:
 
 javascript
 
@@ -82,53 +88,36 @@ export const handler = async (event, context) => {
 };
 ```
 
-The `context` object carries, among others, `awsRequestId`, `functionName`, `functionVersion`, `memoryLimitInMB` and the method `getRemainingTimeInMillis()`, which returns "the number of milliseconds left before the execution times out". `context.callbackWaitsForEmptyEventLoop` only applies to callback handlers, so on Node 24 it does nothing for you.
+The `context` object carries `awsRequestId`, `functionName`, `functionVersion`, `memoryLimitInMB`, and `getRemainingTimeInMillis()`, which returns "the number of milliseconds left before the execution times out". `context.callbackWaitsForEmptyEventLoop` only applies to callback handlers, so on Node 24 it does nothing for you.
 
-**Cold starts: what you control.** The Init phase runs your top-level code, so its length is your import graph plus whatever you do at module scope. Things that make it longer: a large `node_modules` tree that has to be read file by file, top-level `await` on a slow network call, and SDK clients for services you rarely use. Ways to make it shorter:
+The Init phase is your import graph plus whatever you do at module scope. It gets longer with a large `node_modules` tree read file by file, a top-level `await` on a slow network call, or SDK clients for services you rarely use. You shorten your share of it by bundling (Example 4; the AWS packaging page says esbuild or rollup "results in improved performance due to the reduction in I/O operations"), by loading rare code with `await import()` on the path that needs it, or by paying for provisioned concurrency: pre-initialised environments that are "ready to respond immediately to incoming function requests". The concurrency docs say "interactive workloads benefit the most". SnapStart, which snapshots a started environment, is not available for Node. Its page lists "Java 11 and later, Python 3.12 and later, .NET 8 and later".
 
-- **Bundle** (Example 4). The AWS Node packaging page says bundling with esbuild or rollup "results in improved performance due to the reduction in I/O operations".
-- **Load rarely used code lazily** with `await import()` inside the code path that needs it.
-- **Provisioned concurrency:** pre-initialised environments that are "ready to respond immediately to incoming function requests". The AWS concurrency docs say "interactive workloads benefit the most".
-- **SnapStart is not available for Node.** The SnapStart page lists "Java 11 and later, Python 3.12 and later, .NET 8 and later".
+Module scope survives warm invocations, so the AWS handler guide puts SDK clients outside the handler: "This causes Lambda to run this code during the initialization phase, and the client is preserved for reuse across multiple invocations." The same applies to a database pool or an `undici` agent. Example 2 shows it locally: one loaded module keeps its counter and client, and a second module instance starts from zero. Because one environment handles one request at a time, a `pg` pool with `max: 10` opens connections that are never used together, and 200 concurrent requests mean 200 environments. Keep `max` at 1 or 2, and put a proxy such as Amazon RDS Proxy or a pooler such as PgBouncer in front of the database (lesson [46](74-connection-pooling.md)). Idle sockets go stale. The AWS best-practices list warns: "Lambda purges idle connections over time. Attempting to reuse an idle connection when invoking a function will result in a connection error." Use keep-alive and retry once on a reset. Node's `http.globalAgent` has used keep-alive by default since v19.0.0.
 
-**Connection reuse.** Because module scope survives between warm invocations, the AWS handler guide puts SDK clients outside the handler: "This causes Lambda to run this code during the initialization phase, and the client is preserved for reuse across multiple invocations." The same applies to a database pool or an `undici` agent. Example 2 shows the mechanism locally: one loaded module keeps its counter and its client object across calls, and a second module instance (a second environment) starts from zero. Two consequences:
+Lambda accepts a .zip of your code. You can zip `node_modules` as it is, or bundle into one file with esbuild. Example 4 did the second: 66 production packages, 4.5 MB on disk, became one 811 KB file, 277 KB zipped. `--platform=node --target=node24` keeps Node built-ins such as `node:http` and `util` as imports. `--format=esm` needs a `require` shim when the bundled packages are CommonJS (Example 5).
 
-- **Pool size.** One environment handles one request at a time, so a `pg` pool with `max: 10` inside a Lambda function opens connections that are never used concurrently, and 200 concurrent requests mean 200 environments, each with its own pool. Keep `max` at 1 or 2 per environment, and put a connection proxy (such as Amazon RDS Proxy) or a pooler such as PgBouncer in front of the database (lesson [46](74-connection-pooling.md)).
-- **Stale sockets.** The AWS best-practices list warns: "Lambda purges idle connections over time. Attempting to reuse an idle connection when invoking a function will result in a connection error." Use keep-alive, as the docs advise, and retry once on a reset connection. Node's `http.globalAgent` has used keep-alive by default since v19.0.0.
+A layer is a separate .zip that Lambda "extracts … into the `/opt` directory". For Node, packages must sit under `nodejs/node_modules` or `nodejs/nodeXX/node_modules`. The docs allow "up to five layers per function", and only for .zip functions, not container images. Layers suit native binaries, shared packages, and extensions. If you also bundle with esbuild, mark a layer package `--external:<name>`, or esbuild copies it into the bundle anyway.
 
-**Bundling.** Lambda accepts a .zip archive of your code. You can zip `node_modules` as it is, or bundle the code into one file with esbuild and ship only that. Example 4 does the second: 66 installed production packages (4.5 MB on disk) became one 811 KB file, 277 KB zipped. Two settings matter:
+An API Gateway HTTP API turns each HTTP request into a Lambda event. You choose the payload format on the integration. The console defaults to the latest. With the AWS CLI, CloudFormation, or an SDK, "you must specify a `payloadFormatVersion`". The values are `1.0` and `2.0`. Format 2.0, the sample in Example 1, copied from the AWS docs:
 
-- `--platform=node --target=node24` keeps Node built-ins (`node:http`, `util`) as imports.
-- `--format=esm` produces an ES module, which needs a `require` shim when the bundled packages are CommonJS (Example 5).
+- Request line: `requestContext.http.method`, `rawPath`, `rawQueryString`.
+- Headers and query: `headers` and `queryStringParameters`, with duplicates "combined with commas". There is no `multiValueHeaders` in 2.0.
+- Cookies: a separate `cookies` array.
+- Body: `body` is a string, and `isBase64Encoded` tells you whether to decode it.
+- Response: `{ statusCode, headers, cookies, body, isBase64Encoded }`. If the function returns valid JSON with no `statusCode`, API Gateway assumes status 200, `content-type: application/json`, and uses the return value as the body.
 
-**Layers.** A layer is a separate .zip that Lambda "extracts … into the `/opt` directory" of the execution environment. For Node, the layer must put packages under `nodejs/node_modules` or `nodejs/nodeXX/node_modules` so the runtime finds them. The docs allow "up to five layers per function", and only for functions deployed as a .zip file archive, not as container images. Layers suit native binaries, shared internal packages and Lambda extensions. If you bundle with esbuild, a package that comes from a layer must be marked `--external:<name>`, or esbuild will copy it into the bundle anyway.
+Two maintained adapters turn those events into Node `req` and `res` and back. Both were checked on 12 Oct 2026:
 
-**API Gateway HTTP API, payload format 2.0.** An HTTP API turns each HTTP request into a Lambda event. You choose the payload format version on the integration. The docs say the console defaults to the latest, and with the AWS CLI, CloudFormation or an SDK "you must specify a `payloadFormatVersion`". The supported values are `1.0` and `2.0`. Format 2.0 (the sample in Example 1 is copied from the AWS docs page):
-
-- **Request line:** `requestContext.http.method`, `rawPath`, `rawQueryString`.
-- **Headers and query:** `headers` and `queryStringParameters` with duplicates "combined with commas"; there is no `multiValueHeaders` in 2.0.
-- **Cookies:** a separate `cookies` array.
-- **Body:** `body` is a string, with `isBase64Encoded` telling you whether to decode it.
-- **Response:** `{ statusCode, headers, cookies, body, isBase64Encoded }`. If the function returns valid JSON with no `statusCode`, API Gateway assumes status 200, `content-type: application/json`, and uses the return value as the body.
-
-**Wrapping an Express 5 app.** Two maintained adapters translate API Gateway events into Node `req`/`res` objects and back. Both were checked on 12 Oct 2026:
-
-| Package (version checked) | Latest release | Last commit to the repo | `engines` | Notes |
-|---|---|---|---|---|
-| `@codegenie/serverless-express` 5.0.0 | 16 Apr 2026 | 16 Apr 2026 | `node >=24` | The former `aws-serverless-express`; its README says that package "will be deprecated in favor of @codegenie/serverless-express". Supports API Gateway v1 and v2, ALB, Lambda@Edge and VPC Lattice. Used in Example 3. |
-| `serverless-http` 4.0.0 | 1 Sep 2025 | 7 Sep 2026 | `node >=12.0` | Not run in this lesson. |
+| Package (version checked) | `engines` | Notes |
+|---|---|---|
+| `@codegenie/serverless-express` 5.0.0 | `node >=24` | The former `aws-serverless-express`; its README says that package "will be deprecated in favor of @codegenie/serverless-express". Supports API Gateway v1 and v2, ALB, Lambda@Edge and VPC Lattice. Used in Example 3. |
+| `serverless-http` 4.0.0 | `node >=12.0` | Not run in this lesson. Release dates are in Good to know. |
 
 The adapter is created once, at module scope, so the Express app is built during Init and reused by every warm invocation.
 
-**ECS on Fargate, in outline.** These facts come from the Amazon ECS Developer Guide, and none was run here. Amazon ECS runs containers from a **task definition**, which lists the image, CPU, memory, ports, environment, health check and `stopTimeout`. A **service** keeps `desiredCount` copies of a task running, optionally behind an Application Load Balancer, and replaces them on deploy. **Fargate** is the launch type with no servers to manage: "Each Fargate task has its own isolation boundary and does not share the underlying kernel, CPU resources, memory resources, or elastic network interface with another task." Fargate tasks use the `awsvpc` network mode. For a Node app, the parts that touch your code are:
+ECS on Fargate, from the Amazon ECS Developer Guide, and none of it was run here. A task definition lists the image, CPU, memory, ports, environment, health check, and `stopTimeout`. A service keeps `desiredCount` copies running, optionally behind a load balancer, and replaces them on deploy. Fargate is the launch type with no servers to manage: "Each Fargate task has its own isolation boundary and does not share the underlying kernel, CPU resources, memory resources, or elastic network interface with another task." Tasks use the `awsvpc` network mode. For a Node app, three settings touch your code. `maximumPercent` (default 200% for a REPLICA service) and `minimumHealthyPercent` bound how many tasks may run during a deploy, the same role as `maxSurge` and `maxUnavailable` in lesson [109](105-kubernetes-for-node-developers.md). ECS sends the image's `STOPSIGNAL`, "default to SIGTERM", then SIGKILL after `stopTimeout` (default 30 seconds, maximum 120). Your forced-exit timer from lesson [66](102-graceful-shutdown-monitoring.md) must be shorter. `healthCheckGracePeriodSeconds` (default 0) ignores failing load-balancer checks while a slow task warms up. The image is the one from lesson 101 (`node:24-slim`, non-root user).
 
-- **Rolling deploys.** `maximumPercent` (default 200% for a REPLICA service) and `minimumHealthyPercent` bound how many tasks may run during a deploy. They play the same role as `maxSurge` and `maxUnavailable` in lesson [109](105-kubernetes-for-node-developers.md).
-- **Stopping a task.** ECS sends the image's `STOPSIGNAL`, "default to SIGTERM", then SIGKILL after the timeout. The container's `stopTimeout` defaults to 30 seconds, maximum 120. Your forced-exit timer (lesson [66](102-graceful-shutdown-monitoring.md)) must be shorter.
-- **`healthCheckGracePeriodSeconds`** (default 0) tells the scheduler to ignore failing load-balancer health checks while a slow-starting task warms up.
-
-The image itself is the one from lesson 101 (`node:24-slim`, non-root user).
-
-**Vercel, Render and Fly for a Node app.** Facts from each platform's docs, read on 12 Oct 2026. Nothing was deployed, and pricing is left out on purpose:
+Vercel, Render, and Fly, from each platform's docs, read on 12 Oct 2026. Nothing was deployed, and pricing is left out on purpose. Say the row that matches the question: what runs the process, which port it binds, how it is stopped, and what differs from your laptop.
 
 | | Vercel | Render | Fly.io |
 |---|---|---|---|
@@ -157,7 +146,7 @@ lambda@1.0.0 /…/lambda
 └── express@5.3.0
 ```
 
-esbuild ships a native binary (`@esbuild/linux-x64` here). npm 11.17.0 printed `npm warn allow-scripts   esbuild@0.28.2 (postinstall: node install.js)` and skipped the install script. The binary still came in through the optional dependency, and `npx esbuild --version` printed `0.28.2`.
+`npx esbuild --version` printed `0.28.2`. The install-script warning is in Good to know.
 
 **Example 1 — a plain handler, invoked locally with the AWS docs' HTTP API 2.0 sample event.**
 
@@ -426,14 +415,7 @@ request failed: db down
 }
 ```
 
-What the adapter did:
-
-- It detected the 2.0 event and built `req.params`, `req.query` and the JSON body from it.
-- It returned the 2.0 response shape. The `Set-Cookie` header from `res.cookie()` moved into the separate `cookies` array that format 2.0 uses.
-- The POST with no body reached the route with `req.body` undefined, as Express 5 does, and the `?? {}` guard turned that into a 400.
-- The thrown async error reached the error handler and became a 500.
-
-Without that last error handler, Express renders an HTML error page, and the first version of `invoke.mjs` failed with `SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON` when it tried to parse it.
+The adapter detected the 2.0 event, built `req.params`, `req.query`, and the JSON body, and returned the 2.0 shape, moving `Set-Cookie` into the `cookies` array. The empty POST arrived with `req.body` undefined, as Express 5 does, and the `?? {}` guard made a 400. The thrown async error reached the error handler and became a 500. Without that handler, Express renders an HTML error page, and the first `invoke.mjs` failed with `SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON`.
 
 **Example 4 — bundling with esbuild and checking the bundle runs on its own.**
 
@@ -484,7 +466,7 @@ $ npx esbuild lambda.mjs --bundle --platform=node --target=node24 --format=esm -
    …
 ```
 
-The import cost was measured on this laptop with `import-time.mjs`. It spawns a fresh `node` process 10 times per file, times `await import(file)` with `performance.now()`, and prints the median. The machine was an Intel i5-1135G7 (8 threads) shared with other writers' jobs, so the load changed between runs:
+`import-time.mjs` times `await import(file)` in a fresh Node process, 10 runs, and prints the median. The laptop was an Intel i5-1135G7 shared with other jobs, so the load changed between runs:
 
 javascript
 
@@ -518,9 +500,7 @@ lambda.mjs: median 78.4 ms
 dist/index.mjs: median 59.2 ms
 ```
 
-The absolute numbers moved by a third between runs and did not follow the load average, so they say little beyond this machine on that day. In both runs, the bundle loaded faster than the unbundled `node_modules` tree.
-
-This is module loading on a laptop with a warm file cache, not a Lambda cold start, which also includes creating the environment and starting the runtime.
+The medians moved by about a third between runs and did not follow the load average. In both runs the bundle loaded faster than the `node_modules` tree. This is a warm file cache on a laptop, not a Lambda cold start, which also creates the environment and starts the runtime. The four medians are listed in Good to know.
 
 > ⚠️ Unverified: how much bundling shortens a real `nodejs24.x` cold start. No function was deployed, so no `Init Duration` from a Lambda `REPORT` log line was observed.
 
@@ -584,7 +564,7 @@ The common mistake is zipping the *contents* of `nodejs/` (so the archive starts
 
 **Example 7 — a CloudFormation template, validated with cfn-lint and not deployed.**
 
-cfn-lint 1.57.2 was installed without root into a Python virtual environment under `~/.cache` (`python3 -m venv --without-pip`, then pip from `get-pip.py`). The template is plain CloudFormation: an IAM role, the function, the layer from Example 6, an HTTP API with a quick-create Lambda target, and the permission that lets API Gateway invoke the function. The function's code is the `function.zip` from Example 4, uploaded to S3.
+The template is plain CloudFormation: an IAM role, the function, the layer from Example 6, an HTTP API with a quick-create Lambda target, and the permission that lets API Gateway invoke the function. The function's code is the `function.zip` from Example 4, uploaded to S3.
 
 yaml
 
@@ -709,54 +689,62 @@ In this version, the SAM-level checks did not cover `Runtime` or `Timeout` on `A
 
 ## Common mistakes & gotchas
 
-- **Doing per-request work at module scope, or per-environment work in the handler.** A request ID or user stored in a module-scope variable leaks into the next request on that warm environment (Example 2). Creating the SDK client or DB pool inside the handler pays its connection cost on every invocation.
-- **A normal-sized DB pool per function.** Each environment serves one request at a time, so `max: 10` per environment multiplies connections without adding throughput. Keep the pool at 1–2 and use a proxy or a pooler in front of the database.
-- **Writing a callback handler on `nodejs24.x`.** Callback handlers are supported only up to Node 22. Use `async (event, context)`.
-- **Background work after `return`.** Once the handler returns, the environment can be frozen, so a fire-and-forget `fetch()` or log flush may never finish, or may finish during a later invocation. `await` it before returning.
-- **Assuming a shutdown hook.** With no extensions, the Shutdown phase lasts 0 ms. Do not rely on `SIGTERM` handlers to flush data on Lambda. On ECS, Render and Fly you do get a signal, and lesson 102's handler applies. On Fly the default `kill_signal` is SIGINT, so handle both signals.
-- **ESM bundles of CommonJS dependencies without a `require` shim.** The build succeeds and every cold start crashes (Example 5).
-- **Trusting `queryStringParameters` for repeated keys.** In format 2.0, `?tag=a&tag=b` arrives as `"a,b"`, and a single value `"a,b"` looks the same. Parse `rawQueryString` when it matters.
-- **Mixing payload formats.** Adapters detect the event version. A test event in 1.0 shape against a 2.0 integration (or the reverse) passes locally and fails in AWS. Build test events from the docs sample for the format you configure.
-- **`express.static()` on Vercel.** The Vercel Express guide says it "will be ignored". Static files go in `public/**`.
-- **Unbounded `engines` ranges on Render.** `>=20` "always resolves to the latest release of Node.js", which moves to a new major on its own.
+- **Per-request data at module scope, or a new client inside the handler.** A user or request id stored on the module leaks into the next request on that warm environment (Example 2). A client created inside the handler reconnects on every call.
+- **A normal-sized pool per function.** One environment serves one request at a time, so `max: 10` multiplies connections. Keep the pool at 1 or 2 and put a proxy or pooler in front.
+- **A callback handler on `nodejs24.x`.** Callback handlers stop at Node 22. Use `async (event, context)`.
+- **Work after `return`.** The environment can freeze as soon as the handler returns, so a fire-and-forget `fetch()` or log flush may never finish, or may finish on a later invocation. Await it first.
+- **Expecting SIGTERM on Lambda.** With no extensions, Shutdown is 0 ms. On ECS, Render, and Fly you do get a signal. Fly's default `kill_signal` is SIGINT, so handle both.
+- **An ESM bundle of CommonJS packages with no `require` shim.** The build succeeds and every cold start crashes (Example 5).
+- **Trusting `queryStringParameters` for repeated keys.** In format 2.0, `?tag=a&tag=b` arrives as `"a,b"`, and a real value `"a,b"` looks the same. Parse `rawQueryString` when it matters.
+- **A 1.0 test event against a 2.0 integration.** Adapters detect the shape. Build the event from the docs sample for the format you configure.
+- **`express.static()` on Vercel.** The Express guide says it "will be ignored". Put files in `public/**`.
+- **An unbounded `engines` range on Render.** `>=20` "always resolves to the latest release of Node.js".
 
 ## Best practices
 
-- **Keep the handler thin.** Parse the event, call your service code, map the result. The same service code can then run under Express, a queue consumer or a test.
+- **Keep the handler thin.** Parse the event, call service code, map the result, so the same code can run under Express, a queue, or a test.
 - **Create clients once, at module scope,** with keep-alive on, and retry once on a reset connection.
-- **Bundle with esbuild for Lambda,** target `node24`, run the bundle locally before uploading, and keep a size budget (`--analyze`).
-- **Keep the Init phase short and deterministic:** no slow network calls at the top level; load rare paths with `await import()`.
-- **Test with real event shapes:** copy the sample from the AWS docs for each trigger (HTTP API 2.0, SQS, S3) and invoke the handler directly in unit tests, as Examples 1–3 do.
-- **On container platforms, reuse lesson 102 unchanged:** handle SIGTERM and SIGINT, drain, and exit before the platform's timeout (ECS `stopTimeout` 30 s by default, Render's shutdown delay 30 s by default, Fly `kill_timeout` 5 s by default).
-- **Validate templates in CI** (cfn-lint for CloudFormation and SAM) so a typo in `Runtime` fails the build, not the deploy. With SAM templates, cfn-lint 1.57.2 missed a bad `Runtime` and `Timeout` (Example 7), so keep a deliberately broken template in the suite.
-- **Choose by workload shape:** spiky, event-driven, short requests suit Lambda. Steady traffic, WebSockets, long requests and connection-heavy database work suit a container service.
+- **Bundle for Lambda,** target `node24`, run the bundle locally, and check size with `--analyze`.
+- **Keep Init short:** no slow network calls at the top level. Load rare paths with `await import()`.
+- **Test with the docs' event shape** for each trigger, and call the handler directly, as Examples 1 to 3 do.
+- **On containers, reuse lesson 102:** handle SIGTERM and SIGINT, drain, and exit before the platform timeout (ECS `stopTimeout` 30 s, Render shutdown delay 30 s, Fly `kill_timeout` 5 s).
+- **Lint templates in CI.** cfn-lint 1.57.2 caught a bad `Runtime` and `Timeout` on `AWS::Lambda::Function` and missed both on a SAM template (Example 7), so keep a deliberately broken SAM file in the suite.
+- **Pick by shape.** Spiky, short, event-driven work suits Lambda. Steady traffic, WebSockets, long requests, and many database connections suit a container service.
 
 ## ⭐ Interview lens
 
 > **Q: “What is a Lambda cold start, and what can you do about it in Node?”**  
-> A: It is the Init phase for a new execution environment: Lambda starts extensions and the runtime, then loads your module and runs its top-level code, before the first handler call. You cannot avoid it for the first request on each environment, but you control your own share: bundle so there are fewer files to read, avoid slow top-level work, and lazy-load rare paths. If latency must be flat, buy provisioned concurrency. SnapStart does not support Node. *Trap:* "keep it warm with a ping" only keeps one environment warm; concurrent requests still create new ones.
+> A: A cold start is the Init phase of a new execution environment. An event arrives, no frozen environment is free, so Lambda creates a sandbox, starts extensions, bootstraps the Node runtime, and loads your module. Everything at the top of the file runs then, before the first call to the handler. Later calls on that same environment skip Init. That is a warm start. You cannot remove the first cold start on each environment, but you control how long your part takes. Bundle with esbuild so Lambda reads one file instead of a `node_modules` tree. In this lesson, 66 production packages, 4.5 MB on disk, became an 811 KB file, 277 KB zipped. Do not await a slow network call at the top level, and load rare paths with `await import()`. If the first request must be as fast as the rest, use provisioned concurrency, which keeps environments already initialised. SnapStart, the snapshot feature, does not support Node. Its page lists Java, Python, and .NET. A timer that pings one environment does not help when many requests arrive together, because each concurrent request gets its own environment.
 
 > **Q: “Why create the database client outside the handler?”**  
-> A: Module scope runs once per execution environment, during Init, and persists while the environment is reused. A client created there keeps its connection across warm invocations. Inside the handler you would reconnect on every call. Because each environment handles one request at a time, the pool should be tiny (1–2), and many environments may exist, so you usually add a connection proxy in front of the database.
+> A: The handler runs on every event. Code at the top of the file runs once, during Init, and those variables stay while Lambda freezes and thaws that environment. The AWS handler guide says putting the client there "causes Lambda to run this code during the initialization phase, and the client is preserved for reuse across multiple invocations." Example 2 shows the same thing locally. One loaded module keeps its counter and its client object, and a second module instance, standing in for a second environment, starts from zero. If you construct the client inside the handler, you pay the connection on every call. The limit is the pool. One environment handles one request at a time, so `max: 10` opens connections that never run together, and 200 concurrent requests mean 200 pools. Keep `max` at 1 or 2 and put something like RDS Proxy or PgBouncer in front. Lambda also drops idle connections, so turn keep-alive on and retry once if a socket was reset. Do not store a user or a request id in that same module-scope variable. The next request on the environment would see it.
 
 > **Q: “What does an API Gateway HTTP API event look like for Lambda?”**  
-> A: Payload format 2.0: `version: "2.0"`, `routeKey`, `rawPath`, `rawQueryString`, `headers` with lowercase names and duplicates comma-joined, `queryStringParameters` (also comma-joined), a separate `cookies` array, `requestContext.http.method`, `body` as a string with `isBase64Encoded`. You return `{ statusCode, headers, cookies, body }`. If you return plain JSON with no `statusCode`, API Gateway assumes 200 and `application/json`.
+> A: Payload format 2.0 is the JSON an HTTP API sends to your handler. The method is `requestContext.http.method`, the path is `rawPath`, and the query string is still there as `rawQueryString`. Headers are lower case. If the same header or query key appears twice, the values are joined with a comma, and there is no `multiValueHeaders` field. Cookies are their own array. The body is a string, and `isBase64Encoded` tells you whether to decode it. You return `{ statusCode, headers, cookies, body, isBase64Encoded }`. In Example 1, `parameter1=value1&parameter1=value2` arrived as the single string `value1,value2`. If a real value can contain a comma, parse `rawQueryString` yourself, because you cannot tell them apart. If you return plain JSON with no `statusCode`, API Gateway assumes 200 and `application/json`. The limit of a local test is the format. A 1.0 event against a 2.0 integration can pass in your harness and fail in AWS, so copy the sample for the format you configure.
 
 > **Q: “Lambda, Fargate or a PaaS such as Render or Fly for an Express API?”**  
-> A: Lambda when traffic is spiky or low and requests are short. Capacity follows requests one environment at a time, but you live with cold starts, one request per environment, no shutdown signal and a 15-minute cap. A container service (Fargate, Render, Fly) when traffic is steady, requests are long, you need WebSockets, or the app keeps many DB connections. There the app runs unchanged and you own graceful shutdown. Vercel sits between them: your Express app becomes one function, but with Fluid compute several invocations share an instance.
+> A: Lambda fits spiky or low traffic and short requests. Capacity follows the requests, one environment per concurrent call, and you do not run a server. You live with cold starts, one request per environment, no shutdown signal when there are no extensions, and a timeout cap of 900 seconds, which is 15 minutes. cfn-lint's rule E3717 enforces that maximum. A container service, Fargate, Render, or Fly, fits steady traffic, long requests, WebSockets, or an app that holds many database connections. The Express process runs as it does on your laptop. On deploy the platform sends a stop signal. ECS sends SIGTERM, then SIGKILL after `stopTimeout`, default 30 seconds, maximum 120. Render sends SIGTERM 60 seconds after the new instance takes traffic, then SIGKILL after a shutdown delay that defaults to 30 seconds. Fly's `kill_signal` is SIGINT by default, and `kill_timeout` defaults to 5 seconds. Your shutdown handler has to finish before that. Vercel sits between them. The docs say the Express app becomes one function, and Fluid compute lets several invocations share one instance, but `express.static()` is ignored. Nothing here was deployed, so those timings are from the docs, not from a measured shutdown.
 
 ## Cheat-card
 
 - **Handler (Node 24):** `export const handler = async (event, context) => …`; runtime `nodejs24.x`; callback handlers only up to Node 22; default Handler setting `index.handler`.
-- **Lifecycle:** Init (≤ 10 s: extensions, runtime, your top-level code) → Invoke → freeze → reuse or shutdown (0 ms with no extensions).
-- **One request per environment;** module scope persists across warm invocations; clients go outside the handler; pools stay at 1–2.
-- **Cold-start levers:** bundle, slim top-level code, lazy `import()`, provisioned concurrency; no SnapStart for Node.
-- **esbuild:** `--bundle --platform=node --target=node24 --format=esm` plus a `createRequire` banner, or `--format=cjs`; run the bundle locally first.
-- **Layers:** zip with `nodejs/node_modules/…` at the root → `/opt/nodejs/node_modules`; up to 5; .zip functions only; mark layer packages `--external`.
-- **HTTP API 2.0:** `rawPath`, `rawQueryString`, `requestContext.http.method`, `cookies[]`, comma-joined duplicates; response `{ statusCode, headers, cookies, body, isBase64Encoded }`.
-- **Express on Lambda:** `serverlessExpress({ app })` from `@codegenie/serverless-express` 5.0.0 (needs Node ≥ 24), or `serverless-http` 4.0.0.
-- **Containers:** ECS stop = SIGTERM then SIGKILL after `stopTimeout` (30 s default, 120 max); Render SIGTERM 60 s after cut-over, SIGKILL after 30 s; Fly SIGINT by default, 5 s `kill_timeout`.
-- **Versions used:** Node v24.19.0, npm 11.17.0, Express 5.3.0, @codegenie/serverless-express 5.0.0, esbuild 0.28.2, cfn-lint 1.57.2; serverless-http 4.0.0 checked, not run.
+- **Lifecycle:** Init (at most 10 s: extensions, runtime, your top-level code), then Invoke, then freeze, then reuse or shutdown (0 ms with no extensions).
+- **One request per environment.** Module scope persists across warm invocations. Clients go outside the handler. Pools stay at 1 or 2.
+- **Cold-start levers:** bundle, slim top-level code, lazy `import()`, provisioned concurrency. No SnapStart for Node.
+- **esbuild:** `--bundle --platform=node --target=node24 --format=esm` plus a `createRequire` banner, or `--format=cjs`. Run the bundle locally first.
+- **Layers:** zip with `nodejs/node_modules/…` at the root, which lands in `/opt/nodejs/node_modules`. Up to 5. Zip functions only. Mark layer packages `--external`.
+- **HTTP API 2.0:** `rawPath`, `rawQueryString`, `requestContext.http.method`, `cookies[]`, comma-joined duplicates. Response `{ statusCode, headers, cookies, body, isBase64Encoded }`.
+- **Express on Lambda:** `serverlessExpress({ app })` from `@codegenie/serverless-express` 5.0.0 (needs Node 24 or newer), or `serverless-http` 4.0.0.
+- **Containers:** ECS stops with SIGTERM then SIGKILL after `stopTimeout` (30 s default, 120 max). Render sends SIGTERM 60 s after cut-over, then SIGKILL after 30 s. Fly uses SIGINT by default and a 5 s `kill_timeout`.
+- **Versions used:** Node v24.19.0, Express 5.3.0, @codegenie/serverless-express 5.0.0, esbuild 0.28.2, cfn-lint 1.57.2. serverless-http 4.0.0 was checked, not run.
+
+## Good to know
+
+- AWS runtimes table on 12 Oct 2026: `nodejs24.x` deprecation listed as Apr 30, 2028, "subject to change"; `nodejs26.x` was a public preview that "should not be used for production workloads".
+- npm 11.17.0 printed `npm warn allow-scripts esbuild@0.28.2 (postinstall: node install.js)` and skipped the install script; the `@esbuild/linux-x64` optional dependency still arrived, and `npx esbuild --version` printed `0.28.2`.
+- Laptop import medians on an Intel i5-1135G7, warm file cache, not a Lambda cold start: first run `lambda.mjs` 118.5 ms and `dist/index.mjs` 79.6 ms (load average about 6.5); 40 minutes later 78.4 ms and 59.2 ms (load average about 9.7).
+- Adapter dates checked 12 Oct 2026: `@codegenie/serverless-express` 5.0.0 released and last committed 16 Apr 2026, `engines` `node >=24`; `serverless-http` 4.0.0 released 1 Sep 2025, last commit 7 Sep 2026, `engines` `node >=12.0`, not run here.
+- cfn-lint 1.57.2 was installed without root into a venv under `~/.cache` (`python3 -m venv --without-pip`, then pip from `get-pip.py`). On the broken template it exited 2 (E3030 for runtime `nodejs24`, E3717 because timeout 1000 is over the 900 second maximum). The same two mistakes in a SAM template exited 0, including after `aws-sam-translator` 1.114.0, because this cfn-lint no longer runs the full SAM transform.
 
 ---
 

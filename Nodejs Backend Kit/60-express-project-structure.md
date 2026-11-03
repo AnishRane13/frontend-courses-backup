@@ -13,50 +13,41 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A structured Express app is built by a function, usually `createApp`, that wires routes, controllers, services, and a repository, and returns the app without opening a port. `server.js` is the only file that reads the environment and calls `listen`. Each layer may call the one inside it, and not the other way around. The split exists so a test can build the app with an in-memory database and send a real HTTP request, without fighting over port 3000. The trade-off is more files up front. A single file is fine at about a hundred lines, and it gets expensive once SQL, error JSON, and startup all live in the route handlers.
+
 ## Why it matters
 
-Express gives you no folder layout. `express()` returns a function, and where your routes, database calls and error handling live is up to you. A one-file app is fine at 100 lines. At 3,000 lines the single-file layout costs you in three places:
+Express gives you no folder layout. `express()` returns a function, and you decide where routes, database calls, and error handling live. A one-file app is fine at about 100 lines. At about 3,000 lines that layout costs you in three places.
 
-- **Tests.** A test that has to `import './server.js'` also opens a port, reads real environment variables and connects to the real database. Two test files then fight over port 3000.
+- **Tests.** Importing `server.js` also opens a port, reads the real environment, and connects to the real database. Two test files then fight over port 3000.
 - **Change.** When SQL sits inside a route handler, swapping the database or adding a cache means editing every handler.
-- **Errors.** Every handler invents its own error JSON, so the client sees five different shapes for "not found".
+- **Errors.** Every handler invents its own error JSON, so the client sees several shapes for "not found".
 
-This lesson builds a small notes API with a layout that fixes these three problems:
-
-- a config module that validates the environment and refuses to start on bad values;
-- an error module with one central handler;
-- a `createApp()` factory that tests can import without opening a port;
-- controllers, services and repositories wired together by hand.
-
-Every file in this lesson is the code that was built and run. The test output and the curl session are copied from those runs.
+This lesson builds a small notes API that fixes those three. A config module validates the environment and refuses to start on bad values. An error module has one central handler. `createApp()` returns an app tests can import without opening a port. Controllers, services, and repositories are wired by hand. Every file in the lesson is code that was built and run. The test output and the curl session are copied from those runs.
 
 ## The concept, simply
 
-A structured Express project comes down to three decisions.
+Three decisions.
 
-1. **Where files go.** Group by *kind*, with `controllers/`, `services/` and `models/` at the top. Or group by *feature*, with `notes/`, `users/` and `billing/` at the top, each holding its own controller, service and repository.
-2. **Who may import whom.** Code is split into layers, and each layer has one job:
-   - the **routes** map a URL to a handler;
-   - the **controller** translates between HTTP and plain function calls;
-   - the **service** holds the business rules;
-   - the **repository** reads and writes storage.
-
-   Imports point one way only: routes → controller → service → repository. A service never touches `req`, and a repository never decides what status to send.
-3. **Where the pieces are connected.** One small file, the *composition root* (`server.js`), reads the environment, picks the real implementations, such as "store notes in this JSON file", and passes them in. Everything else receives its dependencies as function arguments. This is dependency injection by hand: no container, no decorators, just arguments. Because the app is built by a function, `createApp(deps)`, a test can call that function with an in-memory repository and get a fully working app back without opening a port.
+1. **Where files go.** Group by kind, with `controllers/`, `services/`, and `models/` at the top. Or group by feature, with `notes/`, `users/`, and `billing/` at the top, each holding its own controller, service, and repository.
+2. **Who may import whom.** Routes map a URL to a handler. The controller translates between HTTP and a function call. The service holds the business rules. The repository reads and writes storage. Imports point one way: routes, then controller, then service, then repository. A service never touches `req`. A repository never decides the HTTP status.
+3. **Where the pieces are connected.** One file, the composition root, is `server.js`. It reads the environment, picks the real implementations, such as "store notes in this JSON file", and passes them in. Everything else receives its dependencies as function arguments. That is dependency injection by hand. There is no container and no decorators. Because the app is built by `createApp(deps)`, a test calls that function with an in-memory repository and gets a working app back, without opening a port.
 
 ## How it works
 
-What happens at startup, and then on each request, in the project built below:
+What happens at startup, and then on one request, in the project below.
 
 1. `node src/server.js` runs. `loadConfig()` parses `process.env` with a Zod schema. If any variable is invalid, it throws one error that lists every bad variable. `server.js` prints that error and calls `process.exit(1)` before any port is opened.
 2. `server.js` creates the concrete repository, `createFileNotesRepository(config.dataFile)`, and calls `createApp({ notesRepository })`.
-3. `createApp` builds the chain by hand: `createNotesService({ notesRepository })` → `createNotesController({ notesService })` → `createNotesRouter({ notesController })`. It then registers `express.json()`, the routes, the 404 forwarder and the central error handler, in that order, and returns the `app`. It does **not** call `listen`.
-4. `server.js` calls `app.listen(config.port, cb)`. In Express 5 a listen error such as `EADDRINUSE` is passed to `cb` (changed in v5.0; Express 4 did not pass it).
-5. A request arrives, for example `POST /notes`. `express.json()` parses the body. The `validate(CreateNoteSchema)` middleware runs Zod and stores the result in `res.locals.validated.body`.
-6. The controller method reads `res.locals.validated.body` and calls `notesService.createNote(...)`. The service checks the rule "titles are unique" (it throws `ConflictError` on a clash), then calls `notesRepository.create(...)`.
-7. The controller sends `201` with a `Location` header. If any step threw, or an `await` rejected, Express 5 passes the error to the error middleware: the 404 forwarder is skipped, and the central handler maps the error to `{ error: { code, message, details? } }` with the right status.
+3. `createApp` builds the chain by hand. `createNotesService({ notesRepository })`, then `createNotesController({ notesService })`, then `createNotesRouter({ notesController })`. It registers `express.json()`, the routes, the 404 forwarder, and the central error handler, in that order, and returns `app`. It does not call `listen`.
+4. `server.js` calls `app.listen(config.port, cb)`. On Express 5 a listen error such as `EADDRINUSE` is passed to that callback. That changed in v5.0. Express 4 did not pass it.
+5. A request arrives, for example `POST /notes`. `express.json()` parses the body. The `validate(CreateNoteSchema)` middleware runs Zod and stores the result on `res.locals.validated.body`.
+6. The controller reads `res.locals.validated.body` and calls `notesService.createNote`. The service checks that titles are unique. A clash throws `ConflictError`. Then it calls `notesRepository.create`.
+7. The controller sends 201 and a `Location` header. If a step threw, or an `await` rejected, Express 5 passes the error to the error middleware. The 404 forwarder is skipped. The central handler maps the error to `{ error: { code, message, details? } }` with the right status.
 
-**Layer-based vs feature-based folders.** Here are the same three resources laid out both ways (illustrative trees, not the built project):
+**Folders.** The same three resources, laid out both ways. These trees are illustrative. They are not the built project.
 
 text
 
@@ -85,9 +76,9 @@ src/                                 src/
   server.js
 ```
 
-Layer-based folders are easy to start with and make each layer's rules visible: everything in `services/` must not import `express`. The cost shows up as the app grows. One change to "notes" touches four directories, and nothing stops `billing.service.js` from reaching into `users.repository.js`. Feature-based folders keep one feature's files side by side, so a change or a code review stays inside one directory. You can also delete or extract a feature by moving one folder. The cost is that the layer rules are no longer visible from the folder names, so you need a naming convention (`*.service.js`) and a check (Example 10). Code shared by several features (`errors/`, `middleware/`, `config/`) still sits at the top in both layouts. The project below is feature-based with shared modules at the top. A common path is to start layer-based and switch once there are more than a handful of resources.
+Layer-based folders are easy to start with, and the folder name shows the rule. Everything in `services/` must not import `express`. The cost shows up as the app grows. One change to notes touches four directories, and nothing stops `billing.service.js` from importing `users.repository.js`. Feature-based folders keep one feature's files together, so a change or a review stays in one directory, and you can delete or extract a feature by moving one folder. The cost is that the layer rules are no longer visible from the folder names, so you need a naming convention such as `*.service.js`, and a check. Example 10 is that check. Code shared by several features, `errors/`, `middleware/`, and `config/`, still sits at the top in both layouts. The project below is feature-based, with shared modules at the top. A common path is to start layer-based and switch once there are more than a handful of resources.
 
-**The dependency rule.** The arrows show which file may import which. Nothing points back up or to the left.
+**Who may import what.** Nothing points back up.
 
 text
 
@@ -107,36 +98,29 @@ middleware/validate.js                       errors/app-error.js  ◄── also
                                                                        error-handler.js
 ```
 
-What each layer may import:
+- Routes may import `express` for `Router`, the schemas, and the validation middleware. They receive the controller as an argument.
+- The controller imports nothing from storage. It receives the service as an argument and uses only `req`, `res`, and `res.locals`.
+- The service may import the error classes. It must not import `express` or a concrete repository. It receives the repository as an argument.
+- A repository may import `node:fs`, a database driver, or an HTTP client. It must not import services, controllers, or `express`, and it does not throw HTTP errors. A missing row comes back as `null`. The service decides that `null` means 404.
 
-- **Routes** may import `express` (for `Router`), the schemas and the validation middleware. They receive the controller as an argument.
-- **The controller** may import nothing from storage. It receives the service as an argument and uses only `req`, `res` and `res.locals`.
-- **The service** may import the error classes. It must not import `express` or a concrete repository; it receives the repository as an argument.
-- **A repository** may import `node:fs`, a database driver or an HTTP client. It must not import services, controllers or `express`, and it does not throw HTTP errors. A missing row comes back as `null`, and the service decides that `null` means 404.
+The service depends only on the shape `{ list, findById, findByTitle, create }`. A file-backed object, an in-memory object, and a future PostgreSQL object all fit.
 
-The rule is what makes a swap cheap. The service depends only on the shape `{ list, findById, findByTitle, create }`, so a file-backed object, an in-memory object, or a PostgreSQL-backed one in the future all fit.
+**Config.** `process.env` values are strings or `undefined`. If ten places read `process.env.PORT`, they parse it ten times, and a typo such as `PORT=80O` shows up only when that path runs. The config module reads the environment once, at startup. Zod coerces each value. `z.coerce.number()` turns `'6001'` into `6001`. `.int().min(0).max(65535)` checks it. Defaults are filled in. The result is frozen. On failure, `z.prettifyError`, added in Zod 4, formats every issue with its path, and the process exits before it binds a port. Only `server.js` calls `loadConfig()`. `createApp` receives the values it needs as arguments, so tests never depend on the shell environment.
 
-**A config module.** `process.env` values are all strings or `undefined`. If code reads `process.env.PORT` in ten places, it parses the value ten times, and a typo such as `PORT=80O` shows up only when that code path runs. The config module reads the environment once, at startup. Zod coerces each value (`z.coerce.number()` turns `'6001'` into `6001`), checks it (`.int().min(0).max(65535)`), fills in defaults and returns a frozen object. On failure, `z.prettifyError` (added in Zod 4) formats every issue with its path, and the process exits before it binds a port. Only `server.js` calls `loadConfig()`. `createApp` receives the values it needs as arguments, so tests never depend on the shell's environment.
+**Errors.** This follows lesson 50. One base class, `AppError(message, status, code, details)`, and small subclasses: `NotFoundError` at 404, `ValidationError` at 422, the same status lesson 65 uses, and `ConflictError` at 409. A `notFound` middleware after all routes forwards a `NotFoundError`. One four-argument handler sits last, and it is the only place that turns errors into responses. An `AppError` uses its `status`, `code`, and `details`. Body-parser's bad JSON, `err.type === 'entity.parse.failed'`, is 400. Everything else is 500 with a generic message, and the real error is logged on the server only. If headers were already sent, it calls `next(err)` so Express's default handler can close the connection. The controllers are `async` and contain no try/catch. Express 5 forwards a rejected promise to the error middleware. That changed in v5.0. The same async controller on Express 4 does not reach the handler. Example 9 shows that inside a test run.
 
-**An error module.** This follows the pattern from [lesson 50](50-error-handling-the-4-arg-handler-and-async-errors.md). There is one base class, `AppError(message, status, code, details)`, and small subclasses: `NotFoundError` (404), `ValidationError` (422, the same status [lesson 65](65-validation-pagination-filtering-sorting.md) uses), and `ConflictError` (409). A `notFound` middleware sits after all routes and forwards a `NotFoundError`. One four-argument handler sits last of all, and it is the only place that turns errors into responses:
-
-- for an `AppError`, it uses `status`, `code` and `details`;
-- for body-parser's bad-JSON error (`err.type === 'entity.parse.failed'`), it responds `400`;
-- for everything else, it responds `500` with a generic message and logs the real error on the server only.
-
-If headers were already sent, it calls `next(err)` so Express's default handler can close the connection, as the Express error-handling guide requires. The controllers are `async` and contain no `try/catch`: **Express 5 forwards a rejected promise to the error middleware** (changed in v5.0). As lesson 50's correction records, the same async controller on Express 4 does not reach the handler at all. Example 9 shows what that looks like inside a test run.
-
-**A `createApp()` factory, no `listen`.** `app.js` exports a function that builds and returns the Express app. That function does not read `process.env`, does not create a real database client and does not call `listen`. Calling `listen` belongs to `server.js`, the one file that is only run, never imported. The split exists because `app.listen()` opens a socket. Every test file that imported a listening module would need its own free port, and it would have to close the server or the test process never exits. An Express `app` is itself a request handler, `(req, res) => …`, so a test does not need a listening server at all. supertest takes the `app`, wraps it in `http.createServer(app)`, listens on port 0 (the OS picks a free port), sends a real HTTP request over loopback and closes the server after the response.
+**`createApp` does not listen.** `app.js` exports a function that builds and returns the app. It does not read `process.env`, does not create a real database client, and does not call `listen`. `listen` belongs to `server.js`, the file that is only run, never imported. `app.listen()` opens a socket. Every test that imported a listening module would need its own free port, and the process would not exit until that server closed. An Express `app` is itself a request handler, `(req, res) => ...`, so a test does not need a listening server of its own. supertest takes the app, wraps it in `http.createServer(app)`, listens on port 0 so the operating system picks a free port, sends a real HTTP request over loopback, and closes the server after the response.
 
 ![How supertest drives your API: the test file calls request(app).post('/users'), supertest binds the app to a random free port on an ephemeral server, sends a real HTTP request through your routes and middleware, and the response comes back for .expect(201) and assertions on res.body, with no manual listen() and no hardcoded port](assets/i56_01_dc096a03.svg)
 *Figure: How supertest drives your API. Look at: the "Ephemeral server" box — supertest opens and closes the port itself, which is why `createApp()` must hand back an app that is not yet listening.*
 
-**Dependency injection by hand.** Each factory takes its dependencies as one object argument and returns plain functions that close over them: `createNotesService({ notesRepository })`. This is the whole mechanism. There is no registry, and you never call `new Container()`. To use a different storage you pass a different object. The tests in Example 7 pass `createMemoryNotesRepository(seed)`, which is fast, needs no files, and starts each test from a known state. The 500-path test passes an object whose `list()` rejects, which would be hard to arrange with a real database. Because the service only ever sees the argument, nothing has to be patched or mocked at the module level.
+**Dependency injection by hand.** Each factory takes one object of dependencies and returns functions that close over them. `createNotesService({ notesRepository })` is the whole mechanism. There is no registry and no `new Container()`. To use different storage, pass a different object. The tests in Example 7 pass `createMemoryNotesRepository(seed)`, which is fast, needs no files, and starts each test from a known state. The 500-path test passes an object whose `list()` rejects, which is hard to arrange with a real database. Because the service only sees the argument, nothing has to be patched at the module level.
 
-**What changes on Express 4.** The layout works on Express 4.22.3 too, but the same files behave differently in two places. Both were run (Example 9):
+**What changes on Express 4.** The same files run on Express 4.22.3, and two behaviors differ. Example 9 ran both.
 
-- **Async errors.** An `async` controller that rejects is not forwarded to the error handler. Without an `asyncHandler` wrapper (lesson 50), no response is written.
-- **Missing body.** `req.body` is `{}` instead of `undefined` when no body is sent, so the validation error points at `title` instead of the root.
+- An `async` controller that rejects is not forwarded to the error handler. Without the `asyncHandler` wrapper from lesson 50, no response is written.
+- `req.body` is `{}` instead of `undefined` when no body is sent, so the validation error points at `title` instead of the root.
+- Express 4's `app.listen` ignores the error-first callback. Its source returns `server.listen.apply(server, arguments)`, so `EADDRINUSE` is an `'error'` event on the server, not an argument to your callback.
 
 ## Code examples
 
@@ -812,58 +796,58 @@ A regex over `import` lines is a coarse check: it misses `await import()` and re
 
 ## Common mistakes & gotchas
 
-- **Calling `listen()` in the module that tests import.** Every test file then opens a port, two files clash on `EADDRINUSE`, and the test process does not exit while the server is open. Return the app from `createApp()` and call `listen` only in `server.js`.
-- **Reading `process.env` deep inside services.** It hides a dependency, and a typo shows up only on the code path that reads it. Read it once in the config module and pass the values down.
-- **Parsing env without coercion.** `process.env.PORT` is the string `'6001'`. `z.number()` rejects it; `z.coerce.number()` converts it. Coercion has its own trap: `z.coerce.number()` turns `''` into `0`, so an empty `PORT=` is accepted as port 0 (any free port) unless you add `.min(1)` or reject empty strings first.
-- **Services that take `req` and `res`.** A service that calls `res.status(404)` cannot be reused from a queue worker or a CLI, and it can only be tested with a fake response object. Throw `NotFoundError` from the service and let the central handler decide the status.
-- **Repositories that throw HTTP errors.** "Not found" is a business decision. Return `null` from storage and let the service turn it into `NotFoundError`.
-- **More than one place formats errors.** If a controller sends `res.status(400).json({ msg })` itself, clients see two shapes. Throw, and let the single handler format the response.
-- **Leaving out the four-argument signature or `res.headersSent`.** A three-argument "error handler" is treated as normal middleware and never sees errors. Without the `headersSent` check, an error after a partial response throws "Cannot set headers after they are sent".
-- **Assuming Express 5 behaviour on Express 4.** The `async` controllers here rely on Express 5 forwarding rejections. On Express 4 they leave requests without a response (Example 9).
-- **Sharing one in-memory repository between tests.** Notes created in one test leak into the next. Build a fresh app with a fresh repository in each test, as `build()` does.
+- **Calling `listen()` in the module tests import.** Every test file opens a port, two files clash on `EADDRINUSE`, and the process does not exit while the server is open. Return the app from `createApp()` and call `listen` only in `server.js`.
+- **Reading `process.env` inside services.** The dependency is hidden, and a typo shows up only on the path that reads it. Read it once in config and pass the values down.
+- **Parsing env without coercion.** `process.env.PORT` is the string `'6001'`. `z.number()` rejects it. `z.coerce.number()` converts it. The trap is that `z.coerce.number()` turns `''` into `0`, so an empty `PORT=` is accepted as port 0 unless you add `.min(1)` or reject empty strings first.
+- **A service that takes `req` and `res`.** It cannot run from a queue worker or a CLI, and the test needs a fake response. Throw `NotFoundError` and let the central handler pick the status.
+- **A repository that throws HTTP errors.** "Not found" is a business decision. Return `null` and let the service throw `NotFoundError`.
+- **More than one place formatting errors.** A controller that sends its own `{ msg }` gives the client a second shape. Throw, and let the one handler format the response.
+- **A three-argument "error handler", or no `res.headersSent` check.** Three parameters means normal middleware, so it never sees errors. Without the check, an error after a partial response throws "Cannot set headers after they are sent".
+- **Assuming Express 5 behavior on Express 4.** These async controllers rely on Express 5 forwarding rejections. On Express 4 the request gets no response. Example 9 shows it.
+- **One in-memory repository shared by tests.** Notes from one test leak into the next. Build a fresh app and a fresh repository in each test.
 
 ## Best practices
 
-- **Keep `app.js` side-effect free.** It exports `createApp(deps)` and does nothing on import. `server.js` is the only file that reads env, opens ports and installs signal handlers.
-- **Validate config at startup with a schema,** freeze the result and exit non-zero on failure, printing every bad variable at once.
-- **One error base class plus one central handler.** Use stable `code` strings for clients, `status` for HTTP, and a generic message for 5xx with the real error logged server-side.
-- **Pass dependencies as arguments,** one object per factory (`{ notesRepository }`). Named fields keep call sites readable and let you add a dependency without reordering parameters.
-- **Let the repository's interface be the contract.** Write the in-memory version alongside the real one and run the same behaviour tests against both, so they cannot drift.
-- **Start layer-based if the app is small. Switch to feature folders when one change routinely touches many directories.** Keep `errors/`, `middleware/` and `config/` shared either way.
-- **Check the dependency rule automatically** (a test or a lint rule), not just in a diagram.
-- **Use supertest against `createApp()` for HTTP tests** and keep a curl or smoke check against the real `server.js` for the parts tests skip, such as config loading and the file or database repository. See [lesson 93](93-integration-testing.md).
+- `app.js` exports `createApp(deps)` and does nothing on import. `server.js` is the only file that reads env, opens a port, and installs signal handlers.
+- Validate config at startup with a schema, freeze the result, and exit non-zero on failure, printing every bad variable at once.
+- One error base class and one central handler. Stable `code` strings for clients, `status` for HTTP, and a generic message for 5xx with the real error logged on the server.
+- Pass dependencies as one object per factory, `{ notesRepository }`. Named fields stay readable when you add another dependency.
+- Let the repository's interface be the contract. Keep an in-memory version next to the real one and run the same behavior tests against both.
+- Start layer-based while the app is small. Switch to feature folders when one change routinely touches many directories. Keep `errors/`, `middleware/`, and `config/` shared either way.
+- Check the dependency rule in a test or a lint rule, not only in a diagram.
+- Use supertest against `createApp()` for HTTP tests. Keep a curl or smoke check against the real `server.js` for config loading and the real repository. Lesson 93 covers that style of test.
 
 ## ⭐ Interview lens
 
 > **Q: “Why export a `createApp()` function instead of the app that `server.js` starts?”**  
-> A: Building the app and running it are different jobs. `createApp(deps)` returns an Express app, which is a request handler, without opening a socket. Tests call it with fake dependencies and hand it to supertest, which listens on an ephemeral port and closes it after each request. `server.js` is the only file that reads env and calls `listen`, so importing the app has no side effects. *Trap:* "so tests can use port 3001" misses the point. The goal is that no test chooses a port at all.
+> A: Building the app and running it are different jobs. `createApp(deps)` wires the middleware, routes, and your factories, and returns the Express app. That app is a request handler, `(req, res) => ...`, and it has not called `listen`, read `process.env`, or opened a database. A test calls it with an in-memory repository and passes the app to supertest. supertest wraps it in `http.createServer`, listens on port 0 so the operating system picks a free port, sends a real request, and closes the server. `server.js` is the only file that loads config and calls `listen`, so importing the app has no side effects. The trap is answering "so tests can use port 3001". The point is that no test chooses a port at all. If `listen` lived in the imported module, two test files would clash on `EADDRINUSE`, and the process would not exit while the socket stayed open.
 
 > **Q: “What goes in a controller, a service and a repository?”**  
-> A: The controller translates HTTP to function calls: it reads validated input from `res.locals`, calls the service and picks the status code. The service holds business rules, such as "titles are unique", and throws domain errors like `NotFoundError`. It never sees `req` or `res`. The repository does storage only and returns data or `null`. Imports point one way: controller → service → repository.
+> A: The controller translates HTTP into a function call. It reads input that validation already stored on `res.locals`, calls the service, and chooses the status, such as 201 plus a `Location` header. The service holds business rules, such as "titles are unique", and throws a domain error such as `ConflictError` or `NotFoundError`. It never sees `req` or `res`, so the same function can run from a test, a CLI, or a worker. The repository does storage only. It returns the row or `null`, and it does not decide that `null` means 404. Imports point one way, controller to service to repository. The limit is a service that calls `res.status`. That service can only be tested with a fake response, and it cannot be reused outside HTTP.
 
 > **Q: “How do you do dependency injection in Express without a framework?”**  
-> A: With factory functions that take their dependencies as arguments: `createNotesService({ notesRepository })`. The composition root builds the real objects in order and passes them in. A test passes an in-memory repository, or one that rejects to test the 500 path. No container or module mocking is needed because nothing imports a concrete dependency.
-
-> **Q: “Layer-based or feature-based folders?”**  
-> A: Layer-based (`controllers/`, `services/`) is simple and makes each layer's rules visible, but one feature change touches many folders. Feature-based (`notes/`, `users/`) keeps a feature's files together, which makes it easier to review, delete or extract. It needs a naming convention and a check to keep the layer rules. Shared `errors/`, `middleware/` and `config/` stay at the top either way.
+> A: Use factory functions that take their dependencies as one object. `createNotesService({ notesRepository })` returns the service functions, which close over that object. `server.js`, the composition root, builds the real repository, passes it to the service, the service to the controller, and the controller to the router. There is no container and no decorator. A test passes `createMemoryNotesRepository(seed)`, or an object whose `list()` rejects, to drive the 500 path, which is hard to force with a real database. Nothing imports a concrete repository, so you do not mock the module. The limit is discipline. The rule is real only if something checks it. Example 10 reads each layer's `import` lines and fails on a forbidden one. That regex misses `await import()` and re-exports, so a larger codebase usually moves the check into a lint rule.
 
 > **Q: “Your async controllers have no try/catch. Is that safe?”**  
-> A: On Express 5, yes: a rejected promise from a handler is forwarded to the error middleware. On Express 4 it is not. The request gets no response, and by default Node crashes the process on the unhandled rejection. Express 4 needs an `asyncHandler` wrapper around each handler.
+> A: On Express 5, yes. A rejected promise from an async handler is forwarded to the error middleware, which changed in v5.0, so these controllers have no try/catch and the central handler still formats `{ error: { code, message } }`. On Express 4 it is not safe. The rejection never reaches `next(err)`, no response is written, and Node's default since Node 15, `--unhandled-rejections=throw`, crashes the process. Example 9 ran the same project on Express 4.22.3. The stray rejection was `Error: disk on fire`, and without forcing the test runner to exit the request stayed open. Express 4 needs the `asyncHandler` wrapper from lesson 50 around each handler. Express 4 also sets `req.body` to `{}` when no body was sent, where Express 5 leaves it `undefined`, so a missing-body validation error points at `title` instead of the root. Both still return 422 if the schema rejects either shape.
 
 ## Cheat-card
 
-- **Composition root:** `server.js` = `loadConfig()` + concrete deps + `createApp(deps)` + `listen`. Only it has side effects.
-- **`createApp(deps)`:** builds and returns the app; no `listen`, no `process.env`. Tests: `request(createApp({ notesRepository: createMemoryNotesRepository() }))`.
-- **Dependency rule:** routes → controller → service → repository. Services never import `express`; repositories never throw HTTP errors.
-- **DI by hand:** `createX({ dep })` factories; swap a dependency by passing a different object.
-- **Config:** Zod schema over `process.env`, `z.coerce.number()` for numbers, `z.prettifyError` (Zod 4) on failure, `process.exit(1)` before listening.
-- **Errors:** `AppError(message, status, code, details)` + subclasses; `notFound` after routes; one 4-arg handler last; `res.headersSent` → `next(err)`; 5xx = generic message + server log.
-- **Express 5:** async rejections are forwarded; `req.body` is `undefined` with no body; `app.listen(port, cb)` passes listen errors to `cb`. Express 4 does none of these.
-- **Validated input:** `res.locals.validated.body` / `.params`, not `req.query =`.
-- **Folders:** layer-based for small apps; feature-based when changes span many directories.
-- **Versions used:** Express 5.3.0, Zod 4.6.5, supertest 7.3.1, Node v24.19.0.
+- The composition root is `server.js`: `loadConfig()`, the concrete dependencies, `createApp(deps)`, and `listen`. Only that file has side effects.
+- `createApp(deps)` builds and returns the app. No `listen`, no `process.env`. A test is `request(createApp({ notesRepository: createMemoryNotesRepository() }))`.
+- Imports point one way: routes, controller, service, repository. A service does not import `express`. A repository does not throw an HTTP error.
+- Hand-rolled dependency injection is `createX({ dep })`. Swap a dependency by passing a different object.
+- Config is a Zod schema over `process.env`, `z.coerce.number()` for numbers, `z.prettifyError` from Zod 4 on failure, and `process.exit(1)` before listening.
+- Errors: `AppError(message, status, code, details)` and subclasses. `notFound` after the routes. One four-argument handler last. If `res.headersSent`, call `next(err)`. A 5xx is a generic message plus a server log.
+- Express 5 forwards async rejections, leaves `req.body` `undefined` when there is no body, and passes listen errors such as `EADDRINUSE` to the `listen` callback. Express 4 does none of these.
+- Validated input lives on `res.locals.validated.body` and `.params`. Do not assign to `req.query`.
+- Start with layer-based folders while the app is small. Move to feature folders when one change spans many directories.
 
----
+## Good to know
+
+- Layer-based folders (`controllers/`, `services/`) make each layer's rule visible, and one feature change touches many directories. Feature-based folders (`notes/`, `users/`) keep a feature together, which is easier to review, delete, or extract, and they need a naming convention plus a check so the layer rules survive. Shared `errors/`, `middleware/`, and `config/` stay at the top either way.
+- Versions this lesson ran: Express 5.3.0, Express 4.22.3 for the comparison, Zod 4.6.5, supertest 7.3.1, Node v24.19.0. `z.prettifyError` was added in Zod 4.
+- In Example 9, killing the hung Express 4 test with `timeout` at 20 seconds exited 124, and the runner reported the file as cancelled. Outside the test runner, the unhandled rejection crashes the process.
 
 ## Learn More
 

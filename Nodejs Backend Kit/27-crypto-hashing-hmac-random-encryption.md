@@ -13,31 +13,33 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+The crypto module is Node's OpenSSL-backed toolbox, and each job has its own tool: a hash such as SHA-256 for integrity, an HMAC for a signature that proves a shared secret, randomBytes for unpredictable tokens, a slow salted function such as scrypt for passwords, and AES-GCM for encryption you can read back. It exists so you use a reviewed primitive instead of inventing one. The trade-off is that the fast tools are the wrong tools for passwords, and reusing an IV with AES-GCM breaks the encryption.
+
 ## Why it matters
 
-Security bugs are the most expensive kind of bug, and cryptography is the one area where "it looks like it works" is worthless — a broken scheme runs perfectly and encrypts nothing meaningful. Node's built-in `crypto` module gives you battle-tested primitives (backed by OpenSSL) for hashing, message authentication, secure random generation, password storage, and encryption. Knowing which primitive solves which problem — and, just as important, which ones must *never* be used for a given job — is core backend competence.
-
-Interviewers lean on `crypto` because it separates people who reach for the right tool from those who "just SHA-256 the password." The consequences of getting it wrong are concrete: leaked credentials, forgeable tokens, predictable IDs, timing attacks. You do not need to invent cryptography — you need to use these primitives correctly and know their boundaries. This topic is about exactly that judgement.
+Security bugs are the expensive kind, and cryptography is the area where "it looks like it works" is worthless. A broken scheme runs and encrypts nothing meaningful. crypto gives you hashing, message authentication, secure random bytes, password storage, and encryption. Knowing which primitive solves which problem, and which ones must never be used for a given job, is the skill. You do not invent cryptography. You use these primitives correctly and you know their boundaries.
 
 ## The concept, simply
 
-Four distinct jobs, four distinct tools. **Hashing** (`createHash`, e.g. SHA-256) turns any input into a fixed-size, one-way digest — used for integrity checks and deduplication, *not* secrecy. **HMAC** (`createHmac`) combines a hash with a secret key to prove a message came from someone who holds the key — used to sign and verify webhooks and tokens. **Secure randomness** (`randomBytes`, `randomUUID`) produces unpredictable values for tokens, salts, and IDs. **Password hashing** (`scrypt`, or argon2/bcrypt via libraries) is deliberately slow and salted, purpose-built to store passwords. **Encryption** (`createCipheriv` with AES-GCM) provides confidentiality with an authenticated tag, for data you must later read back.
+Five jobs, five tools. Hashing, createHash with something like SHA-256, turns any input into a fixed-size one-way digest. Use it for integrity checks and deduplication, not for secrecy. HMAC, createHmac, combines a hash with a secret key so you can prove a message came from someone who holds the key. Use it to sign webhooks and tokens. Secure randomness, randomBytes and randomUUID, produces unpredictable values for tokens, salts, and IDs. Password hashing, scrypt, or argon2 and bcrypt from libraries, is deliberately slow and salted, built to store passwords. Encryption, createCipheriv with AES-GCM, hides data and adds an authentication tag, for data you must later read back.
 
 ![Three columns comparing SHA-256 hashing, HMAC, and scrypt password hashing by purpose](assets/i21_01_b5b96da8.svg)
 
-Match the primitive to the job: fast digests for integrity, HMAC for authenticity, slow salted hashing for passwords. They are not interchangeable.
+Match the tool to the job. A fast digest is for integrity. HMAC is for authenticity. A slow salted hash is for passwords. They are not interchangeable.
 
 ## How it works (deep)
 
-A **cryptographic hash** is deterministic (same input, same digest), fixed-size (SHA-256 is always 32 bytes), one-way (you cannot reverse the digest to the input), and collision-resistant (finding two inputs with the same digest is infeasible). This makes it ideal for verifying that a file or message has not changed. It is disastrous for passwords, though, precisely *because* it is fast: an attacker with a leaked digest can try billions of guesses per second, and identical passwords produce identical digests, so rainbow tables crack them wholesale. Speed is a feature for integrity and a vulnerability for passwords.
+A cryptographic hash is deterministic: the same input always gives the same digest. It is fixed-size: SHA-256 is always 32 bytes. It is one-way: you cannot reverse the digest to the input. It is collision-resistant: finding two inputs with the same digest is not feasible. That makes it right for checking that a file has not changed. It is disastrous for passwords because it is fast. An attacker with a leaked digest can try billions of guesses per second, and identical passwords produce identical digests, so a rainbow table, a precomputed list of hashes, cracks them in bulk. Speed is a feature for integrity and a weakness for passwords.
 
-**HMAC** fixes a subtle problem with plain hashing for authentication. You cannot simply hash `secret + message` to sign it — that construction is vulnerable to length-extension attacks against Merkle–Damgård hashes. HMAC's specific nested construction (hashing the key with inner and outer pads) is proven secure. When you receive a signed webhook, you recompute the HMAC over the raw body with your shared secret and compare it to the sender's signature. Crucially, that comparison must be **constant-time** (`crypto.timingSafeEqual`): a naive `===` returns as soon as bytes differ, leaking timing information that lets an attacker recover the signature byte by byte.
+HMAC fixes a subtle problem with hashing a secret plus a message. That construction is vulnerable to length-extension attacks against Merkle-Damgard hashes, the family SHA-256 belongs to. HMAC's nested construction, hashing the key with inner and outer pads, is the proven one. When a signed webhook arrives, you recompute the HMAC over the raw body with your shared secret and compare it to the sender's signature. The comparison must be constant-time, crypto.timingSafeEqual. A plain === returns as soon as two bytes differ, which leaks how many leading bytes matched.
 
-**Secure randomness** comes from the OS's cryptographically secure RNG via `crypto.randomBytes` and `crypto.randomUUID`. This is categorically different from `Math.random()`, which is fast but predictable and must *never* generate tokens, session IDs, password-reset codes, or salts. If an attacker can guess your randomness, every security guarantee downstream collapses.
+Secure randomness comes from the operating system's cryptographically secure generator, through randomBytes and randomUUID. That is a different category from Math.random, which is fast and predictable. Never use Math.random for tokens, session IDs, password-reset codes, or salts. If an attacker can guess the randomness, everything downstream collapses.
 
-**Password hashing** inverts the speed logic on purpose. `scrypt` (built in), `argon2`, and `bcrypt` are *slow* and memory-hard, with a tunable cost factor, and each password gets a unique random **salt** so identical passwords produce different stored hashes and rainbow tables are useless. You store the salt alongside the hash; on login you re-derive with the same salt and compare in constant time. The slowness is the whole point — it caps how many guesses an attacker can make per second.
+Password hashing inverts the speed on purpose. scrypt, which is built in, and argon2 and bcrypt, are slow and memory-hard, with a tunable cost, and each password gets a unique random salt so identical passwords produce different stored hashes. You store the salt next to the hash. On login you derive again with the same salt and compare in constant time. The slowness is the point. It caps how many guesses an attacker can try per second.
 
-**Encryption** is for data you must read back, unlike hashing. Use **AES-256-GCM**, an authenticated cipher: it needs a 32-byte key and a unique **IV** (initialisation vector) per message, and it produces both ciphertext and an authentication tag that detects tampering on decryption. The cardinal rule is *never reuse an IV with the same key* — doing so with GCM catastrophically breaks confidentiality and authenticity. Generate a fresh random IV for every encryption and store it with the ciphertext (it is not secret).
+Encryption is for data you must read back. Hashing is not. Use AES-256-GCM, an authenticated cipher. It needs a 32-byte key and a unique IV, an initialisation vector, per message. It produces ciphertext and an authentication tag that detects tampering. Never reuse an IV with the same key. With GCM that breaks confidentiality and authenticity. Generate a fresh random IV for every encryption and store it with the ciphertext. The IV is not secret.
 
 ## Code examples
 
@@ -127,57 +129,61 @@ function decrypt({ iv, tag, data }) {
 
 ## Common mistakes & gotchas
 
-- **Hashing passwords with SHA-256/MD5.** Fast hashes are trivially brute-forced. Passwords need slow, salted `scrypt`/argon2/bcrypt. This is the single most common crypto mistake.
-- **Comparing secrets with `===`.** String/Buffer equality short-circuits on the first differing byte, leaking timing. Use `crypto.timingSafeEqual` on equal-length buffers.
-- **Using `Math.random()` for anything security-sensitive.** It is predictable. Tokens, salts, IVs, OTPs, and IDs must come from `crypto.randomBytes`/`randomUUID`.
-- **Reusing an IV (nonce) with AES-GCM.** Nonce reuse under the same key destroys GCM's security entirely. Generate a fresh random IV per message and store it with the ciphertext.
-- **Confusing encoding with encryption.** Base64 is not encryption — it is reversible by anyone. Encoding hides nothing.
-- **Encrypting without authentication.** Plain AES-CBC without a MAC lets attackers tamper undetected. Prefer AES-GCM (built-in authentication) and always verify the tag on decrypt.
-- **Hardcoding keys in source.** Keys in the repo are compromised the moment the repo is. Load them from environment/secret managers and rotate them.
-- **Rolling your own crypto.** Custom schemes are almost always broken. Use standard primitives with standard modes.
+- Hashing passwords with SHA-256 or MD5. Fast hashes are brute-forced. Passwords need slow, salted scrypt, argon2, or bcrypt.
+- Comparing secrets with ===. Equality stops at the first differing byte and leaks timing. Use timingSafeEqual on equal-length buffers.
+- Math.random for anything security-sensitive. It is predictable. Tokens, salts, IVs, one-time codes, and IDs come from randomBytes or randomUUID.
+- Reusing an IV, also called a nonce, with AES-GCM under the same key destroys GCM's security. A fresh random IV per message, stored with the ciphertext.
+- Base64 is not encryption. Anyone can reverse it. Encoding hides nothing.
+- AES-CBC without a MAC lets attackers tamper undetected. Prefer AES-GCM, which authenticates, and always check the tag on decrypt.
+- Keys in source are compromised when the repo is. Load them from the environment or a secret manager, and rotate them.
+- Custom schemes are almost always broken. Use standard primitives and standard modes.
 
 ## Best practices
 
-- **Passwords → `scrypt`/argon2/bcrypt with a unique per-user salt,** never a plain hash.
-- **Compare all secrets with `timingSafeEqual`** on equal-length buffers.
-- **Generate every token, salt, IV, and ID with `crypto.randomBytes`/`randomUUID`.**
-- **Encrypt with AES-256-GCM,** a fresh IV per message, and always verify the auth tag on decrypt.
-- **Store the salt/IV/tag alongside the ciphertext** — they are not secret, and you need them to verify/decrypt.
-- **Keep keys out of source;** load from a secret manager and support rotation.
-- **Verify webhooks with HMAC over the raw body** (not the parsed/re-serialised body) and constant-time comparison.
-- **Use standard primitives and modes; do not invent your own.**
+- Passwords go to scrypt, argon2, or bcrypt with a unique salt per user. Never a plain hash.
+- Compare secrets with timingSafeEqual on equal-length buffers.
+- Generate every token, salt, IV, and ID with randomBytes or randomUUID.
+- Encrypt with AES-256-GCM, a fresh IV per message, and verify the auth tag on decrypt.
+- Store the salt, the IV, and the tag next to the ciphertext. They are not secret. Keep keys in a secret manager.
+- Verify webhooks with HMAC over the raw body, not a re-serialised body, and compare in constant time.
+- Do not invent your own construction.
 
 ## ⭐ Interview lens
 
 > **Q: Why can't you store passwords with SHA-256?** Because SHA-256 is fast and unsalted by default: an attacker with the digests can try billions of guesses per second, and identical passwords hash identically, so rainbow tables crack them en masse. Passwords need a deliberately slow, salted, memory-hard function like `scrypt`, argon2, or bcrypt.
+> SHA-256 is a fast, unsalted hash. An attacker who steals the digests can try billions of guesses per second, and two users with the same password produce the same digest, so a precomputed rainbow table cracks them together. A password store needs the opposite properties: a unique random salt per password, so identical passwords do not match, and a function that is deliberately slow and memory-hard, so each guess is expensive. Node's built-in is scrypt. argon2 and bcrypt are the usual libraries. You store the salt with the hash and, on login, derive again and compare with timingSafeEqual. The limit of "just use SHA-256 with a salt" is that salt stops the rainbow table and does not stop the speed. A fast hash is still brute-forced.
 
 > **Q: What is the difference between a hash and an HMAC?** A plain hash is keyless — anyone can compute it, so it proves integrity but not origin. An HMAC mixes in a secret key with a proven construction, so a valid HMAC proves the message came from someone holding the key. HMAC is what you use to sign and verify webhooks and tokens.
+> A hash has no key. Anyone can compute it, so it proves the bytes did not change and it does not prove who produced them. An HMAC mixes a secret key into the hash with a specific nested construction, so a valid tag proves the message came from someone who holds that key. You use it to sign and verify webhooks and tokens. For example, you HMAC the raw request body with the shared secret and compare the result to the signature header using timingSafeEqual. The limit is the shared secret. Anyone who can verify an HMAC can also create one, so it is the wrong tool when the verifier must not be able to sign. That job needs a private key and a public key.
 
 > **Q: Why use `timingSafeEqual` instead of `===` for a signature?** `===` returns as soon as two bytes differ, so the comparison time reveals how many leading bytes matched. An attacker can exploit that timing to reconstruct the secret byte by byte. `timingSafeEqual` always compares the full length in constant time.
+> === and ordinary string or buffer equality return as soon as two bytes differ, so the time taken reveals how many leading bytes matched. An attacker who can measure that can walk the secret one byte at a time. timingSafeEqual always compares the full length, so the time does not depend on where the first difference is. You use it for HMAC tags, password hashes, and any other secret comparison. For example, a webhook handler computes the expected tag and compares it to the header with timingSafeEqual, not with ===. The limit is that the two buffers must be the same length. timingSafeEqual throws if they are not, so you check the length first without turning that check into its own leak of the secret.
 
 > **Q: What breaks if you reuse an IV with AES-GCM?** Nonce reuse under the same key is catastrophic for GCM: it leaks the XOR of plaintexts and, worse, allows forging the authentication tag, breaking both confidentiality and integrity. Every message needs a fresh, unique IV.
-
-> **Q: Is base64 a form of encryption?** No. Base64 is a reversible encoding with no key — anyone can decode it. It provides zero confidentiality; it only makes binary data safe to transport as text.
-
-> **Q: Why not `Math.random()` for a session token?** `Math.random()` is a fast PRNG seeded predictably and not designed for security; its output can be predicted, which would let an attacker guess valid tokens. Security-sensitive randomness must come from `crypto.randomBytes`/`randomUUID`, backed by the OS CSPRNG.
+> GCM builds a keystream from the key and the IV and XORs the plaintext with it. XOR means combining bits so that doing it twice returns the original. Two messages under the same key and the same IV share that keystream, so XORing the ciphertexts reveals the XOR of the plaintexts. Knowing one plaintext reveals the other. Worse, the authentication key leaks too, so an attacker can forge tags. Confidentiality and integrity both fail. Every message needs a fresh, unique IV, usually 12 random bytes, stored next to the ciphertext. The IV is not a secret. The limit is "unique", not "random-looking". A counter is unique if you never repeat it under that key. A random IV you accidentally repeat is not.
 
 ## Cheat-card
 
-- Integrity → `createHash('sha256')` (fast, keyless, one-way).
-- Authenticity → `createHmac('sha256', secret)` + `timingSafeEqual`.
-- Passwords → `scrypt`/argon2/bcrypt, unique salt, slow on purpose. Never SHA/MD5.
-- Randomness → `randomBytes` / `randomUUID` / `randomInt`. Never `Math.random()`.
-- Encryption → AES-256-GCM, fresh IV per message, verify the auth tag.
-- Store salt/IV/tag next to ciphertext (not secret); keep *keys* in a secret manager.
-- Base64 = encoding, not encryption.
-- Compare secrets in constant time; never `===`.
-- Use standard primitives — never roll your own.
-- Key pairs → `generateKeyPair('ed25519' | 'ec' | 'rsa', opts, cb)`; `publicKeyEncoding: { type: 'spki', format: 'pem' }`, `privateKeyEncoding: { type: 'pkcs8', format: 'pem', cipher?, passphrase? }`; avoid the Sync form in servers.
-- Signatures → `crypto.sign(alg | null, data, key)` / `crypto.verify(...)`; `null` for Ed25519; `createSign`/`createVerify` for streamed data (single-use, no Ed25519).
-- ECDSA → DER by default; `dsaEncoding: 'ieee-p1363'` for JWT/Web Crypto.
-- HKDF → `hkdfSync(digest, ikm, salt, info, keylen)` returns an `ArrayBuffer`; for random secrets, never passwords.
-- PBKDF2 → `pbkdf2(pw, salt, iterations, keylen, digest, cb)`; OWASP: 600,000 iterations for SHA-256; store the count with the hash.
-- Web Crypto (`crypto.subtle`) equivalents → [lesson 28](28-web-crypto.md).
+- Integrity: createHash('sha256'). Fast, no key, one-way.
+- Authenticity: createHmac('sha256', secret), then timingSafeEqual.
+- Passwords: scrypt, argon2, or bcrypt, a unique salt, slow on purpose. Never SHA or MD5.
+- Randomness: randomBytes, randomUUID, randomInt. Never Math.random.
+- Encryption: AES-256-GCM, a fresh IV per message, and check the auth tag.
+- Store the salt, IV, and tag next to the ciphertext. Keep the keys in a secret manager.
+- Base64 is an encoding, not encryption.
+- Compare secrets in constant time. Do not roll your own scheme.
+
+## Good to know
+
+- Is base64 a form of encryption? No. Base64 is a reversible encoding with no key. Anyone can decode it. It provides no confidentiality. It only makes binary safe to transport as text.
+
+- Why not `Math.random()` for a session token? Math.random is a fast generator that is not designed for security, and its output can be predicted, which would let an attacker guess tokens. Use randomBytes or randomUUID, backed by the operating system's generator.
+- Additional examples: 10 Oct 2026, examples verified on Node v24.19.0.
+- generateKeyPair and generateKeyPairSync were both added in v10.12.0.
+- Without encoding options, generateKeyPair returns KeyObjects, and that has been true since v11.6.0.
+- `crypto.verify(algorithm, data, key, signature[, callback])`: both added in v12.0.0, optional callback added in v15.12.0.
+- `r || s`: supported since v13.2.0 and v12.16.0.
+- `keyObject.toCryptoKey(algorithm, extractable, usages)`: added in v23.0.0 and v22.10.0.
 
 ---
 
@@ -192,16 +198,14 @@ function decrypt({ iv, tag, data }) {
 
 ## Additional topics
 
-*Added 10 Oct 2026 · examples verified on Node v24.19.0*
-
 ### `generateKeyPair` and `generateKeyPairSync`
 
-`crypto.generateKeyPair(type, options, callback)` and `crypto.generateKeyPairSync(type, options)` (both added in v10.12.0) create a new asymmetric key pair: a private key you keep secret and a public key you hand out. You need one for anything where the verifier must not be able to sign: JWTs signed with `ES256`/`EdDSA`/`RS256`, webhook signatures checked by third parties, TLS, SSH. An HMAC key from the main lesson cannot do that, because whoever can check an HMAC can also create one. `type` selects the algorithm: `'rsa'`, `'rsa-pss'`, `'ec'`, `'ed25519'`, `'x25519'` and others. Ed25519 and X25519 generation was added in v12.0.0.
+`crypto.generateKeyPair(type, options, callback)` and `crypto.generateKeyPairSync(type, options)` create a new asymmetric key pair: a private key you keep secret and a public key you hand out. You need one for anything where the verifier must not be able to sign: JWTs signed with `ES256`/`EdDSA`/`RS256`, webhook signatures checked by third parties, TLS, SSH. An HMAC key from the main lesson cannot do that, because whoever can check an HMAC can also create one. `type` selects the algorithm: `'rsa'`, `'rsa-pss'`, `'ec'`, `'ed25519'`, `'x25519'` and others. Ed25519 and X25519 generation was added in v12.0.0.
 
 How it works:
 
 1. Pick the type and its parameters: `modulusLength` (bits) and `publicExponent` (default `0x10001`) for RSA, `namedCurve` (`'P-256'`, `'P-384'`…) for EC, nothing for Ed25519.
-2. Without encoding options you get two `KeyObject`s (since v11.6.0), which you pass straight to `sign`/`verify` or export later with `keyObject.export()`.
+2. Without encoding options you get two `KeyObject`s, which you pass straight to `sign`/`verify` or export later with `keyObject.export()`.
 3. With `publicKeyEncoding: { type: 'spki', format: 'pem' }` and `privateKeyEncoding: { type: 'pkcs8', format: 'pem' }`, Node calls `export()` for you and returns PEM strings. Add `cipher` and `passphrase` to the private key encoding to get an `ENCRYPTED PRIVATE KEY` PEM. The docs recommend `'spki'`, and `'pkcs8'` with encryption, for long-term storage.
 4. `generateKeyPairSync` returns `{ publicKey, privateKey }` and blocks the thread until it is done. `generateKeyPair` calls `callback(err, publicKey, privateKey)` later, and `util.promisify(generateKeyPair)` resolves to `{ publicKey, privateKey }`.
 
@@ -268,13 +272,13 @@ The 5 ms interval could not run while `generateKeyPairSync` built a 3072-bit RSA
 
 ### `crypto.sign` / `crypto.verify` and `createSign` / `createVerify`
 
-A digital signature is a value computed over data with a private key, which anyone holding the matching public key can check. Changing a single byte of the data or the signature makes verification fail. Node offers two shapes. **One-shot** `crypto.sign(algorithm, data, key[, callback])` and `crypto.verify(algorithm, data, key, signature[, callback])` (both added in v12.0.0, optional callback added in v15.12.0) take all the data at once. **Streaming** `crypto.createSign(algorithm)` / `crypto.createVerify(algorithm)` return `Sign`/`Verify` objects (writable streams) that you feed with `update()` and finish with `sign(key)` / `verify(key, signature)`.
+A digital signature is a value computed over data with a private key, which anyone holding the matching public key can check. Changing a single byte of the data or the signature makes verification fail. Node offers two shapes. **One-shot** `crypto.sign(algorithm, data, key[, callback])` and `crypto.verify(algorithm, data, key, signature[, callback])` take all the data at once. **Streaming** `crypto.createSign(algorithm)` / `crypto.createVerify(algorithm)` return `Sign`/`Verify` objects (writable streams) that you feed with `update()` and finish with `sign(key)` / `verify(key, signature)`.
 
 How it works:
 
 1. `algorithm` is the hash name (`'sha256'`), or `null`/`undefined` for Ed25519 and Ed448, which hash internally.
 2. `key` is a `KeyObject`, a PEM string, or an object `{ key, padding, saltLength, dsaEncoding }`. `padding: crypto.constants.RSA_PKCS1_PSS_PADDING` selects RSA-PSS. Without it RSA uses PKCS#1 v1.5.
-3. ECDSA signatures are DER-encoded by default (an ASN.1 `SEQUENCE`, first byte `0x30`, variable length). `dsaEncoding: 'ieee-p1363'` gives the fixed-size `r || s` form that JWTs and Web Crypto use (supported since v13.2.0 and v12.16.0).
+3. ECDSA signatures are DER-encoded by default (an ASN.1 `SEQUENCE`, first byte `0x30`, variable length). `dsaEncoding: 'ieee-p1363'` gives the fixed-size `r || s` form that JWTs and Web Crypto use.
 4. `verify` returns `true` or `false`. It throws only on bad arguments, not on a bad signature.
 5. A `Sign` or `Verify` object is single-use. A second `sign()` throws (`ERR_CRYPTO_INVALID_STATE`).
 
@@ -459,7 +463,7 @@ How it works:
 
 1. Import or generate a `CryptoKey` with `crypto.subtle.importKey` / `generateKey`.
 2. Call `crypto.subtle.sign`, `encrypt`, `deriveBits` and so on. Each returns a promise of an `ArrayBuffer` (a boolean for `verify`).
-3. Convert keys between the APIs with `KeyObject.from(cryptoKey)` and `keyObject.toCryptoKey(algorithm, extractable, usages)` (added in v23.0.0 and v22.10.0).
+3. Convert keys between the APIs with `KeyObject.from(cryptoKey)` and `keyObject.toCryptoKey(algorithm, extractable, usages)`.
 
 **Example — the two APIs agree.**
 

@@ -13,37 +13,41 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Graceful shutdown means your process catches SIGTERM, the polite stop signal, stops taking new work, finishes requests it already has, closes the database and Redis, and then exits. Platforms send that signal on every deploy, scale-down, and node drain, and Node's default is to quit immediately and abandon those requests. The trade-off is a stuck request: you need a timer that forces the exit, or shutdown waits forever and the platform kills you anyway.
+
 ## Why it matters
 
-In a modern deployment, your process gets **killed constantly** — and that's normal. Every rolling deploy stops the old version, every autoscaling scale-down removes instances, every Kubernetes node drain evicts pods, every crash-and-restart cycle ends a process. The question is not *whether* your app will be told to stop, but *what happens to the requests in flight* when it is. Done naively, the process dies mid-request: a user's payment is cut off half-committed, a database write is left dangling, a queued job is lost. Done right — **graceful shutdown** — the app stops accepting new work, finishes what it's already doing, closes its connections cleanly, and exits. The difference is invisible when it works and a 3 a.m. incident when it doesn't.
+In a modern deployment the process is killed constantly, and that is normal. A rolling deploy stops the old version. Autoscaling removes instances. A Kubernetes node drain evicts pods. A crash restarts the process. The question is what happens to requests already in flight. Done badly, a payment is cut off half-committed, a database write is left dangling, or a queued job is lost. Done right, the app stops accepting new work, finishes what it started, closes connections, and exits.
 
-The flip side is **monitoring and health checks**: the platform needs to know, continuously, whether your instance is alive and whether it's ready to receive traffic — and you need to know your service's latency, error rate, and resource use before users tell you. Together, graceful shutdown and health/monitoring are what make a Node service *operable*. In interviews they're a favourite because they reveal whether you've actually run software in production: "what happens when Kubernetes sends SIGTERM?" is a question you can only answer well if you've had to.
+The platform also needs to know whether the instance is alive and whether it should receive traffic. You need latency, error rate, and resource use before users tell you. Shutdown plus health and monitoring is what makes the service operable. "What happens when Kubernetes sends SIGTERM?" is the interview question.
 
 ## The concept, simply
 
-When an orchestrator wants your process to stop, it sends the **SIGTERM** signal — a polite "please shut down." (Contrast **SIGKILL**, which can't be caught and kills instantly, and **SIGINT**, what Ctrl-C sends in your terminal.) By default Node exits on SIGTERM immediately, abandoning in-flight work. Graceful shutdown means *catching* SIGTERM and running an orderly teardown before exiting.
+When an orchestrator wants the process to stop, it sends **SIGTERM**, a polite please shut down. **SIGKILL** cannot be caught and kills immediately. **SIGINT** is what Ctrl-C sends in a terminal. Node's default on SIGTERM is to exit at once and abandon in-flight work. Graceful shutdown catches the signal and tears down in order.
 
-The teardown has a fixed shape: **(1)** stop taking new requests, **(2)** let in-flight requests finish (drain), **(3)** close resources — DB pool, Redis, message-queue consumers, flush logs/metrics, **(4)** exit with code 0. And critically, **(5)** a *forced-exit timer*: if draining takes too long (a stuck request), a timeout forces the exit so shutdown can't hang forever.
+The order is fixed. Stop taking new requests. Let in-flight requests finish, which is the drain. Close resources: the database pool, Redis, queue consumers, and flush logs and metrics. Exit with code 0. A forced-exit timer is the fifth piece. If a request is stuck, the timeout exits anyway so shutdown cannot hang.
 
 ![Ordered sequence for graceful shutdown on SIGTERM flip readiness to not-ready stop accepting connections drain in-flight requests close resources exit and a forced-exit safety timer](assets/i63_01_85ccfa6f.svg)
 
-Graceful shutdown on SIGTERM: mark not-ready so the LB stops routing, stop accepting new connections, drain in-flight requests, close DB/Redis/consumers, then exit — with a forced-exit timer as a safety net.
+Graceful shutdown on SIGTERM: mark not-ready so the load balancer stops routing, stop accepting new connections, drain in-flight requests, close the database, Redis, and consumers, then exit, with a forced-exit timer as a safety net.
 
-**Health checks** come in two flavours that people constantly conflate. A **liveness** probe answers "is the process alive, or wedged and needing a restart?" — fail it and the platform kills+restarts the instance. A **readiness** probe answers "is this instance ready to receive traffic *right now*?" — fail it and the load balancer stops routing to it *without* killing it. The distinction is what makes zero-downtime shutdown work: on SIGTERM you flip *readiness* to not-ready first, so the load balancer drains you, while the process stays up long enough to finish current requests.
+**Liveness** answers "is the process alive, or wedged and needing a restart?" Fail it and the platform kills and restarts the instance. **Readiness** answers "should this instance receive traffic right now?" Fail it and the load balancer stops routing, and the process stays up. On SIGTERM you flip readiness to not-ready first, so traffic drains while current requests finish.
 
-**Monitoring** is the always-on version of the same instinct: continuously observe the service through metrics (latency, throughput, error rate, event-loop lag, memory), logs (structured, to stdout), and traces, so you can see problems before users do and diagnose them fast.
+**Monitoring** is the same instinct, always on: latency, throughput, error rate, event-loop lag, and memory, plus structured logs on stdout, and traces.
 
 ## How it works
 
-You register handlers for the termination signals. On SIGTERM (and usually SIGINT for local dev), you kick off the shutdown sequence. The linchpin is **`server.close()`**: it tells the HTTP server to *stop accepting new connections* but keeps existing ones open until their in-flight requests complete, then fires its callback. That callback is where you close everything else — `await pool.end()`, `await redis.quit()`, stop queue consumers, flush your metrics/log buffers — and finally exit.
+Register handlers for SIGTERM and, for local dev, SIGINT. The linchpin is `server.close()`. It stops the HTTP server accepting new connections, keeps existing ones open until their requests finish, then runs your callback. In that callback, `await pool.end()`, `await redis.quit()`, stop queue consumers, flush metrics and logs, and exit.
 
-Two subtleties make this actually work in production. First, **keep-alive connections**: idle keep-alive sockets can keep `server.close()` from ever completing because the connection is open with no active request. Node's `server.closeIdleConnections()` (and, more aggressively, `closeAllConnections()`) handle this; libraries and Node's own `server.keepAliveTimeout` also help. Second, the **ordering with the load balancer**: if you call `server.close()` before the LB has noticed you're going away, new requests it already routed can hit a closing server. That's why you flip the readiness probe to not-ready *first*, wait a beat for the LB to stop sending traffic, and only then stop accepting. In Kubernetes this is also handled by the pod's `preStop` hook and `terminationGracePeriodSeconds`.
+Two details make this work. Idle keep-alive sockets can hold `server.close()` forever, because the connection is open and there is no active request. `server.closeIdleConnections()`, or the more aggressive `closeAllConnections()`, clears them. `server.keepAliveTimeout` helps too. Second, the load balancer must stop sending before you close. Flip the readiness probe to not-ready, wait a beat, then stop accepting. In Kubernetes the pod's `preStop` hook and `terminationGracePeriodSeconds` are part of that same window.
 
-The **forced-exit timer** is non-negotiable: `setTimeout(() => process.exit(1), 10_000).unref()`. If a request hangs (a slow upstream, a stuck DB query), you don't want shutdown to block indefinitely — after the grace period, exit anyway. The `.unref()` ensures this timer itself doesn't keep the process alive if everything *else* finished cleanly.
+The forced-exit timer is required: `setTimeout(() => process.exit(1), 10_000).unref()`. A slow upstream or a stuck query must not block shutdown until the platform sends SIGKILL. `unref` means the timer itself does not keep the process alive if everything else finished.
 
-**Health endpoints** are ordinary HTTP routes. A liveness route (`/healthz`) returns 200 as long as the process can respond — keep it cheap and dependency-free so a slow DB doesn't cause needless restarts. A readiness route (`/readyz`) checks that critical dependencies (DB, Redis) are reachable *and* returns 503 once shutdown has begun, so the LB drains you. For monitoring, you expose metrics (commonly a Prometheus `/metrics` endpoint via `prom-client`), and you watch **event-loop lag** specifically — rising lag is Node's canary for a blocked event loop, the failure this whole chapter's other topics exist to prevent.
+Health routes are ordinary HTTP. `/healthz`, liveness, returns 200 as long as the process can respond. Keep it cheap and free of dependencies, so a slow database does not cause restarts. `/readyz`, readiness, checks that the database and Redis are reachable, and returns 503 once shutdown has begun. For metrics, a Prometheus `/metrics` endpoint via `prom-client` is common. Watch **event-loop lag**. Rising lag means the loop is blocked, which is the Node-specific failure.
 
-Finally, handle the **crash signals**: `uncaughtException` and `unhandledRejection`. Best practice is to log, attempt a fast cleanup, and exit — because after an uncaught exception the process is in an unknown state, so you let the supervisor restart a fresh one rather than limp on corrupted.
+`uncaughtException` and `unhandledRejection` mean the process is in an unknown state. Log, try a fast cleanup, and exit. Let the supervisor start a fresh process. Do not keep serving.
 
 ## Code examples
 
@@ -151,61 +155,60 @@ process.on('unhandledRejection', (reason) => {
 
 ## Common mistakes & gotchas
 
-- **Not handling SIGTERM at all.** Node's default is immediate exit, so every deploy/scale-down kills in-flight requests. You must catch it and drain.
-- **No forced-exit timer.** If a request hangs, `server.close()` never calls back and the process hangs until the platform SIGKILLs it — losing the graceful part entirely. Always add an unref'd timeout.
-- **Idle keep-alive sockets block `server.close()`.** Without closing idle connections (or a keep-alive timeout), drain can stall on connections with no active request.
-- **Confusing liveness and readiness.** Putting dependency checks in the *liveness* probe means a brief DB blip triggers pointless restarts. Deep checks belong in readiness; liveness should just prove the process responds.
-- **Closing the server before the LB stops routing.** Flip readiness to not-ready first and wait a moment, or new requests hit a closing server. (In k8s, also mind `preStop` and grace period.)
-- **Trying to continue after `uncaughtException`.** The process state is unknown; limping on risks corrupt data. Log and exit; let the supervisor restart.
-- **Not making the handler idempotent.** Signals can arrive more than once; without a guard you start shutdown twice.
-- **Ignoring event-loop lag.** High lag means the loop is blocked (CPU-bound code) — the one metric most specific to Node health, and the one people forget to watch.
-- **Grace period mismatch.** If your drain timeout exceeds the platform's `terminationGracePeriodSeconds`, the platform SIGKILLs you mid-drain. Keep your forced-exit shorter than the platform grace period.
+- **No SIGTERM handler.** Node exits immediately, so every deploy kills in-flight requests.
+- **No forced-exit timer.** A hung request means `server.close()` never calls back, and the platform SIGKILLs you. Add an unref'd timeout.
+- **Idle keep-alive sockets block `server.close()`.** Close idle connections, or set a keep-alive timeout.
+- **Dependency checks on the liveness probe.** A brief database blip restarts the process. Deep checks belong on readiness.
+- **Closing the server before the load balancer stops routing.** Flip readiness first. In Kubernetes, also mind `preStop` and the grace period.
+- **Continuing after `uncaughtException`.** The process state is unknown. Log and exit.
+- **A handler that is not idempotent.** Signals can arrive twice. Guard so shutdown starts once.
+- **Ignoring event-loop lag.** High lag means the loop is blocked. It is the Node-specific health signal.
+- **A drain timeout longer than `terminationGracePeriodSeconds`.** The platform SIGKILLs you mid-drain. Keep the forced exit shorter than the platform grace period.
 
 ## Best practices
 
-- **Catch SIGTERM (and SIGINT) and run an ordered drain**: readiness→not-ready, `server.close()`, close DB/Redis/consumers, exit 0.
-- **Always add an unref'd forced-exit timer** shorter than the platform's grace period.
-- **Close idle keep-alive connections** so drain can complete; set a sane `keepAliveTimeout`.
-- **Separate liveness (cheap, no deps) from readiness (checks deps + reports draining).**
-- **Make the shutdown handler idempotent** and log each step so you can debug slow drains.
-- **On `uncaughtException`/`unhandledRejection`: log and exit**; rely on the supervisor to restart clean.
-- **Expose metrics (Prometheus/OpenTelemetry) and watch event-loop lag, error rate, latency, memory.** Alert on symptoms users feel.
-- **Log structured JSON to stdout** (12-factor) and let the platform aggregate; include request IDs for tracing.
-- **Test shutdown** — send a real SIGTERM under load and confirm in-flight requests complete and connections close.
+- **Catch SIGTERM and SIGINT.** Order: readiness to not-ready, `server.close()`, close the database, Redis, and consumers, exit 0.
+- **An unref'd forced-exit timer**, shorter than the platform grace period.
+- **Close idle keep-alive connections** and set a sane `keepAliveTimeout`.
+- **Liveness is cheap and has no dependencies. Readiness checks dependencies and reports draining.**
+- **Make the handler idempotent** and log each step.
+- **On `uncaughtException` and `unhandledRejection`, log and exit.** Let the supervisor restart.
+- **Expose metrics and watch event-loop lag, error rate, latency, and memory.**
+- **Log structured JSON to stdout**, with request ids.
+- **Send a real SIGTERM under load** and confirm in-flight requests finish.
 
 ## ⭐ Interview lens
 
 > **Q: What happens when Kubernetes sends your pod SIGTERM, and what should happen?**  
-> A: By default Node exits immediately, killing in-flight requests. It *should* catch SIGTERM and drain: flip readiness to not-ready so the LB stops routing, call `server.close()` to stop accepting new connections while finishing current ones, close DB/Redis/consumers, then exit 0 — with a forced-exit timer (shorter than `terminationGracePeriodSeconds`) as a safety net.
+> A: SIGTERM is the polite stop. SIGKILL cannot be caught. Node's default is to exit on SIGTERM immediately, which kills requests already in flight, including a payment or a database write halfway done. The handler should drain in order. Flip readiness to not-ready so the load balancer stops sending, which in Kubernetes is also what `preStop` and removing the pod from endpoints are doing. Call `server.close()` so new connections are refused and current requests can finish. Then close the pool, Redis, and queue consumers, flush telemetry, and exit 0. A forced-exit timer, `setTimeout` plus `unref`, must fire first if something hangs, and it must be shorter than `terminationGracePeriodSeconds` or the kubelet sends SIGKILL mid-drain. For example, a 10 second timer inside a 30 second grace period. The limit is keep-alive. Idle sockets have no active request, so `server.close()` can wait forever unless you call `closeIdleConnections()` or set `keepAliveTimeout`. Make the handler idempotent, because the signal can arrive twice.
 
 > **Q: Liveness vs readiness probe — what's the difference?**  
-> A: Liveness answers "is the process alive or wedged?" — failing it restarts the instance. Readiness answers "should it get traffic right now?" — failing it removes it from the load balancer *without* restarting. You flip readiness to not-ready on shutdown to drain traffic while the process finishes current work. (Common trap: putting DB checks in liveness, causing restart storms on a DB blip.)
+> A: Liveness answers whether the process is alive or wedged. If it fails, the platform restarts the instance. Readiness answers whether the instance should get traffic right now. If it fails, the load balancer takes it out and does not kill it. That split is what makes a zero-downtime shutdown possible: on SIGTERM you fail readiness first, traffic moves away, and the process stays up to finish current requests. `/healthz` should be cheap and dependency-free, a 200 as long as the event loop can respond. `/readyz` may check the database and Redis, and it must return 503 once shutdown has started. For example, a five-second database blip should mark the pod not-ready, not restart every replica. The limit is putting that database check on liveness. You then get a restart storm, and the restarts make the database worse. The same split shows up in monitoring: event-loop lag tells you the process is wedged before users do, which is closer to a liveness problem than a traffic-routing problem.
 
 > **Q: Why do you need a forced-exit timeout during shutdown?**  
-> A: Because `server.close()` only fires once all in-flight requests finish; a single stuck request (slow upstream, hung query) would block shutdown forever, and the platform would eventually SIGKILL you. An unref'd `setTimeout(process.exit, N)` guarantees you exit within a bounded time.
-
-> **Q: Should you keep running after an uncaughtException?**  
-> A: No. After an uncaught exception the process is in an undefined state — continuing risks corrupt data and hidden bugs. Log it, attempt fast cleanup, and exit so the supervisor (PM2/k8s) starts a fresh process. Use uncaughtException as a last-resort log-and-die, not as normal error handling.
+> A: `server.close()` runs your callback only after in-flight requests finish. One stuck request, a slow upstream or a hung query, means the callback never runs and shutdown waits until the platform gives up and sends SIGKILL. You then lose the graceful part, the flush and the clean pool close, and you still drop the stuck request. An unref'd timer, `setTimeout(() => process.exit(1), 10_000).unref()`, guarantees you exit inside a bound. `unref` matters so the timer does not keep the process alive when everything else already finished cleanly. The number has to be shorter than the platform's grace period, `terminationGracePeriodSeconds` on Kubernetes, because that grace includes your whole drain. For example, a 20 second timer inside a 30 second grace period leaves room for a `preStop` sleep. The limit is a timer that is longer than the platform's. The platform wins, and it wins with SIGKILL, which you cannot catch.
 
 > **Q: Why does `server.close()` sometimes never complete?**  
-> A: It waits for all open connections to go idle, but idle HTTP keep-alive sockets stay open with no active request, so they never "finish." Use `server.closeIdleConnections()` (and a `keepAliveTimeout`) so drain can complete. This surprises a lot of people.
-
-> **Q: What Node-specific metric would you monitor and why?**  
-> A: Event-loop lag/delay. Because Node runs your code on one thread, rising loop lag means the loop is blocked by synchronous/CPU-bound work — requests are queuing even if CPU looks fine. It's the earliest, most Node-specific signal of the exact failure that worker\_threads/clustering exist to avoid. (Alongside standard latency, error rate, and memory.)
+> A: `server.close()` stops accepting new connections and waits until existing ones go idle. HTTP keep-alive leaves sockets open with no active request, so they never "finish," and the callback never runs. From the outside it looks like shutdown is hung, and the platform eventually SIGKILLs the pod. Call `server.closeIdleConnections()` so those idle sockets drop, or `closeAllConnections()` if you must be more aggressive, and set `keepAliveTimeout` so idle sockets do not live forever in normal traffic either. For example, a client that keeps one connection open for many requests will pin the drain until you close idle connections, even though no handler is running. The limit is closing too early in the other direction. If you `server.close()` before the load balancer has stopped sending, new requests hit a server that is already closing. Flip readiness to not-ready, wait briefly, and then close. The forced-exit timer is still required, because a request that is actually stuck is not an idle socket.
 
 ## Cheat-card
 
-- **SIGTERM** = polite stop (catch it); **SIGKILL** = uncatchable; **SIGINT** = Ctrl-C.
-- Drain order: readiness→not-ready → `server.close()` → close DB/Redis/consumers → `exit(0)`.
-- **Always** add an unref'd **forced-exit timer**, shorter than the platform grace period.
-- `server.close()` can hang on idle keep-alives → `closeIdleConnections()` + `keepAliveTimeout`.
-- **Liveness** = alive? (cheap, restarts) vs **Readiness** = take traffic? (deps + reports draining, no restart).
-- `uncaughtException`/`unhandledRejection` → log and **exit**; let the supervisor restart.
-- Monitor **event-loop lag** (Node's canary) + latency, error rate, memory; logs as JSON to stdout.
-- Make the handler **idempotent**; test shutdown under real load.
-- **Flush telemetry on shutdown:** `await sdk.shutdown()` (OpenTelemetry) and `await Sentry.flush(2000)` after `server.close()` drains, before `exit`; a bare `process.exit()` drops the batch queue (default 5 s).
-- **Start the tracing SDK before `require('express')`** (or use `--require`/`--import`), or nothing gets patched.
-- **Next:** traces, Collector and sampling in [111](107-observability-with-opentelemetry.md); Sentry, SLOs and burn-rate alerts in [112](108-apm-and-alerting.md).
+- **SIGTERM** is the polite stop. Catch it. **SIGKILL** cannot be caught. **SIGINT** is Ctrl-C.
+- Drain order: readiness to not-ready, `server.close()`, close the database, Redis, and consumers, `exit(0)`.
+- An unref'd **forced-exit timer**, shorter than the platform grace period.
+- `server.close()` can hang on idle keep-alive. Use `closeIdleConnections()` and `keepAliveTimeout`.
+- **Liveness** asks "alive?" and a failure restarts. **Readiness** asks "take traffic?" and a failure does not restart.
+- `uncaughtException` and `unhandledRejection`: log and exit. Let the supervisor restart.
+- Watch **event-loop lag**, plus latency, error rate, and memory. Log JSON to stdout.
+- The handler must be idempotent. Test shutdown under load.
+
+## Good to know
+
+- **Should you keep running after `uncaughtException`?** No. The process is in an undefined state, so continuing risks corrupt data. Log, try a fast cleanup, and exit so PM2 or Kubernetes starts a fresh process. This is a last resort, not normal error handling. The same goes for `unhandledRejection`.
+- **Which Node-specific metric do you watch?** Event-loop lag. Your code runs on one thread, so rising lag means the loop is blocked by synchronous work and requests are queueing even if CPU looks fine. It is the early signal for the failure that worker threads and clustering exist to avoid. Also watch latency, error rate, and memory.
+- **Flush telemetry on shutdown:** `await sdk.shutdown()` for OpenTelemetry and `await Sentry.flush(2000)` after `server.close()` drains and before exit. A bare `process.exit()` drops the batch queue, whose default is 5 seconds.
+- **Start the tracing SDK before `require('express')`**, or use `--require` or `--import`, or nothing gets patched.
+- **Next:** traces, Collector, and sampling are in [111](107-observability-with-opentelemetry.md). Sentry, SLOs, and burn-rate alerts are in [112](108-apm-and-alerting.md).
 
 ---
 

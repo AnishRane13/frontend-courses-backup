@@ -13,28 +13,21 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Sequelize and TypeORM are object-relational mappers: you describe a table as a model or a class, and the library turns method calls into SQL and turns the rows back into objects. You will maintain them in existing Node code even if a new project would pick something else. The trade-off is the defaults. Sequelize expects timestamp columns your table may not have, and both libraries can alter a live table to match the model, which can drop columns.
+
 ## Why it matters
 
-Sequelize and TypeORM are the two older, widely deployed ORMs in the Node ecosystem. Many existing codebases use one of them, so you will likely maintain one even if you would pick [Prisma](77-prisma-orm.md) or [Drizzle](78-drizzle-orm.md) for new work. Both libraries do the same job: they map a JavaScript class or model to a table, turn method calls such as `findAll({ include })` or `find({ relations })` into SQL, and turn rows back into objects.
-
-The trouble is in the defaults and in the SQL they generate:
-
-- **Sequelize** assumes every table has `createdAt` and `updatedAt` columns unless you say otherwise. On the tables in this kit, which have neither, the first `findAll()` fails.
-- **`sync({ alter: true })` and `synchronize: true`** make the live table match your model. In the runs below, that dropped the `author_id`, `title`, `body` and `created_at` columns of a seeded table (Sequelize), and it reset every post's published flag to `false` (TypeORM).
-- **Lazy getters in a loop** send one query per row. The same page took 9 queries instead of 1–2 in both libraries.
-- **`include` / `relations` combined with `limit`** produces SQL you might not expect: a subquery in one case, a `LIMIT` on joined rows in another, and a `missing FROM-clause entry` error in a third.
-
-This lesson runs every one of those against a real PostgreSQL 18.4 server, using the same five tables and seed data as lessons 77, 78, 76, 80 and 81, so you can compare the generated SQL across tools.
+Both libraries do the same job. They map a class or a model to a table, turn `findAll` or `find` into SQL, and turn rows back into objects. The trouble is the defaults and the SQL they generate. Sequelize assumes every table has `createdAt` and `updatedAt` unless you say otherwise. On this kit's tables, which have neither, the first `findAll` fails. `sync({ alter: true })` and `synchronize: true` make the live table match the model. In the runs here, that dropped columns on a seeded table, and it reset every post's published flag. Lazy getters in a loop sent 9 queries instead of 1 or 2. `include` or `relations` combined with `limit` produces a subquery, a limit on joined rows, or a missing-FROM error, depending on the call.
 
 ## The concept, simply
 
-An ORM has three parts:
+An ORM has three parts.
 
-1. **A mapping.** It records which class goes with which table, which property goes with which column, and how tables relate. Sequelize builds the mapping with function calls: `sequelize.define(...)`, then `Post.belongsTo(User, ...)`. TypeORM builds it with TypeScript decorators on a class: `@Entity('posts')`, `@ManyToOne(() => User)`.
-2. **A query generator.** It turns `Post.findAll({ include: [...] })` or `repo.find({ relations: {...} })` into one or more SQL statements, sends them through a connection pool (the `pg` driver here), and builds objects from the rows.
-3. **Schema tools.** Migrations are versioned files that change the schema step by step. A "sync" mode makes the database match the model at startup. Use migrations for real databases. Sync is for throwaway ones.
-
-The shared schema, and how each library names it:
+1. **A mapping.** Which class goes with which table, which property with which column, and how tables relate. Sequelize builds it with `sequelize.define`, then `Post.belongsTo(User)`. TypeORM builds it with decorators: `@Entity('posts')`, `@ManyToOne(() => User)`.
+2. **A query generator.** It turns `findAll({ include })` or `find({ relations })` into one or more SQL statements, sends them through the pg pool, and builds objects from the rows.
+3. **Schema tools.** Migrations are versioned files that change the schema step by step. A sync mode makes the database match the model at startup. Use migrations for real databases. Sync is for throwaway ones.
 
 text
 
@@ -50,39 +43,27 @@ Post.hasMany(Comment)                       @OneToMany(() => Comment, c => c.pos
 Post.belongsToMany(Tag,{through:'post_tags'}) @ManyToMany(() => Tag) @JoinTable({name:'post_tags'})
 ```
 
+
 ## How it works
 
-What happens when the canonical query runs ("published posts with author name, comment count and tag names, newest first"):
+The canonical query is published posts with author name, comment count, and tag names, newest first.
 
-1. At startup the library builds metadata. For Sequelize, that is each `define()` call plus each association call. For TypeORM, `DataSource.initialize()` reads the decorator metadata that `tsc` emitted (`design:type` and the decorator calls) for every class listed in `entities`.
-2. You call `Post.findAll({ where, include, order })` or `repo.createQueryBuilder('post').innerJoin(...).getMany()`.
-3. The query generator picks a JOIN for each association you asked for and adds the columns it needs to rebuild the objects: primary keys of every joined table, aliased as `"author.id"` (Sequelize) or `"author_id"` (TypeORM).
-4. If the query has a `limit` and a to-many include, the generator must keep the limit counting *parents*, not joined rows. Sequelize wraps the parent query in a subquery. TypeORM's `take` runs a separate `SELECT DISTINCT id … LIMIT` first.
-5. The SQL goes to the pool. With logging switched on, both libraries pass the final SQL string to your logger, which is how every query count in this lesson was taken.
-6. The rows come back flat, one row per post × tag. The library groups them by primary key into nested objects: `post.author.name`, `post.tags[]`.
+1. At startup the library builds metadata. Sequelize does that from each `define` and each association. TypeORM's `DataSource.initialize` reads decorator metadata that tsc emitted for every entity class.
+2. You call `findAll` or a query builder.
+3. The generator picks a JOIN for each association and adds the columns it needs to rebuild objects, including primary keys of every joined table.
+4. If the query has a limit and a to-many include, the limit has to count parents, not joined rows. Sequelize wraps the parent query in a subquery. TypeORM's `take` first runs a separate `SELECT DISTINCT id ... LIMIT`.
+5. With logging on, both libraries hand you the final SQL. That is how every query count in this lesson was taken.
+6. Rows come back flat, one per post times tag. The library groups them by primary key into `post.author.name` and `post.tags`.
 
-**Versions, and which one npm gives you.** `npm install sequelize` gives 6.37.8 (published 2026-03-07), which is the stable v6 line. Sequelize v7 is a separate package, `@sequelize/core`. On npm, its `latest` tag points at `7.0.0-alpha.48` (published 2026-02-04), and the v7 docs label themselves "unreleased documentation … alpha version". This lesson uses v6. TypeORM's `latest` is 1.1.2 (published 2026-10-08). The 1.x line started with 1.0.0 on 2026-05-19, and the 0.3 line is now tagged `legacy` (0.3.31). TypeORM 1.0 removed several 0.3 APIs that older tutorials still use: string `relations: ['author']`, `loadRelationCountAndMap`, `@RelationCount`, `createConnection`/`getRepository` globals, and `findByIds`. The examples below use the 1.x replacements (removed in v1.0, see the release notes).
+**Sequelize on an existing schema.** `tableName` stops it pluralizing the model name. `timestamps: false` stops it adding `createdAt` and `updatedAt`, which it does by default. `field` maps a camelCase attribute to a snake_case column. Associations add getters such as `post.getAuthor()` and make `include` work. `foreignKey` names the real column. For `belongsToMany`, `through: 'post_tags'` makes Sequelize build a junction model for that table.
 
-**Sequelize models.** `sequelize.define(name, attributes, options)` returns a model class. Three options matter on an existing schema:
+**TypeORM entities.** `@ManyToOne` plus `@JoinColumn({ name: 'author_id' })` is the side that holds the foreign key. `@OneToMany` is the inverse and cannot exist without the ManyToOne. `@ManyToMany` plus `@JoinTable` must name the junction table and both columns, or TypeORM invents names. A bare `@JoinTable()` on `Post.tags` resolved to table `posts_tags_tags` with columns `postsId` and `tagsId` in 1.1.2. Decorators need `experimentalDecorators` and `emitDecoratorMetadata`. Node's type stripping does not transform decorators. The Node docs say they result in a parser error, and Example 10 shows that error. This project is compiled with tsc and run from `dist`.
 
-- `tableName` stops Sequelize pluralising the model name.
-- `timestamps: false` stops it adding `createdAt`/`updatedAt` attributes, which it does by default.
-- `field` maps a camelCase attribute to a snake_case column, for example `createdAt` → `created_at`.
+**Migrations.** `sequelize-cli migration:generate` writes an empty skeleton. You write the `createTable` calls. Sequelize v6's CLI has no model-to-migration diff. `typeorm migration:generate` connects, compares the database with the entity metadata, and writes the SQL that closes the gap. Review that file, because it is a diff of the database as it is right now. Applied migrations are recorded in `SequelizeMeta` (one name column) or in `migrations` (id, timestamp, name). TypeORM wraps a run in one transaction by default.
 
-Associations add accessor methods to instances (`post.getAuthor()`, `post.addTags()`) and make `include` possible. The `foreignKey` option names the real column. For `belongsToMany`, passing a string in `through: 'post_tags'` makes Sequelize build a junction model for that table.
+**Transactions.** The managed form, `sequelize.transaction(async (t) => ...)` or `dataSource.transaction(async (manager) => ...)`, commits when the callback resolves and rolls back when it throws. The unmanaged form gives you a transaction or a query runner, and you commit or roll back yourself. A query joins the transaction only if you route it there. In Sequelize, pass `{ transaction: t }` on every call. In TypeORM, use the manager or `queryRunner.manager`. A query without that runs on another pooled connection.
 
-**TypeORM entities.** Each class gets `@Entity('posts')`, and each property gets `@Column`, `@PrimaryGeneratedColumn` or a relation decorator. `@ManyToOne` + `@JoinColumn({ name: 'author_id' })` is the owning side, which holds the foreign key. `@OneToMany` is the inverse side; the docs say "@OneToMany cannot exist without @ManyToOne". `@ManyToMany` + `@JoinTable` must name the junction table and both columns, or TypeORM uses its own names. A bare `@JoinTable()` on `Post.tags` resolved to table `posts_tags_tags` with columns `postsId` and `tagsId` in 1.1.2. Decorators need `"experimentalDecorators": true` and `"emitDecoratorMetadata": true` in `tsconfig.json`. Node's built-in type stripping does not transform decorators. The Node docs say they "will result in a parser error", and Example 10 shows that error. So the TypeORM project is compiled with `tsc` and run from `dist/`. TypeScript 7.0.2 (the native compiler) accepted both flags and emitted the metadata.
-
-**Migrations.** The two CLIs behave differently. `sequelize-cli migration:generate` writes an **empty** skeleton, and you write the `queryInterface.createTable(...)` calls yourself. Sequelize v6's CLI has no model-to-migration diff. `typeorm migration:generate` connects to the database, compares it with the entity metadata, and writes a file containing the exact SQL needed to close the gap. You must review that file, because it is a diff of whatever the database looks like right now. Each CLI records applied migrations in a table: `SequelizeMeta` (one `name` column) or `migrations` (`id`, `timestamp`, `name`). TypeORM wraps a run in one transaction by default (`-t, --transaction … Enabled by default`).
-
-**Transactions.** Both libraries offer a managed form and an unmanaged form:
-
-- **Managed:** `sequelize.transaction(async (t) => …)` or `dataSource.transaction(async (manager) => …)`. The library commits when the callback resolves and rolls back when it throws.
-- **Unmanaged:** `const t = await sequelize.transaction()` or `dataSource.createQueryRunner()` + `startTransaction()`. You call commit or rollback yourself.
-
-The trap is the same in both: a query only joins the transaction if you route it there. In Sequelize, pass `{ transaction: t }` on every call. In TypeORM, use the `manager` argument or `queryRunner.manager`. A query without that runs on another pooled connection, outside the transaction. Example 6 and Example 15 show it reading the old value.
-
-**`sync({ alter: true })` and `synchronize: true`.** Both read the live table, compare it with the model, and issue `ALTER TABLE` statements until the two match. A column that is in the table but not in the model gets dropped. Sequelize's `alter` also dropped `author_id`, because that model declared no association, so the foreign key column was "unknown". TypeORM 1.1.2 has a rename heuristic (`RdbmsSchemaBuilder.renameColumns`, documented in the source as "Works if only one column per table was changed"). If exactly one column disappeared and exactly one appeared with the same type and nullability, it issues `RENAME COLUMN`. Otherwise it drops the old column and adds a new one:
+**Sync.** Both read the live table, compare it with the model, and issue ALTER TABLE until they match. A column in the table but not in the model is dropped. Sequelize's alter also dropped `author_id` when the model declared no association, because the foreign key was then "unknown". TypeORM 1.1.2 renames a column only when exactly one column disappeared and exactly one appeared with the same type and nullability. Otherwise it drops the old column and adds a new one.
 
 text
 
@@ -96,9 +77,10 @@ renamed column has a DEFAULT + new col  →   DROP COLUMN "published"; ADD "is_p
                                             → COMMIT: every post's flag is now false (data lost)
 ```
 
-**How relations get loaded, and why N+1 happens.** A lazy accessor such as `await post.getAuthor()`, or a `findOneBy` inside a loop, is one round trip per call. For 4 posts × 2 relations that is 1 + 8 = 9 queries, and the count grows with the page size. You can fix it two ways. The first is a JOIN (`include` / `relations`), which uses one query but repeats parent columns in every joined row. The second is one batched query per relation (`separate: true` in Sequelize, `relationLoadStrategy: 'query'` in TypeORM), which uses a fixed number of queries no matter how many rows the page has.
 
-**Why `include` + `limit` gets a subquery.** With a to-many JOIN, one post with 2 comments is 2 rows, so `LIMIT 2` on the joined result can return 1 post. Sequelize avoids that by putting the `LIMIT` in a subquery over `posts` and joining the comments outside it:
+**N+1.** A lazy getter such as `await post.getAuthor()`, or a `findOneBy` inside a loop, is one round trip per call. Four posts times two relations is 1 + 8 = 9 queries, and the count grows with the page. A JOIN, `include` or `relations`, is one query and repeats parent columns on every joined row. One batched query per relation, Sequelize `separate: true` or TypeORM `relationLoadStrategy: 'query'`, is a fixed number of queries whatever the page size.
+
+**include plus limit.** With a to-many JOIN, one post with two comments is two rows, so LIMIT 2 can return one post. Sequelize puts the LIMIT in a subquery over posts and joins the children outside it.
 
 text
 
@@ -111,7 +93,8 @@ LEFT JOIN comments ON …                          → post 1 twice (2 comments)
 → posts 1 and 2, with all their comments
 ```
 
-The subquery has a cost. A `where` on `'$comments.body$'` goes *inside* the subquery, where `comments` is not joined, and PostgreSQL rejects it (Example 8).
+
+The subquery has a cost. A where on `'$comments.body$'` lands inside the subquery, where comments is not joined, and PostgreSQL rejects it.
 
 ## Code examples
 
@@ -1540,58 +1523,64 @@ The v1.0 release notes: "passing null or undefined in where conditions now throw
 
 ## Common mistakes & gotchas
 
-- **Leaving Sequelize's timestamps on.** `define()` adds `createdAt`/`updatedAt` by default. On these tables the first `findAll` fails with `column "createdAt" does not exist`. Set `timestamps: false` globally (`define: { timestamps: false }`) or per model, and map real columns with `field: 'created_at'`.
-- **`paranoid: true` with `timestamps: false`.** No error, and no soft delete either: `destroy()` issued a real `DELETE` (Example 7).
-- **`sync({ alter: true })` / `synchronize: true` outside a scratch database.** They make the table match the model by dropping what the model does not declare. That included `author_id` and its foreign key (Sequelize), and a `published` flag on every row (TypeORM).
-- **Trusting TypeORM's rename detection.** It renames only when exactly one column changed in that table. A rename shipped alongside any other column change becomes `DROP` + `ADD`.
-- **A query that skips the transaction.** A Sequelize call without `{ transaction: t }`, or a TypeORM call through the global repository instead of `manager` / `queryRunner.manager`, runs on another connection and is not rolled back.
-- **N+1 through accessors.** `post.getAuthor()` or `findOneBy` in a loop costs one round trip per row: 9 queries for 4 posts here. Use `include` / `relations`, or the batched modes `separate: true` / `relationLoadStrategy: 'query'`.
-- **`include`/`relations` + `limit` in Sequelize.** `subQuery: false` limits joined rows. A `'$nested.column$'` filter with a limit fails with `missing FROM-clause entry`.
+- **Leaving Sequelize timestamps on.** `define()` adds `createdAt` and `updatedAt`. On these tables the first findAll fails with column "createdAt" does not exist. Set `timestamps: false`, and map real columns with `field`.
+- **`paranoid: true` with `timestamps: false`.** No error, and no soft delete. `destroy()` issued a real DELETE.
+- **sync or synchronize outside a scratch database.** They drop what the model does not declare. That included `author_id` and its foreign key in Sequelize, and a published flag on every row in TypeORM.
+- **Trusting TypeORM's rename detection.** It renames only when exactly one column changed in that table. A rename shipped with any other column change becomes DROP plus ADD.
+- **A query that skips the transaction.** Without `{ transaction: t }`, or through the global repository instead of the manager, it runs on another connection and is not rolled back.
+- **N+1 through accessors.** `getAuthor` or `findOneBy` in a loop was 9 queries for 4 posts. Use include or relations, or the batched modes.
+- **include plus limit in Sequelize.** `subQuery: false` limits joined rows. A `$nested.column$` filter with a limit fails with missing FROM-clause entry.
 - **TypeORM `.limit()` with joins.** It limits rows, not entities. Use `.take()`.
-- **`eager: true` as a convenience.** It adds the JOIN to every `find*` call, even ones that do not need the relation. Meanwhile QueryBuilder silently ignores it.
-- **`@VirtualColumn` is not free.** Its sub-query runs in every `SELECT` of the entity, including the `SELECT DISTINCT` pagination query.
-- **Copying 0.3 TypeORM code into 1.x.** `relations: ['author']`, `loadRelationCountAndMap`, `getRepository()` globals and `findByIds` are gone (removed in v1.0).
-- **Expecting `migration:generate` from sequelize-cli to read your models.** It writes an empty skeleton. Only TypeORM's generator diffs.
+- **`eager: true` as a convenience.** It adds the JOIN to every find, even ones that do not need the relation. QueryBuilder ignores eager.
+- **`@VirtualColumn` is not free.** Its subquery runs in every SELECT of that entity, including the pagination query.
+- **Copying TypeORM 0.3 code into 1.x.** String `relations`, `loadRelationCountAndMap`, global `getRepository`, and `findByIds` were removed in 1.0.
+- **Expecting sequelize-cli `migration:generate` to read your models.** It writes an empty skeleton. Only TypeORM's generator diffs.
 
 ## Best practices
 
-- Pick the stable line deliberately: `sequelize@6` (v7 is still alpha as `@sequelize/core`), and `typeorm@1` for new TypeORM code. Pin exact versions and record them.
-- On an existing schema, declare everything: `tableName`, `timestamps: false`, `field` mappings, explicit `foreignKey` / `@JoinColumn` / `@JoinTable` names. Then compare the logged SQL with the real tables once.
-- Change schemas only with migrations. Review every file `typeorm migration:generate` writes; for renames, edit it to a `RENAME COLUMN`. Run `migration:generate --check` in CI.
-- Keep `sync()` / `synchronize` for tests and throwaway databases. Never point them at shared data.
-- Turn on query logging in development and in tests, and assert query counts for list endpoints, so N+1 shows up as a failing number.
-- Use the managed transaction form by default. When you need the unmanaged form, put `rollback` in `catch` and `release()` in `finally`.
-- For pagination with to-many relations: Sequelize `separate: true` or the default subquery, but no `$nested$` filters; TypeORM `take`/`skip`, not `limit`/`offset`.
-- When a query is mostly aggregation, write it with the query builder (TypeORM) or `literal`/raw SQL (Sequelize), or use a query builder such as [Knex](76-knex-query-builder.md). Lesson [106](81-choosing-raw-sql-query-builder-or-orm.md) compares the options.
+- Pick the stable line on purpose. `sequelize@6`, because v7 is still an alpha published as `@sequelize/core`. `typeorm@1` for new TypeORM code. Pin exact versions.
+- On an existing schema, declare everything: `tableName`, `timestamps: false`, field mappings, and explicit foreign key and join table names. Then compare the logged SQL with the real tables once.
+- Change schemas only with migrations. Review every file TypeORM generates. For a rename, edit it to RENAME COLUMN. Run `migration:generate --check` in CI. It exits 1 when a migration is missing.
+- Keep sync and synchronize for tests and throwaway databases. Never point them at shared data.
+- Log queries in development and in tests, and assert query counts on list endpoints.
+- Use the managed transaction form by default. If you use the unmanaged form, roll back in catch and `release()` in finally.
+- Pagination with to-many relations: Sequelize `separate: true`, or the default subquery but no `$nested$` filters. TypeORM `take` and `skip`, not `limit` and `offset`.
+- When a query is mostly aggregation, use TypeORM's query builder or Sequelize `literal`, or a query builder such as Knex.
 
 ## ⭐ Interview lens
 
 > **Q: “What does `sync({ alter: true })` or `synchronize: true` actually do, and why not run it in production?”**
-> A: At startup it reads the live table definitions, diffs them against the model or entity metadata, and issues `ALTER TABLE` until they match. Columns the model does not declare get dropped. Sequelize has no rename detection. TypeORM renames only when exactly one column per table changed, and otherwise drops the old column and adds the new one. On a seeded table that lost `title`, `body` and `author_id` (Sequelize) and reset every post's `published` flag (TypeORM). Use reviewed migrations instead. *Trap:* "TypeORM detects renames, so it's safe." It does, but only for a lone rename.
+> A: `sync({ alter: true })` in Sequelize and `synchronize: true` in TypeORM run at startup, read the live tables, diff them against the model, and issue ALTER TABLE until the database matches the code. Columns the model does not declare are dropped. Sequelize has no rename detection, so renaming `title` to `headline` added an empty headline and dropped title, body, created_at, and author_id, including the foreign key. TypeORM renames only when exactly one column in that table changed type-for-type. Any other column change in the same deploy becomes DROP plus ADD. On a seeded table that reset every post's published flag when the new column had a default, because the ADD succeeded and the transaction committed. The docs of both libraries say not to use this in production. The limit of "TypeORM detects renames, so it is safe" is that lone-column rule. Ship the rename with any other column change and the heuristic does not apply. Use a reviewed migration, and write RENAME COLUMN yourself when that is what you mean.
 
 > **Q: “Your list endpoint makes 1 + 2N queries. How do you find and fix it?”**
-> A: Log every query (Sequelize's `logging` callback, a TypeORM `Logger`) and count per request. The usual cause is `post.getAuthor()` or `findOneBy` inside a loop. You can fix it with a JOIN (`include` / `relations`, one query) or with one batched `IN (…)` query per relation (`separate: true` / `relationLoadStrategy: 'query'`). Here that took 9 queries down to 1 or 2 (Sequelize) and 1 or 4 (TypeORM).
+> A: 1 + 2N means one query for the list and then two more per row, usually a lazy getter or a find-by-id inside the loop. You find it by logging every statement, Sequelize's logging callback or a TypeORM logger, and counting per request. Here that was 9 queries for 4 posts. You fix it two ways. A JOIN, `include` or `relations`, is one query, and the library groups the flat rows back into objects. A batched load, Sequelize `separate: true` or TypeORM `relationLoadStrategy: 'query'`, is one IN query per relation, a fixed count that does not grow with the page. In this lesson those fixes landed at 1 or 2 queries in Sequelize and 1 or 4 in TypeORM. The TypeORM query strategy used a fourth statement to map comment ids back to posts. The limit is pagination. A JOIN plus a plain LIMIT counts joined rows, so you can get one post when you asked for two. Use the subquery or `take`, not a raw limit, when a to-many relation is in the query.
 
 > **Q: “Why does Sequelize put a subquery in my query when I add `limit` to an `include`?”**
-> A: A to-many JOIN produces one row per child, so a plain `LIMIT` would count joined rows. Sequelize limits `posts` in a subquery and joins the children outside it. `subQuery: false` removes that and limits joined rows instead. A `$nested.column$` filter then lands inside the subquery and fails, because the child table is not joined there.
+> A: A hasMany JOIN turns one parent into many rows, one per child. A LIMIT on that result counts rows, not posts, so LIMIT 2 can return a single post that has two comments. Sequelize's default puts the LIMIT in a subquery over the parent table and joins the children outside it, which returns the right number of posts. `subQuery: false` removes that wrapper and goes back to limiting joined rows. For example, the default returned 2 posts, and `subQuery: false` returned 1. The limit of the subquery is a filter written as `$comments.body$`. That condition is placed inside the subquery, where the comments table is not joined, and PostgreSQL raises missing FROM-clause entry. Put the where on the include with `required: true`, drop the limit, or use `separate: true`, which loads the children in their own query and avoids the subquery.
 
 > **Q: “How do you make sure every query runs inside the transaction?”**
-> A: Each transaction is one pooled connection, and only queries routed to it are part of it: `{ transaction: t }` on every Sequelize call, the `manager` argument or `queryRunner.manager` in TypeORM. A call through the global model or repository runs on another connection. It sees committed data only, and it is not rolled back.
-
-> **Q: “Why does TypeORM need `tsc` when Node can run TypeScript?”**
-> A: TypeORM's mapping is built from decorators plus `emitDecoratorMetadata` type metadata. Node's type stripping only removes types, and decorators are a parser error there. `tsc` with `experimentalDecorators` and `emitDecoratorMetadata` compiles the decorators into function calls and emits `design:type` metadata.
+> A: A transaction is one pooled connection. Only the statements you route onto that connection are inside it. In Sequelize that means `{ transaction: t }` on every call, including association helpers such as `addTags`. In TypeORM it means the `manager` from the callback, or `queryRunner.manager` if you opened the transaction yourself. The managed callback commits when it resolves and rolls back when it throws. The unmanaged form is commit and rollback you call yourself, plus `release()` in finally so the connection returns to the pool. For example, a read that forgot the transaction option ran on another connection and saw the old committed value, while the same read through the manager saw the uncommitted change. The limit is sequences. A rolled-back INSERT in PostgreSQL still consumes the id, so the next id has a gap. Rollback undoes rows. It does not rewind a sequence.
 
 ## Cheat-card
 
-- **Versions:** `sequelize` 6.37.8 is stable; v7 = `@sequelize/core` 7.0.0-alpha.48 (npm `latest` is an alpha). `typeorm` 1.1.2 (1.x since 2026-05-19; 0.3 = `legacy`).
-- **Sequelize on an existing schema:** `tableName`, `timestamps: false`, `field: 'created_at'`, `foreignKey: 'author_id'`, `belongsToMany(Tag, { through: 'post_tags', foreignKey, otherKey })`.
-- **TypeORM mapping:** `@Entity('posts')`, `@ManyToOne` + `@JoinColumn({ name: 'author_id' })`, `@ManyToMany` + `@JoinTable({ name: 'post_tags', joinColumn, inverseJoinColumn })`; compile with `tsc` (decorator flags on).
-- **Migrations:** `sequelize-cli migration:generate` = empty skeleton → `db:migrate` → `SequelizeMeta`. `typeorm migration:generate <path> -d dist/data-source.js` = diff → `migration:run` (one transaction) → `migrations`; `--check` for CI.
-- **Transactions:** managed callback commits/rolls back; unmanaged = you commit/rollback (+ `release()` for a QueryRunner). Route every query: `{ transaction: t }` / `manager`.
-- **N+1:** accessors in a loop = 1 + 2N. Fix: JOIN (`include` / `relations`) or batched (`separate: true` / `relationLoadStrategy: 'query'`).
-- **Limits with to-many joins:** Sequelize subquery (no `$nested$` filters); TypeORM `take`/`skip`, not `limit`.
-- **Never in production:** `sync({ alter: true })`, `synchronize: true`. TypeORM renames only a lone single-column change.
-- **v1.0 changes:** `undefined` in `find` where throws; non-nullable ManyToOne → `INNER JOIN`; `@VirtualColumn` replaces `loadRelationCountAndMap`.
+- **Sequelize on an existing schema:** `tableName`, `timestamps: false`, `field: 'created_at'`, explicit `foreignKey`, and `belongsToMany` through `post_tags`.
+- **TypeORM mapping:** `@Entity`, `@ManyToOne` plus `@JoinColumn`, `@ManyToMany` plus `@JoinTable` with both column names. Compile with tsc. Decorators do not survive Node's type stripping.
+- **Migrations:** sequelize-cli generate is an empty skeleton, then `db:migrate`, recorded in `SequelizeMeta`. TypeORM generate is a diff, then `migration:run` in one transaction, recorded in `migrations`. `--check` exits 1 when a migration is missing.
+- **Transactions:** managed callback commits or rolls back. Unmanaged means you commit, roll back, and release. Route every query.
+- **N+1:** accessors in a loop were 1 + 2N. Fix with a JOIN or with `separate: true` / `relationLoadStrategy: 'query'`.
+- **Limits with to-many joins:** Sequelize subquery, and no `$nested$` filters. TypeORM `take` and `skip`, not `limit`.
+- **Never on shared data:** `sync({ alter: true })`, `synchronize: true`. TypeORM renames only a lone single-column change.
+- **TypeORM 1.0:** undefined in a find where throws. A non-nullable ManyToOne is an INNER JOIN. `@VirtualColumn` replaces `loadRelationCountAndMap`.
+
+## Good to know
+
+- `npm install sequelize` gave 6.37.8, published 2026-03-07, the stable v6 line. Sequelize v7 is the package `@sequelize/core`, and its npm latest was 7.0.0-alpha.48, published 2026-02-04, with docs labeled unreleased. TypeORM latest was 1.1.2, published 2026-10-08. The 1.x line started with 1.0.0 on 2026-05-19. The 0.3 line is tagged legacy at 0.3.31.
+- TypeORM 1.0 removed string `relations: ['author']`, `loadRelationCountAndMap`, `@RelationCount`, global `createConnection` / `getRepository`, and `findByIds`.
+- `bulkInsert` gave all four posts the same `created_at`, because they went in one statement and `now()` is fixed for the transaction. Newest-first queries here order by `created_at DESC, id DESC`.
+- A rolled-back INSERT still advanced `posts_id_seq`. Sequences are not transactional.
+- `eager: true` added a JOIN even when only id and title were selected. QueryBuilder ignored eager and returned `author: undefined`. The join was INNER because the relation is non-nullable, which changed in v1.0. The same file on typeorm 0.3.31 produced a LEFT JOIN.
+- An undefined where in `find` throws on 1.0. The same file on 0.3.31 returned all 4 posts, because the condition was dropped. That is dangerous for update and delete. QueryBuilder `.where()` is not covered: it sent `$1 = null` and matched nothing.
+- **Why does TypeORM need tsc when Node can run TypeScript?** The mapping is decorators plus `emitDecoratorMetadata`. Type stripping only removes types, and a decorator is a parser error there. tsc with `experimentalDecorators` and `emitDecoratorMetadata` compiles the decorators into function calls and emits `design:type`.
 
 ---
 

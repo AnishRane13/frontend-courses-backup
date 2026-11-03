@@ -13,28 +13,25 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+An outbound request in Node goes through `fetch`, the `undici` package, or `http.request`. All three own sockets per origin, which is scheme plus host plus port, and queue requests until a socket is free. `fetch` is the bundled undici client behind a promise and a web-stream body. The trade-off of the defaults is time. Header and body timeouts are 300 seconds each, a 404 does not throw, and an unread body keeps the socket busy so the next call waits.
+
 ## Why it matters
 
-Most backends spend as much time calling other servers as answering their own clients: a payment provider, an auth server, another microservice, an object store. Lessons 12, 29 and 113 already call `fetch()` without explaining it. This lesson explains what happens underneath.
+Most backends call other servers as often as they answer their own: a payment provider, an auth server, another service. An outbound call with the defaults has no useful deadline. Undici's documented header and body timeouts are 300 seconds each, and `http.request` has none. Connections are reused in ways you cannot see. Failures arrive as `TypeError: fetch failed`, with the real reason on `err.cause`.
 
-An outbound request with default settings has no useful deadline: undici's documented header and body timeouts are 300 seconds each, and `http.request` has none at all. It reuses connections in ways you cannot see, and it reports failures as a generic `TypeError: fetch failed` with the real reason one level down in `err.cause`. When it goes wrong in production, it looks like this:
-
-- **One slow upstream piles up sockets.** Without a deadline, every request waits for minutes and holds a socket and a closure the whole time.
-- **Unread response bodies stall the pool.** A response you never read keeps its connection busy, so the next request to that host waits behind it (Example 16).
-- **Retries make things worse.** Retrying a `POST` can charge a card twice. Retrying with no delay hammers a server that is already overloaded.
-- **Errors you cannot tell apart.** "Connection refused", "the server reset the connection" and "no headers within 300 s" all reach your `catch` as the same `TypeError`.
-
-Node gives you three client APIs. You need to know which one to reach for and how each behaves when the network misbehaves.
+One slow upstream piles up sockets. An unread body holds the pool. Retrying a POST can charge a card twice. "Connection refused", a reset, and "no headers for 300 seconds" all look like the same `TypeError` until you read `err.cause`.
 
 ## The concept, simply
 
-An outbound HTTP request in Node goes through one of three APIs:
+Three clients:
 
-- **`fetch()`** (global; added in v17.5.0 behind a flag, unflagged in v18.0.0, stable since v21.0.0). It is the WHATWG Fetch API, the same one browsers have: `fetch(url, init)` returns a promise of a `Response` with `status`, `ok`, `headers` and a body you read once (`text()`, `json()`, `arrayBuffer()`, or the `body` web stream). Node implements it with a copy of **undici** bundled inside the Node binary. `process.versions.undici` tells you which copy: `7.29.0` on Node v24.19.0.
-- **The `undici` npm package** (`npm install undici`; 8.11.2 used here). It is the same HTTP client as a library, with a newer version and more APIs: `request()` (returns `{ statusCode, headers, body }`; the undici README ranks it fastest of the three APIs), the connection objects `Client`, `Pool` and `Agent`, test doubles (`MockAgent`), `RetryAgent`, and proxy agents (`ProxyAgent`, `EnvHttpProxyAgent`).
-- **`http.request()` / `https.request()`** (core since v0.x). The original Node API. The request is a Writable stream, the response is a Readable stream (`IncomingMessage`), and an `http.Agent` decides which TCP socket each request uses. It is built on Node's own `net` module and C++ parser, not on undici.
+- `fetch` is the WHATWG API browsers have. `fetch(url, init)` returns a promise of a `Response` with `status`, `ok`, `headers`, and a body you read once, with `text()`, `json()`, `arrayBuffer()`, or the `body` stream. Node implements it with undici bundled in the binary. `process.versions.undici` is `7.29.0` on Node v24.19.0.
+- The `undici` npm package is the same client as a library, newer, with more APIs. `request()` returns `statusCode`, `headers`, and `body`. `Client`, `Pool`, and `Agent` are the connection objects. `MockAgent`, `RetryAgent`, `ProxyAgent`, and `EnvHttpProxyAgent` sit on top. This lesson uses package 8.11.2.
+- `http.request` and `https.request` are the original API. The request is a Writable. The response is a Readable `IncomingMessage`. An `http.Agent` chooses the TCP socket. It is built on `net` and Node's parser, not on undici.
 
-Every one of them is built from the same parts: a **connection manager** that owns TCP (or TLS) sockets per origin (an origin is scheme + host + port) and a **queue** of requests waiting for a free socket. In undici the parts are called *dispatchers*:
+Each one is a connection manager that owns sockets per origin, and a queue of requests waiting for a free socket. In undici those parts are called dispatchers.
 
 text
 
@@ -61,40 +58,34 @@ http.request(options)
 
 ## How it works
 
-What happens during `await fetch('http://api.internal/users/7')`:
+`await fetch('http://api.internal/users/7')` does this:
 
-1. **Pick a dispatcher.** `fetch` uses `init.dispatcher` if you passed one, otherwise the process-wide global dispatcher (an undici `Agent`).
-2. **Find the pool for the origin.** The Agent keeps a map from origin to `Pool`. The first request to an origin creates the Pool.
-3. **Get a connection.** If a Client in the Pool has an idle keep-alive socket, the request goes on it. If not, and the Pool is below `connections`, it opens a new socket: DNS lookup, TCP connect (limited by `connectTimeout`, default 10 s), and a TLS handshake for `https:`. Otherwise the request waits in the queue.
-4. **Write the request.** Request line, headers, then the body (a string or buffer at once, a stream chunk by chunk).
-5. **Wait for headers.** `headersTimeout` (default 300 s) runs until the status line and all headers have arrived. Then the `fetch` promise resolves with a `Response`. **The body has not been read yet.**
-6. **Read the body.** `res.json()`, `res.text()` or iterating `res.body` pulls the bytes. `bodyTimeout` (default 300 s) limits the gap *between* chunks, not the total time.
-7. **Release the connection.** When the body has been read to the end, the socket goes back to the pool for the next request to that origin. If the body is never read, the socket stays busy.
+1. Use `init.dispatcher` if you passed one, otherwise the process-wide undici `Agent`.
+2. Find the `Pool` for that origin. The first request creates it.
+3. If a `Client` in the pool has an idle keep-alive socket, use it. If not, and the pool is under `connections`, open a socket: DNS, TCP connect (`connectTimeout`, default 10 seconds), and a TLS handshake for `https`. Otherwise the request waits.
+4. Write the request line, the headers, and the body.
+5. `headersTimeout` (default 300 seconds) runs until the status and headers arrive. Then the `fetch` promise resolves. The body has not been read.
+6. `res.json()`, `res.text()`, or iterating `res.body` pulls the bytes. `bodyTimeout` (default 300 seconds) limits the gap between chunks, not the total time.
+7. When the body is finished, the socket returns to the pool. If you never read the body, the socket stays busy.
 
-**Connection reuse (keep-alive).** Opening a TCP connection costs a round trip, and a TLS handshake costs more. HTTP/1.1 keep-alive lets a client send the next request on a socket that already exists. Both stacks do this by default: the undici `Agent` behind `fetch`, and `http.globalAgent` (keep-alive on by default since v19.0.0; a custom `http.Agent` needs `keepAlive: true`). The catch is that HTTP/1.1 has no request IDs, so one socket carries **one request at a time**. Requests take turns on the socket: request B is sent only after response A has been fully read. To run requests in parallel you need several sockets, which is what `maxSockets` (`http.Agent`, default `Infinity`) and `connections` (undici `Pool`, default no limit) control. Requests beyond that limit wait in the agent's queue (Examples 2 and 3).
+Opening a TCP connection costs a round trip, and TLS costs more, so HTTP/1.1 keep-alive sends the next request on a socket that already exists. Both stacks do this by default. The undici agent behind `fetch` does. `http.globalAgent` has had keep-alive on by default since v19. A custom `http.Agent` needs `keepAlive: true`. HTTP/1.1 has no request ids, so one socket carries one request at a time. Request B is sent only after response A is fully read. Parallelism is several sockets: `maxSockets` on `http.Agent` (default `Infinity`) and `connections` on an undici `Pool` (default no limit). Past that, requests wait.
 
 ![Two timelines over one TCP connection: with HTTP/1.1 keep-alive, request B waits until response A is complete; with HTTP/2, streams 1, 3 and 5 interleave frames on the same connection](assets/i30_02_0d3eb5e7.svg)
 *Figure: HTTP/1.1 keep-alive vs HTTP/2 multiplexing on one connection. Look at: the top lane, where "B waits for A" is exactly the queueing you see with `maxSockets: 1`.*
 
-HTTP/2 removes that limit by interleaving many streams on one connection. In these runs, Node's built-in `fetch` (undici 7.29.0) talked HTTP/1.1 to an HTTP/2-capable TLS server, undici 7.30.0 did too unless given `allowH2: true`, and undici 8.11.2 negotiated HTTP/2 by default. The undici v7→v8 migration guide documents that change.
+HTTP/2 interleaves many streams on one connection. In these runs, Node's built-in `fetch` (undici 7.29.0) spoke HTTP/1.1 to an HTTP/2-capable TLS server. undici 7.30.0 did too unless `allowH2: true`. undici 8.11.2 negotiated HTTP/2 by default.
 
-**Timeouts come in phases.** One number cannot describe "the request took too long", because a request can stall in three places:
+Timeouts are three phases, not one number. Connect: undici `connectTimeout` 10 seconds, code `UND_ERR_CONNECT_TIMEOUT`. `http.request` has none of its own. The kernel gives up with `ETIMEDOUT` after its SYN retries, about 130 seconds on the machine in the lesson, with `tcp_syn_retries` of 6. Waiting for headers: `headersTimeout` 300 seconds, `UND_ERR_HEADERS_TIMEOUT`. `http.request`'s `timeout` option emits `timeout` after that many milliseconds with no socket activity, and you must `req.destroy()` yourself. Reading the body: `bodyTimeout` 300 seconds between chunks, `UND_ERR_BODY_TIMEOUT`. `AbortSignal.timeout(ms)` aborts any phase.
 
-| Phase | undici (`Agent` / `Pool` / `Client` option, default) | `http.request` | Whole request |
-| --- | --- | --- | --- |
-| TCP/TLS connect | `connectTimeout`, 10 000 ms → `UND_ERR_CONNECT_TIMEOUT` | none of its own; the kernel gives up after its SYN retries (`ETIMEDOUT` after ~130 s on this machine, `tcp_syn_retries = 6`) | `AbortSignal.timeout(ms)` (added in v17.3.0) aborts any phase |
-| Waiting for headers | `headersTimeout`, 300 000 ms → `UND_ERR_HEADERS_TIMEOUT` | `timeout` option: emits `'timeout'` after that many ms with **no socket activity**, in any phase including connect; you must call `req.destroy()` yourself | same signal |
-| Reading the body | `bodyTimeout`, 300 000 ms between chunks → `UND_ERR_BODY_TIMEOUT` | same idle `timeout` | same signal |
+Undici's header and body timers are coarse. In 8.11.2 a shared ticker checks about every 500 ms. A 300 ms `headersTimeout` fired after about 1000 ms in Example 5. For a tight deadline, use `AbortSignal.timeout`, which fired on time at 400 ms in that run.
 
-The undici timers are coarse. In undici 8.11.2 the header and body timers are "fast timers" that a shared ticker checks about every 500 ms (`lib/util/timers.js`, `RESOLUTION_MS = 1e3`). A 300 ms `headersTimeout` fired after about 1000 ms in Example 5, and a 100 ms one after 1008 ms in a separate run. The Client docs say delays up to 1000 ms use native timers, but the parser code always picks the fast timer for the header and body phases. For a tight deadline, use `AbortSignal.timeout`, which fired on time (400 ms) in the same run.
+Retry only what is safe to repeat. RFC 9110 defines a method as idempotent when repeating it has the same effect as doing it once. PUT, DELETE, GET, HEAD, OPTIONS, and TRACE are idempotent. POST and PATCH are not, unless the server deduplicates them with a key you send. Wait longer after each failure, and add jitter, randomness, so a thousand clients do not retry on the same instant. undici's `RetryAgent` does exponential backoff and does not add jitter by default.
 
-**Retries need two rules.** First, only retry what is safe to repeat. RFC 9110 §9.2.2 defines a method as idempotent when "the intended effect on the server of multiple identical requests with that method is the same as the effect for a single such request". `PUT`, `DELETE` and the safe methods (`GET`, `HEAD`, `OPTIONS`, `TRACE`) are idempotent. `POST` and `PATCH` are not, unless the server deduplicates them with a key you send. The `Idempotency-Key` header for that comes from an IETF Internet-Draft (draft-ietf-httpapi-idempotency-key-header, listed as expired on 10 Oct 2026), not from an RFC. Second, wait longer after each failure, and add randomness (*jitter*) so a thousand clients that failed at the same moment do not all retry at the same moment. undici's `RetryAgent` (added in undici v6.7.0) does the first rule and exponential backoff (`minTimeout * timeoutFactor ** (n - 1)`, default 500 ms × 2ⁿ⁻¹, capped at 30 s, honouring `Retry-After`). Its default strategy adds no jitter. `interceptors.retry` is the same logic as an interceptor. Both exist in 8.11.2.
+`fetch` follows up to 20 redirects (`redirect: 'follow'`), changes POST to GET on 301, 302, and 303, and keeps the method on 307 and 308. `redirect: 'manual'` gives you the 3xx and the `location` header. `redirect: 'error'` rejects. `http.request` never follows redirects.
 
-**Redirects.** `fetch` follows up to 20 redirects by default (`redirect: 'follow'`), changes `POST` to `GET` on a 301, 302 or 303 (307 and 308 keep the method; checked in a separate run), and sets `res.redirected` and `res.url`. `redirect: 'manual'` hands you the 3xx response with its `location` header. `redirect: 'error'` rejects. `http.request` never follows redirects.
+A forward proxy gets either an absolute-form request line for plain HTTP, or `CONNECT host:port` and then a byte tunnel for HTTPS. `ProxyAgent` sends to a proxy you name. `EnvHttpProxyAgent` reads `http_proxy`, `https_proxy`, and `no_proxy`. Node itself reads those when you start it with `NODE_USE_ENV_PROXY=1` or `--use-env-proxy`.
 
-**Proxies.** A forward proxy receives either an absolute-form request line (`GET http://host:port/path HTTP/1.1`) for plain HTTP, or a `CONNECT host:port` request, after which it copies raw bytes in both directions (a tunnel; HTTPS always uses one). undici's `ProxyAgent` (added in undici v4.8.2) sends to a proxy you name. `EnvHttpProxyAgent` (added in undici v6.14.0) reads `http_proxy`, `https_proxy` and `no_proxy`. Node itself reads the same variables when you start it with `NODE_USE_ENV_PROXY=1` (added in v24.0.0) or `--use-env-proxy` (added in v24.5.0). That covers both the built-in `fetch` and `http.request`/`https.request` (the `proxyEnv` option of `http.Agent` was added in v24.5.0; `http.setGlobalProxyFromEnv()` in v24.14.0). Both are marked "Stability: 1.1 - Active Development".
-
-**Errors have two layers in `fetch`.** Network failures reject with `TypeError: fetch failed` (or `TypeError: terminated` if the body was cut off), and the real reason is `err.cause`: a Node system error (`ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`) or an undici error with a `UND_ERR_*` code. HTTP error statuses (404, 500) are **not** errors: the promise resolves and `res.ok` is `false`. `http.request` emits the system error directly on `'error'`.
+Network failures reject `fetch` with `TypeError: fetch failed`, or `TypeError: terminated` if the body was cut off. The reason is `err.cause`: `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, or an undici `UND_ERR_*` code. A 404 or 500 does not reject. The promise resolves and `res.ok` is false. `http.request` emits the system error on `error`.
 
 ## Code examples
 
@@ -1189,66 +1180,67 @@ undici 8 changed the internal handler API between dispatcher and request (`onCon
 
 ## Common mistakes & gotchas
 
-- **Treating `await fetch()` as "the request succeeded".** It resolves on any HTTP status. Check `res.ok` or `res.status` before reading the body as data.
-- **Logging only `err.message`.** For `fetch` it is almost always "fetch failed". The useful part is `err.cause.code` and `err.cause.message`.
-- **No deadline.** undici's documented header and body timeouts are 300 s each, and `http.request` has none. Put `AbortSignal.timeout(ms)` (or `AbortSignal.any([...])` with a caller's signal) on every outbound call.
-- **Expecting sub-second precision from `headersTimeout`/`bodyTimeout`.** They are checked by a ~500 ms ticker. A 300 ms setting fired at ~1000 ms.
-- **Thinking `http.request`'s `timeout` cancels the request.** It only emits `'timeout'`. Call `req.destroy()` in the handler.
-- **Leaving bodies unread.** The connection stays busy (Example 16). Read it, `res.body.cancel()` it (fetch), `body.dump()` it (undici) or `res.resume()` it (http).
-- **Reading a body twice.** The second `json()`/`text()` throws `TypeError: Body is unusable`. Read `text()` once and parse it, or `clone()` before reading.
-- **Retrying `POST` on any error.** It can repeat a side effect. Retry only idempotent methods, or send an idempotency key the server honours.
-- **Retrying without jitter.** Synchronised retries arrive as a wave. undici's `RetryAgent` default strategy has no jitter, so add your own `retry` callback if many clients share an upstream.
-- **Setting `content-type` for `FormData`.** It removes the boundary. Let `fetch` set it.
-- **Forgetting `duplex: 'half'`** for a stream body: `TypeError: RequestInit: duplex option is required when sending a body.`
-- **Mixing undici versions.** A v8 `Agent` as `dispatcher` for Node 24's built-in `fetch` fails with `UND_ERR_INVALID_ARG` (Example 17). Match on `err.code`, not `instanceof`, because errors can come from either copy (the undici Errors docs recommend this).
-- **Assuming `HTTP_PROXY` is honoured.** Node ignores it unless `NODE_USE_ENV_PROXY=1` / `--use-env-proxy` is set or you configure an agent.
+- **Treating `await fetch()` as success.** It resolves on any HTTP status. Check `res.ok` or `res.status`.
+- **Logging only `err.message`.** For `fetch` that is almost always "fetch failed". Read `err.cause.code`.
+- **No deadline.** Put `AbortSignal.timeout(ms)` on every outbound call. Undici's header and body defaults are 300 seconds, and `http.request` has none.
+- **Expecting sub-second precision from `headersTimeout` or `bodyTimeout`.** A shared ticker checks them. A 300 ms setting fired near 1000 ms.
+- **Thinking `http.request`'s `timeout` cancels the request.** It only emits `timeout`. Call `req.destroy()`.
+- **Leaving bodies unread.** The connection stays busy (Example 16). Read it, `res.body.cancel()` it, `body.dump()` it, or `res.resume()` it.
+- **Reading a body twice.** The second `json()` or `text()` throws `TypeError: Body is unusable`. Read `text()` once, or `clone()` first.
+- **Retrying POST on any error.** Retry idempotent methods, or send an idempotency key the server honors.
+- **Retrying with no jitter.** undici's `RetryAgent` default strategy has none.
+- **Setting `content-type` on `FormData`.** You remove the boundary. Let `fetch` set it.
+- **Forgetting `duplex: 'half'`** on a stream body. `fetch` throws `TypeError: RequestInit: duplex option is required when sending a body.`
+- **Mixing undici majors.** A v8 `Agent` as `dispatcher` for Node 24's `fetch` fails with `UND_ERR_INVALID_ARG` (Example 17). Match on `err.code`, not `instanceof`.
+- **Assuming `HTTP_PROXY` is honored.** Node ignores it unless `NODE_USE_ENV_PROXY=1` or `--use-env-proxy` is set, or you configure an agent.
 
 ## Best practices
 
-- **Wrap outbound calls in one small client module** per upstream: base URL, deadline, retry policy, JSON parsing and error mapping in one place, so every caller gets the same behaviour.
-- **Always set a deadline** with `AbortSignal.timeout`, and tighten `connectTimeout`/`headersTimeout` on an undici `Agent` for internal services where a few seconds is already too slow.
-- **Retry only idempotent requests**, with capped exponential backoff and full jitter, and a small retry count (2–3). Honour `Retry-After` on 429/503.
-- **Bound concurrency per upstream** with `connections` (undici `Pool`/`Agent`) or `maxSockets` (`http.Agent`), so one slow dependency cannot take every socket.
-- **Always consume or cancel bodies**, including on error paths.
-- **Check `content-type` before `json()`** and include a snippet of the unexpected body in the error.
-- **Log `err.cause?.code`** and the upstream host on failure. This is the field you will search by.
-- **In tests, use `MockAgent` with `disableNetConnect()`** so a missing mock fails loudly instead of calling the real service.
-- **Pin the undici package to the major Node bundles** (7.x for Node 24) if you pass its dispatchers to the global `fetch`, or use the package's own `fetch` everywhere.
+- **One small client module per upstream:** base URL, deadline, retry policy, JSON parsing, and error mapping, so every caller behaves the same way.
+- **Always set a deadline** with `AbortSignal.timeout`, and tighten `connectTimeout` and `headersTimeout` on an undici `Agent` for internal calls.
+- **Retry only idempotent requests,** with capped exponential backoff, full jitter, and a small count. Honor `Retry-After` on 429 and 503.
+- **Bound concurrency per upstream** with `connections` or `maxSockets`, so one slow dependency cannot take every socket.
+- **Consume or cancel every body,** including on the error path.
+- **Check `content-type` before `json()`** and put a snippet of the unexpected body in the error.
+- **Log `err.cause.code` and the upstream host.**
+- **In tests, `MockAgent` with `disableNetConnect()`** so a missing mock fails instead of calling the network.
+- **Pin undici to the major Node bundles** if you pass its dispatchers to global `fetch`, or use the package's own `fetch` everywhere.
 
 ## ⭐ Interview lens
 
 > **Q: “What is the relationship between Node's `fetch` and undici?”**  
-> A: The global `fetch` is implemented by a copy of undici bundled in the Node binary (`process.versions.undici`, 7.29.0 on Node v24.19.0). The `undici` npm package is the same client as a library, often newer (8.11.2 here), and adds `request`, `Pool`, `Agent`, `MockAgent`, `RetryAgent` and proxy agents. `setGlobalDispatcher()` from the package changes what the built-in `fetch` uses too. *Trap:* a dispatcher from a different major, passed per request, can fail (`UND_ERR_INVALID_ARG`).
+> A: The global `fetch` is a copy of undici compiled into the Node binary. `process.versions.undici` tells you which copy. On Node v24.19.0 it is 7.29.0. The `undici` npm package is that same HTTP client as a library you install, often a newer major, 8.11.2 in this lesson, and it adds `request`, `Pool`, `Agent`, `MockAgent`, `RetryAgent`, and proxy agents. `fetch(url)` returns a promise of a `Response`. The promise resolves when headers arrive, for any status, and you read the body once. `setGlobalDispatcher()` from the package changes what the built-in `fetch` uses. The limit is mixing majors. A dispatcher from a different major, passed on one call, can fail with `UND_ERR_INVALID_ARG`. They are not a thin wrapper over `http.request`, and they do not share its pool.
 
 > **Q: “Your service calls an upstream with `fetch`. The upstream starts accepting connections but never answers. What happens and how do you fix it?”**  
-> A: Each request waits for headers until undici's `headersTimeout`, documented at 300 s by default. Sockets and memory pile up. Add `signal: AbortSignal.timeout(ms)` to every call, optionally a shorter `headersTimeout` on a custom `Agent`, cap `connections` per upstream, and fail fast to the caller. *Trap:* undici's header and body timers have about one-second precision, so do not rely on them for a 200 ms budget.
+> A: Each call waits for response headers until undici's `headersTimeout`. The documented default is 300 seconds. The socket and the closure stay alive the whole time, so a loop of these calls piles up. `fetch` has not failed yet, because the TCP connection succeeded and the server simply never writes a status line. Add `signal: AbortSignal.timeout(ms)` on every call. Optionally set a shorter `headersTimeout` on your own `Agent`, and cap `connections` so one upstream cannot take every socket. Then fail the caller. The limit of trusting `headersTimeout` for a 200 ms budget is the timer. In undici 8.11.2 those timers are checked by a ticker about every 500 ms, and a 300 ms setting fired near one second. `AbortSignal.timeout` fired on time.
 
 > **Q: “Which requests can a client retry automatically?”**  
-> A: Idempotent ones (RFC 9110 §9.2.2): `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT`, `DELETE`. A `POST` only if the server deduplicates it by an idempotency key. Retry on connection errors and on 429/502/503/504, not on 4xx. Back off exponentially with jitter and honour `Retry-After`. *Trap:* a retried stream body cannot be replayed; undici fails with `UND_ERR_REQ_RETRY`.
-
-> **Q: “How do you prove two requests used the same TCP connection?”**  
-> A: On the server, log `req.socket.remotePort`. The same client port means the same connection. With `new http.Agent({ keepAlive: true, maxSockets: 1 })`, three concurrent requests show one port and are answered one after another, because HTTP/1.1 carries one request at a time per socket. *Trap:* back-to-back `fetch` calls can still open a second socket, because the first is returned to the pool just after the body promise resolves (see lesson 40's additional topics).
+> A: Retry a method only when doing it twice has the same effect as doing it once. RFC 9110 calls that idempotent. GET, HEAD, OPTIONS, TRACE, PUT, and DELETE qualify. POST and PATCH do not, unless the server deduplicates them with an idempotency key you send. Retry connection errors and 429, 502, 503, and 504. Do not retry a 4xx that means the request itself is wrong. Back off exponentially, add jitter so clients do not stampede, and honor `Retry-After`. The limit is a streamed body. You cannot replay bytes you already sent, and undici fails that retry with `UND_ERR_REQ_RETRY`.
 
 > **Q: “`fetch` rejected with `TypeError: fetch failed`. What do you look at?”**  
-> A: `err.cause`. `ECONNREFUSED` means nothing is listening. `ECONNRESET` or `UND_ERR_SOCKET` means the peer reset or closed the connection. `UND_ERR_CONNECT_TIMEOUT` or `UND_ERR_HEADERS_TIMEOUT` means a timeout phase expired. `ENOTFOUND` means DNS failed. A 4xx or 5xx never lands here; it is a resolved `Response` with `ok === false`.
+> A: Look at `err.cause`, not `err.message`. The message is almost always `fetch failed`. `err.cause.code` is the real reason. `ECONNREFUSED` means nothing is listening. `ECONNRESET` or `UND_ERR_SOCKET` means the peer reset or closed the connection. `UND_ERR_CONNECT_TIMEOUT` or `UND_ERR_HEADERS_TIMEOUT` means that phase of the timer expired. `ENOTFOUND` means DNS failed. A 404 or a 500 never arrives here. Those resolve the promise, and `res.ok` is false because `ok` is status 200 through 299. The limit is `http.request`. It does not wrap the failure in `TypeError`. It emits the system error directly on the request's `error` event, so the same outage looks different in the two clients.
 
 ## Cheat-card
 
-- **Three clients:** global `fetch` (bundled undici, `process.versions.undici`), the `undici` package (`request`, `Pool`, `Agent`, mocks, retry, proxies), `http.request`/`https.request` + `http.Agent`.
-- **fetch:** added v17.5.0, unflagged v18.0.0, stable v21.0.0. Resolves on any status; check `res.ok`.
-- **Body:** read once (`json`/`text`/`arrayBuffer`/`body`), `clone()` for two reads, always consume or `res.body.cancel()`.
-- **Reuse:** one request per HTTP/1.1 socket at a time. Parallelism = `connections` (undici, default unlimited) / `maxSockets` (http, default `Infinity`). Prove it with `req.socket.remotePort`.
-- **undici timeouts:** `connectTimeout` 10 s, `headersTimeout` 300 s, `bodyTimeout` 300 s (between chunks), about 1 s precision.
-- **Deadline:** `AbortSignal.timeout(ms)` → `TimeoutError`. `http.request` `timeout` only emits `'timeout'`; destroy it yourself.
-- **Retry:** idempotent methods only (RFC 9110 §9.2.2), exponential backoff + full jitter, honour `Retry-After`. `RetryAgent` defaults: 5 retries, 500 ms × 2ⁿ⁻¹, max 30 s, no jitter.
-- **Streams:** stream request body needs `duplex: 'half'`. `Readable.fromWeb(res.body)` for Node streams.
-- **FormData:** don't set `content-type`. `fs.openAsBlob()` for files on disk.
-- **Redirects:** `follow` (default, max 20, POST→GET on 301/302/303) / `manual` / `error`. `http.request` never follows.
-- **Proxy:** `ProxyAgent`, `EnvHttpProxyAgent`, or `NODE_USE_ENV_PROXY=1` (v24.0.0) / `--use-env-proxy` (v24.5.0).
-- **Errors:** `fetch` → `TypeError`, reason in `err.cause.code`: `ECONNREFUSED`, `ECONNRESET`, `ENOTFOUND`, `UND_ERR_SOCKET`, `UND_ERR_CONNECT_TIMEOUT`, `UND_ERR_HEADERS_TIMEOUT`, `UND_ERR_BODY_TIMEOUT`. `http.request` → `ETIMEDOUT`, `ECONNRESET` "socket hang up", `HPE_*`.
+- **Three clients:** global `fetch` (bundled undici, `process.versions.undici`), the `undici` package, and `http.request` or `https.request` plus `http.Agent`.
+- **fetch resolves on any status.** Check `res.ok`. Read the body once. `clone()` if you need two reads. Cancel with `res.body.cancel()` if you will not read it.
+- **Reuse:** one request at a time per HTTP/1.1 socket. Parallelism is `connections` or `maxSockets`.
+- **Undici timeouts:** `connectTimeout` 10 seconds, `headersTimeout` 300 seconds, `bodyTimeout` 300 seconds between chunks. About one second of precision.
+- **A real deadline:** `AbortSignal.timeout(ms)` gives `TimeoutError`. `http.request`'s `timeout` only emits `timeout`. Destroy the request yourself.
+- **Retry:** idempotent methods only, exponential backoff plus jitter, honor `Retry-After`.
+- **A streamed request body needs `duplex: 'half'`.** `Readable.fromWeb(res.body)` when you want a Node stream.
+- **Do not set `content-type` on `FormData`.**
+- **Redirects:** `follow` (default, max 20, POST becomes GET on 301, 302, and 303), `manual`, or `error`. `http.request` never follows.
+- **Proxy:** `ProxyAgent`, `EnvHttpProxyAgent`, or `NODE_USE_ENV_PROXY=1` / `--use-env-proxy`.
+- **`fetch` errors:** `TypeError`, reason in `err.cause.code`. A 4xx is a resolved response.
 
----
+## Good to know
 
+- `fetch` was added in v17.5.0 behind a flag, unflagged in v18.0.0, and stable since v21.0.0. `NODE_USE_ENV_PROXY` was added in v24.0.0. `--use-env-proxy` was added in v24.5.0. `http.Agent`'s `proxyEnv` was added in v24.5.0. `http.setGlobalProxyFromEnv()` was added in v24.14.0. Both proxy paths are marked Stability 1.1, Active Development. `AbortSignal.timeout` was added in v17.3.0. `RetryAgent` was added in undici v6.7.0. `ProxyAgent` was added in undici v4.8.2. `EnvHttpProxyAgent` was added in undici v6.14.0. `http.globalAgent` keep-alive has been on by default since v19.0.0.
+- The `Idempotency-Key` header comes from an IETF Internet-Draft (draft-ietf-httpapi-idempotency-key-header), listed as expired on 10 Oct 2026, not from an RFC.
+- `RetryAgent` defaults: 5 retries, 500 ms times 2 to the power of n minus 1, capped at 30 seconds, no jitter. It honors `Retry-After`.
+- How do you prove two requests used the same TCP connection? On the server, log `req.socket.remotePort`. The same client port is the same connection. With `new http.Agent({ keepAlive: true, maxSockets: 1 })`, three concurrent requests show one port and are answered one after another, because HTTP/1.1 carries one request at a time on a socket. Back-to-back `fetch` calls can still open a second socket, because the first returns to the pool just after the body promise resolves.
+- In undici 8.11.2 the header and body timers are fast timers a shared ticker checks, `RESOLUTION_MS` of 1000 in `lib/util/timers.js`. The kernel connect failure in the lesson was `ETIMEDOUT` after about 130 seconds with `tcp_syn_retries` of 6.
 ## Learn More
 
 - [fetch (Globals) nodejs.org](https://nodejs.org/docs/latest-v24.x/api/globals.html)

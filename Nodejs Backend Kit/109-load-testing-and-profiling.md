@@ -13,21 +13,23 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A load test sends many requests and records how long each one took, and you read percentiles, not the average. p99 means 99 percent were faster than that number, so 1 in 100 was slower. A CPU profile, or a flame graph, shows which function used the time while that load was running. You do this because a handler that feels instant for one click can still be capped by one function, or can hide a slow path that only a few requests hit. The trade-off is the load model. A closed tool waits for each response before sending the next request, so it can hide a stall that real users would all wait through.
+
 ## Why it matters
 
-A service that answers one request in 2 ms on your laptop can still fall over in production. Under load, requests queue behind each other, one slow path that fires for 2% of requests sets the latency most users feel, and a function that costs 4 ms per call caps a whole process at a few hundred requests per second. None of that shows up when you click through the app by hand.
+A service that answers one request in 2 ms on your laptop can still fall over in production. Under load, requests queue behind each other. A slow path that fires for 2 percent of requests sets the latency most users feel. A function that costs a few milliseconds per call can cap a whole process at a few hundred requests per second. None of that shows up when you click through the app by hand.
 
-Load testing answers "how does this behave with N requests per second, or N users at once?" Profiling answers "where does the time go while it does that?" Together they replace guessing with a loop: generate load, read the percentiles, profile the hot path, change one thing, measure again. This lesson runs that loop on a local Express 5 app with **autocannon** (a Node load generator) and **k6** (a load-testing tool from Grafana Labs, scripted in JavaScript), and finds the bottleneck with `--cpu-prof` and a 0x flame graph.
+Load testing answers how this behaves with N requests per second, or N users at once. Profiling answers where the time goes while it does that. Together they replace guessing with a loop: generate load, read the percentiles, profile the hot path, change one thing, measure again. This lesson runs that loop on a local Express 5 app with autocannon, a Node load generator, and k6, a load-testing tool from Grafana Labs scripted in JavaScript. It finds the bottleneck with `--cpu-prof` and a 0x flame graph.
 
 ## The concept, simply
 
-A load test sends many requests and records how long each one took. The result is not one number but a **distribution**, which you read through **percentiles**:
+A load test sends many requests and records how long each one took. The result is a distribution, which you read through percentiles.
 
-- **p50 (median):** half the requests were faster than this.
-- **p99:** 99% were faster; 1 in 100 was slower.
-- **max:** the single slowest request.
+p50, the median, means half the requests were faster than this. p99 means 99 percent were faster, so 1 in 100 was slower. Max is the single slowest request.
 
-The **mean** (average) mixes everything together and hides the tail. If 98% of requests take 1 ms and 2% take 200 ms, the mean is about 5 ms, which looks fine, but 1 request in 50 waits 200 ms. A page that makes 20 API calls hits the slow path at least once on about a third of page loads (1 − 0.98²⁰ ≈ 0.33). That is why latency goals (SLOs) are written as percentiles: "p99 under 100 ms".
+The mean, the average, mixes everything and hides the tail. If 98 percent of requests take about 1 ms and 2 percent take 200 ms, the mean is about 5 ms, which looks fine, but 1 request in 50 waits 200 ms. A page that makes 20 API calls hits that slow path at least once on about a third of page loads, because 1 minus 0.98 to the 20th is about 0.33. That is why a latency goal, an SLO, is written as a percentile: p99 under 100 ms.
 
 Load generators come in two models:
 
@@ -47,7 +49,7 @@ The load-test-and-profile loop:
 5. **Profile under the same load.** Run the server with `node --cpu-prof` (or under 0x), apply the load, stop the server, and rank functions by self time. Lesson 10's appendix explains the `.cpuprofile` format, the `top-functions.js` script used below and how 0x works; this lesson only applies them to a server under load.
 6. **Change one thing,** then repeat steps 3–5 several times for both versions and compare the spread of results, not two single numbers.
 
-**How the numbers in this lesson were produced.** One laptop: Intel Core i5-1135G7 (4 cores, 8 threads), 15 GB RAM, Ubuntu 26.04, Node v24.19.0. The load generator ran on the same machine as the server, so they competed for CPU. Other jobs were running on the machine at the same time (other people's builds and servers, a browser, endpoint security software): the 1-minute load average was between 4 and 15 during these runs. Example 6 shows what that did to one set of runs. Treat every number as a measurement of this setup, not as a benchmark of Node, Express or the tools.
+Every number below is this one laptop, not a benchmark of Node, Express, or the tools. The generator ran on the same machine as the server, so they shared the CPU, and other jobs were running. The machine details and the load-average range are in Good to know. Example 6 shows what that noise did to one set of runs.
 
 **Why averages mislead, in numbers.** With 2% of requests at 200 ms and 98% at about 0–1 ms, the mean moves by about 0.02 × 200 = 4 ms. A dashboard that shows only the mean shows a service at 4 ms. The p99 shows 200 ms, which is what one request in fifty gets. Averages also hide bimodal distributions (two groups, fast and slow) and say nothing about the worst case.
 
@@ -623,16 +625,16 @@ For latency targets, test with an arrival rate close to real traffic (k6's arriv
 ## ⭐ Interview lens
 
 > **Q: “Your dashboard shows a 5 ms average latency but users complain the API is slow. What do you look at?”**  
-> A: The distribution, not the mean. Look at p99 and max, per endpoint. In the run here, 2% of requests took 200 ms and the mean was 4 ms; p99 was 199 ms. Then find what the slow requests have in common (a cache miss path, a particular parameter, a periodic job) and profile that path. *Trap:* a page that calls 20 endpoints hits a 2% slow path on about a third of page loads.
+> A: Look at the distribution, not the mean. The mean mixes the fast requests with the slow ones. In Example 2, autocannon against `/tail` reported an average of 4.03 ms and a p50 of 0 ms, but p99 was 199 ms, because 1 request in 50 waited 200 ms on a timer and the other 49 did not. k6 showed the same shape: average 4.53 ms, p99 200.65 ms, and the threshold `p(99)<100` failed with exit code 99. Then split by endpoint and ask what the slow requests share: a cache miss, one parameter, a job that runs on a timer. Profile that path under the same load. A page that calls 20 endpoints hits a 2 percent slow path on about a third of loads, because 1 minus 0.98 to the 20th is about 0.33. The limit of the mean is that it can move by only about 4 ms, 0.02 times 200, while users feel the 200 ms.
 
 > **Q: “What is coordinated omission?”**  
-> A: A closed-model load generator waits for each response before sending the next request on that connection. When the server stalls, the generator stops sending, so it records only a few slow requests and makes the tail look better than real users see it. Real users keep arriving. Use an open model (a fixed arrival rate, like k6's `constant-arrival-rate`). In the example here, a 300 ms stall every 2 s gave autocannon a p99 of 1 ms, while k6 at 200 requests/s recorded it in its tail.
+> A: Coordinated omission is what a closed-model load generator does during a stall. A closed model keeps a fixed number of connections. Each one sends a request, waits for the response, then sends the next. Gil Tene named the effect: the tool coordinates with the server and omits the requests that would have been slow. If the server blocks the event loop for 300 ms, those few connections send one request each and wait, and the thousands of fast requests before and after dominate the percentile. In Example 7, `/stall` blocks for 300 ms every 2 seconds. autocannon with 10 connections reported p99 of 1 ms and a max of 310 ms. k6 at a fixed 200 arrivals per second reported p99 of 283 ms, because users keep arriving during the stall. About 200 per second times 0.3 seconds is about 60 requests per stall, and k6 records them. The limit is that even an open model can drop work. That k6 run had `dropped_iterations: 41` because it needed more virtual users than were ready. Raise `preAllocatedVUs` until that stays at 0.
 
 > **Q: “How do you find why a Node endpoint tops out at a few hundred requests per second?”**  
-> A: Put it under load and take a CPU profile at the same time (`node --cpu-prof`, or 0x for a flame graph). Rank functions by self time and look at per-line ticks. Here, 79% of samples were in one function, on the line that re-parsed a 360 KB JSON string per request. Caching the parsed value took the endpoint from about 220 to about 8,500 requests/s, and the next profile pointed at a linear scan, which a `Map` fixed.
+> A: Put the endpoint under load and take a CPU profile at the same time. Start the server with `node --cpu-prof`, run autocannon, and stop it with SIGINT so the process exits through `process.exit` and V8 writes the file. Rank functions by self time, then look at `positionTicks` for the line. In MODE 0, `findItem` had 78.7 percent of samples, and the ticks sat on the line that called `JSON.parse` on a 360 KB catalog on every request. Parsing once, MODE 1, moved five runs from 211 to 222 requests per second up to 8,061 to 8,919, and p99 from about 190 ms to 4 or 5 ms. The next profile no longer showed parse. It showed a linear `find` over 5,000 items, which a `Map` replaced. The limit is a noisy machine and a profile of the wrong thing. The first MODE 2 set ranged from 47 to 16,984 requests per second while the load average climbed, and a quiet rerun was 16,292 to 18,252. Run several times, and fix the largest application cost, not `writev` just because it shows up after the real cost is gone.
 
 > **Q: “autocannon or k6?”**  
-> A: autocannon is an npm package, quick to run from a Node project against one URL, closed model, with a Node API for scripting. k6 is a separate binary with its own JavaScript runtime, scenarios, open-model executors and thresholds that fail the run, which suits SLO checks and CI. Both measure the same thing; pick by the question.
+> A: Both send load and record a latency distribution. autocannon 8.0.0 is an npm package. You point it at one URL with flags such as `-c 50 -d 10`, or you call it from Node. It is a closed model, a fixed number of connections, unless you pass `-R` to pace a rate. k6 v2.3.0 is a separate Go binary with its own JavaScript runtime, not Node. A script sets an executor. `constant-arrival-rate` is an open model: requests arrive at a fixed rate even if the server slows down. k6 thresholds, such as `p(99)<100`, make the process exit non-zero, here exit 99, so CI can fail a latency regression. Use k6 when the question is a latency SLO. Use autocannon when the question is how much one URL can take, or you want a quick run from a Node project. The limit of either tool on the same machine as the server is that they share the CPU, so the number is this setup, not a benchmark of the runtime.
 
 ## Cheat-card
 
@@ -643,7 +645,14 @@ For latency targets, test with an arrival rate close to real traffic (k6's arriv
 - **Profile under load:** `node --cpu-prof --cpu-prof-dir=prof server.js`, load it, exit through `process.exit()`; rank self time (lesson 10's script); check `positionTicks` for the line.
 - **0x:** `0x -D flame -P 'autocannon -c 20 -d 5 http://127.0.0.1:$PORT/…' server.js`.
 - **Before/after:** fresh process per run, warm-up, ≥5 runs per case, report min–max, rerun if noisy.
-- **Measured here:** re-parsing 360 KB JSON per request → ~220 req/s; parse once → ~8,500; plus `Map` → ~17,000 (one laptop, busy).
+- **Measured here:** re-parsing 360 KB JSON per request, about 211 to 222 req/s; parse once, about 8,061 to 8,919; plus a `Map`, about 16,292 to 18,252 on the quiet rerun.
+
+## Good to know
+
+- Machine for every run: Intel Core i5-1135G7, 4 cores and 8 threads, 15 GB RAM, Ubuntu 26.04, Node v24.19.0. Load generator and server shared the CPU. The 1-minute load average was between 4 and 15. Example 6 started at load average 4.66 and ended the first set at 15.38.
+- First MODE 2 set, while the machine got busy: 229, 47, 11016, 16984, 16839 req/s, p99 up to 2188 ms. The quiet rerun was 16292 to 18252 req/s, p99 2 ms.
+- autocannon with `-R 200` and coordinated-omission correction reported a median of 127 ms on `/stall`. With `-C` (correction off) p99 was 300 ms and p97.5 was 16 ms. k6's median at the same arrival rate was 0.48 ms. Why the corrected median is so much higher was not examined.
+- The 0x flame graph HTML was about 830 KB and contained the string `findItem` 17 times. It was not opened in a browser.
 
 ---
 

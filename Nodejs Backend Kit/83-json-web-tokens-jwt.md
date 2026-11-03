@@ -13,56 +13,56 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A JSON Web Token is a signed packet of claims: the server writes facts such as the user id and the expiry into the token, signs them, and later checks that signature instead of looking the user up. Any server with the key can trust the token without a shared session store. Anyone who holds the token can read the payload, because signing is not encryption. You also cannot cancel a token before it expires unless you add a refresh token or a denylist.
+
 ## Why it matters
 
-JWTs are everywhere in modern backends: API gateways, mobile app auth, microservice-to-microservice calls, single sign-on. If you build APIs, you will issue, verify, and debug JWTs, and interviewers know it — "explain how a JWT works" and "how do refresh tokens fit in?" are near-guaranteed questions for any backend or full-stack role.
-
-They matter beyond checkbox familiarity because JWTs are deceptively easy to *use* and dangerously easy to *misuse*. The library call is one line, so people ship them without understanding that the payload is readable by anyone, that `none`-algorithm attacks exist, that a token cannot be un-issued, or that storing it in `localStorage` exposes it to XSS. A large fraction of token-related breaches come from these exact misunderstandings. Knowing what a JWT guarantees (integrity) and what it does not (confidentiality, revocability) is what separates someone who "uses JWT" from someone who can secure a system with them.
-
-This topic covers the structure, the verify flow in detail, where to store tokens, the access + refresh token pattern that makes stateless auth practical, and the well-known pitfalls interviewers probe.
+APIs, mobile apps, and service-to-service calls all pass JWTs around. The library call is one line, so it is easy to ship one without knowing the limits. The payload is readable by anyone who has the token. A token that says it needs no signature can be accepted by a careless verifier. You cannot un-issue a token. Putting it in localStorage exposes it to script injection. A JWT guarantees integrity, meaning the contents were not changed, and authenticity, meaning the holder of the secret signed them. It does not guarantee secrecy or that you can revoke it early.
 
 ## The concept, simply
 
-A JWT is a **signed, self-contained** statement. Instead of the server storing "user 42 is logged in" and handing the client a lookup id, the server writes the fact directly into a token, signs it so it cannot be tampered with, and gives the whole thing to the client. When the client sends it back, the server re-checks the signature and trusts the contents — no database lookup required.
+A JWT is a signed, self-contained statement. Instead of storing "user 42 is logged in" and handing out a lookup id, the server writes that fact into the token, signs it, and gives the token to the client. When it comes back, the server rechecks the signature and trusts the contents. No database lookup is required.
 
-A JWT has three parts, joined by dots: `header.payload.signature`. Each part is Base64URL-encoded JSON (except the signature, which is bytes).
+A JWT has three parts joined by dots: header, payload, and signature. The header and payload are JSON encoded with Base64URL. The signature is bytes.
 
 ![The three dot-separated parts of a JWT: header, payload, and signature](assets/i46_01_b738841f.svg)
 
-Header names the algorithm, payload carries claims like sub and exp, and the signature is an HMAC or RSA signature over the first two parts. Base64URL is encoding, not encryption.
+The header names the algorithm. The payload carries claims such as the subject and the expiry. The signature is an HMAC or an RSA signature over the first two parts. Base64URL is encoding, not encryption.
 
-The single most important thing to internalize: **Base64URL is encoding, not encryption.** Anyone who holds the token can decode and read the payload — paste it into jwt.io and it's all there. The signature does not hide the contents; it only proves they were not altered and were issued by someone holding the secret. Therefore: never put secrets, passwords, or sensitive PII in a JWT payload.
+That last point is the one to remember. Anyone holding the token can decode the payload. The signature does not hide the contents. It only proves they were not altered and were produced by someone with the key. Do not put secrets, passwords, or sensitive personal data in the payload.
 
 ## How it works
 
-**The three parts.** The *header* is JSON like `{"alg":"HS256","typ":"JWT"}` — it names the signing algorithm. The *payload* holds *claims*: standard registered claims like `sub` (subject/user id), `iat` (issued-at), `exp` (expiry), `iss` (issuer), `aud` (audience), plus any custom claims you add (`role`, `plan`). The *signature* is computed over the encoded header and payload.
+The **header** is JSON such as algorithm HS256 and type JWT. It names the signing algorithm. The **payload** holds claims. Registered ones include `sub` for the subject or user id, `iat` for issued-at, `exp` for expiry, `iss` for the issuer, and `aud` for the audience, plus custom claims such as role. The **signature** is computed over the encoded header and payload.
 
-**Signing.** For the common HMAC family (`HS256`), the signature is `HMAC-SHA256(base64url(header) + "." + base64url(payload), secret)`. The same secret both signs and verifies (symmetric). For the RSA/ECDSA families (`RS256`, `ES256`), a *private* key signs and the corresponding *public* key verifies (asymmetric) — this lets many services verify tokens without being able to mint them, which is ideal for distributed systems and third-party verifiers.
+For the common HMAC family, HS256, the same secret both signs and verifies. For RSA or ECDSA, RS256 or ES256, a private key signs and the matching public key verifies. Many services can then check tokens without being able to mint them.
 
-**The verify flow, step by step.** This is the part interviewers love to hear in detail:
+Verification, in order:
 
-1. Split the token on dots into header, payload, signature.
-2. Base64URL-decode the header and read `alg`. Critically, the verifier must *enforce an expected algorithm* — it must not blindly trust the token's own `alg` field (see the alg-confusion pitfall).
-3. Recompute the signature over `header.payload` using the server's key and the expected algorithm.
-4. Compare the recomputed signature to the token's signature using a **constant-time** comparison. If they differ, reject — the token was tampered with or signed by the wrong key.
-5. Only after the signature passes, validate the claims: is `exp` in the future? Is `nbf` (not-before) satisfied? Do `iss` and `aud` match what this service expects?
-6. If everything passes, the payload is trusted and the request proceeds as that user.
+1. Split the token on the dots into header, payload, and signature.
+2. Read the algorithm, but enforce the algorithm you expect. Do not trust the token's own algorithm field.
+3. Recompute the signature over header-dot-payload with your key and that expected algorithm.
+4. Compare in constant time. If it differs, reject the token.
+5. Only then check claims: `exp` still in the future, `nbf` (not-before) satisfied, `iss` and `aud` match this service.
+6. If all of that passes, treat the request as that user.
 
-Notice the ordering: *signature first, claims second*. If you read the payload before verifying the signature you are trusting attacker-controlled data. Good libraries enforce this ordering for you, which is exactly why you should not hand-roll verification.
+Signature first, claims second. Reading the payload before the signature means trusting attacker-controlled data. A maintained library does this ordering. Do not hand-roll it.
 
-**Where to store the token on the client.** Two mainstream options, each with a distinct threat model. `localStorage` is convenient and works for cross-domain APIs, but it is readable by any JavaScript on the page — so a single XSS flaw leaks every user's token. An `HttpOnly` cookie is invisible to JavaScript (mitigating XSS token theft) but is automatically attached to requests, which opens CSRF risk unless you add `SameSite` and/or CSRF tokens. The modern default for web apps is an `HttpOnly`, `Secure`, `SameSite` cookie; pure token-in-header suits native mobile clients where there is no cookie jar or CSRF surface.
+**Where the browser keeps it.** localStorage is easy and works across domains, but any script on the page can read it, so one cross-site scripting bug leaks the token. An HttpOnly cookie is invisible to JavaScript, which blocks that theft, but the browser attaches the cookie automatically, which is the cross-site request forgery problem unless you set SameSite and a CSRF token. For a web app, the usual default is an HttpOnly, Secure, SameSite cookie. A native mobile app has no cookie jar, so a token in the Authorization header fits there.
 
-**The revocation problem and refresh tokens.** Because a JWT is valid until `exp` and the server keeps no per-token state, you cannot instantly revoke one. The standard resolution is a two-token system: a short-lived *access token* (minutes) that is used on every API call and simply expires, and a long-lived *refresh token* (days/weeks) that is stored server-side (or in a store you control) and used only to mint new access tokens. Logging out or detecting theft deletes the refresh token, so the user is locked out within one short access-token lifetime.
+**Revocation.** A JWT is valid until `exp`, and the server keeps no per-token row, so you cannot cancel one on the spot. The usual fix is two tokens. A short-lived access token, minutes, is used on every API call and simply expires. A long-lived refresh token, days or weeks, is stored on the server and is used only to mint new access tokens. Logout deletes the refresh token, so the user is locked out within one access-token lifetime.
 
 ![Sequence of login, using a short access token, expiry, and refreshing with a rotated refresh token](assets/i46_02_11d4a2da.svg)
 
-Login returns a short access token and a long refresh token; API calls use the access token until it expires, then the refresh token is exchanged (and rotated) for a new one. Refresh tokens are revocable server-side.
+Login returns a short access token and a long refresh token. API calls use the access token until it expires, then the refresh token is exchanged for a new one. Refresh tokens can be revoked on the server.
 
-**Refresh token rotation** hardens this further: every refresh issues a *new* refresh token and invalidates the old one. If a stolen refresh token is used after the legitimate client already rotated it, the server sees a reused (already-invalidated) token and can revoke the entire token family — turning theft into a detectable event.
+**Rotation** goes further. Each refresh issues a new refresh token and invalidates the old one. If a stolen refresh token is used after the real client already rotated it, the server sees a reused token and can revoke the whole family.
 
 ## Code examples
 
-Issuing an access token on login with the `jsonwebtoken` library. Keep the payload minimal and always set an expiry.
+Issue an access token at login. Keep the payload small and always set an expiry.
 
 javascript
 
@@ -85,7 +85,8 @@ app.post('/login', async (req, res) => {
 });
 ```
 
-Verifying the token in middleware. Note the explicit `algorithms` allow-list and issuer check — these close the alg-confusion and audience pitfalls. `jwt.verify` throws on an invalid signature or expired token, so it goes in a try/catch.
+
+Verify in middleware. The explicit algorithm list and the issuer check close the algorithm-confusion and audience gaps. `jwt.verify` throws on a bad signature or an expired token, so it sits in try/catch.
 
 javascript
 
@@ -109,7 +110,8 @@ function requireJwt(req, res, next) {
 }
 ```
 
-The refresh endpoint. The refresh token is stored server-side so it can be revoked and rotated; presenting a valid one mints a fresh access token.
+
+The refresh route stores the refresh token on the server so it can be revoked and rotated. A valid one mints a new access token.
 
 javascript
 
@@ -138,7 +140,8 @@ app.post('/refresh', async (req, res) => {
 });
 ```
 
-A denylist for the rare case where you must kill an *access* token before it expires (e.g. account compromise). Because access tokens are short-lived, the denylist stays small and entries expire quickly.
+
+A denylist is for the rare case where you must kill an access token before it expires, for example a stolen account. Because access tokens are short-lived, the list stays small and entries expire quickly.
 
 javascript
 
@@ -150,56 +153,56 @@ async function isRevoked(jti) {
 // In requireJwt, after verify: if (await isRevoked(payload.jti)) reject.
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Putting secrets or PII in the payload.** The payload is only Base64URL-encoded, not encrypted. Passwords, card numbers, and sensitive data are readable by anyone holding the token.
-- **Trusting the token's own `alg` header.** The classic attacks are (a) `alg: "none"`, where a token claims to need no signature, and (b) RS256→HS256 confusion, where an attacker signs with the *public* key as if it were an HMAC secret. Always pass an explicit `algorithms` allow-list to `verify`.
-- **No expiry, or absurdly long expiry.** A token without `exp` (or valid for months) is a permanent credential that cannot be revoked. Keep access tokens to minutes.
-- **Assuming you can revoke a JWT.** A stateless token is valid until it expires. If you need instant logout/ban, you need short lifetimes plus a refresh/denylist mechanism — the token alone cannot do it.
-- **Storing tokens in `localStorage` without weighing XSS.** Any script on the page can read it. Prefer `HttpOnly` cookies for browser apps, and treat any XSS as a full token compromise.
-- **Weak or committed signing secrets.** A short or source-controlled HMAC secret lets attackers forge tokens. Use a long random secret from the environment/secret manager, and rotate it.
-- **Skipping `iss`/`aud` checks in multi-service setups.** Without them, a token minted for service A may be replayed against service B.
+- **Secrets or personal data in the payload.** It is only Base64URL, not encrypted. Passwords, card numbers, and sensitive data are readable by anyone holding the token.
+- **Trusting the token's own `alg` header.** `alg: none` claims no signature is needed. RS256 confused with HS256 lets an attacker sign with the public key as if it were an HMAC secret. Always pass an algorithm allow-list to verify.
+- **No expiry, or an expiry of months.** That token is a permanent credential. Keep access tokens to minutes.
+- **Assuming you can revoke a bare JWT.** It is valid until it expires. Instant logout needs a short lifetime plus a refresh token or a denylist.
+- **localStorage without thinking about script injection.** Any script on the page can read it. For browser apps, prefer an HttpOnly cookie.
+- **A short or committed HMAC secret.** Attackers can then forge tokens. Use a long random secret from the environment, and rotate it.
+- **Skipping `iss` and `aud` across services.** A token minted for service A can be replayed at service B.
 
 ## Best practices
 
-- **Short-lived access + revocable refresh.** Access tokens in minutes, refresh tokens server-side and rotated on each use, with reuse detection to catch theft.
-- **Always pin the algorithm.** Pass `algorithms: ['HS256']` (or your chosen alg) to `verify` so a forged `alg` cannot downgrade the check.
-- **Always set and check `exp`, plus `iss` and `aud` when relevant.** Reject expired, wrong-issuer, and wrong-audience tokens.
-- **Keep the payload lean.** Only the id, role/scopes, and standard claims — no secrets, no large blobs (tokens ride on every request).
-- **Store browser tokens in `HttpOnly`, `Secure`, `SameSite` cookies** and pair with CSRF defenses; use header-based tokens for native mobile.
-- **Prefer asymmetric signing (RS256/ES256) across services** so verifiers hold only the public key and cannot mint tokens.
-- **Use a maintained library** (`jsonwebtoken`, `jose`) and never hand-roll signing or verification.
+- **Short-lived access token, revocable refresh token.** Rotate the refresh token on each use, and treat reuse as theft.
+- **Pin the algorithm.** Pass `algorithms: ['HS256']`, or whichever you chose, so a forged header cannot downgrade the check.
+- **Always set and check `exp`, and `iss` and `aud` when more than one service is involved.**
+- **Keep the payload to an id, a role or scopes, and the standard claims.** Tokens ride on every request.
+- **Browser: HttpOnly, Secure, SameSite cookie, plus CSRF defense. Mobile: Authorization header.**
+- **Prefer RS256 or ES256 across services** so verifiers hold only the public key and cannot mint tokens.
+- **Use `jsonwebtoken` or `jose`.** Do not hand-roll signing or verification.
 
 ## ⭐ Interview lens
 
 > **Q: Walk me through how a server verifies a JWT.**  
-> Split into header/payload/signature; read the expected algorithm (pinned by the server, not blindly from the token); recompute the signature over `header.payload` with the server's key; compare in constant time; if it matches, validate claims — `exp` not passed, `nbf` satisfied, `iss`/`aud` as expected. Signature is checked *before* trusting any claim.
+> A: Verification proves the token was signed by your key and has not been changed. Split it on the dots into header, payload, and signature. Decide the algorithm yourself, for example HS256, and do not take it blindly from the header. Recompute the signature over the header and payload with your key, and compare in constant time so timing does not leak how close a forgery was. Only if that matches do you read the claims: expiry still in the future, not-before satisfied, and issuer and audience matching this service. The order is the whole point. Signature first, claims second, because the payload is attacker-controlled until the signature passes. A library such as jsonwebtoken does this if you pass an algorithms list. The limit is that a valid signature does not mean you can cancel the token. It stays good until exp unless you add more machinery.
 
 > **Q: Is a JWT encrypted? Can I store the user's role in it? (trap)**  
-> It is signed, not encrypted — the payload is Base64URL and fully readable, so never store secrets or sensitive PII. Storing a non-sensitive role/scope is fine and normal; that's what claims are for. The trap is thinking the signature hides the contents; it only guarantees integrity and authenticity.
+> A: A JWT is signed, not encrypted. The payload is Base64URL JSON, so anyone who copies the token can decode it and read every claim. Paste it into a decoder and the user id and role are right there. That is fine for a non-sensitive role or scope, which is what claims are for, and it is not fine for a password, a card number, or other sensitive personal data. The signature only proves integrity and that the holder of the secret produced the token. It does not hide bytes. If you need secrecy, encrypt separately. The limit of "put the role in the token" is staleness: if you demote the user, the old token still says admin until it expires, unless you keep access tokens short or check the role in a store.
 
 > **Q: How do you log a user out or revoke a JWT immediately?**  
-> You can't revoke a pure stateless JWT before it expires — that's its fundamental limitation. The practical answer: keep access tokens short-lived (minutes) and back them with a server-side refresh token you can delete, and optionally a short-lived denylist keyed by `jti` for emergency revocation of in-flight access tokens. Deleting the refresh token locks the user out within one access-token lifetime.
+> A: A pure stateless JWT cannot be revoked before exp, because the server stored nothing to delete. The practical pattern is two tokens. The access token is what every API call sends, and you keep it to minutes so a leak dies quickly. The refresh token is long-lived, stored on the server, and used only to mint a new access token. Logout or a ban deletes that refresh row, and the user is locked out within one access-token lifetime. For the rare case where an access token itself must die immediately, keep a short denylist keyed by the token id, jti, with entries that expire when the access token would have. Rotation makes theft visible: each refresh replaces the refresh token, and reuse of an old one revokes the family. The limit is that you have given up a bit of the "no state" benefit. The refresh token is state on purpose.
 
 > **Q: What is the `alg: none` / algorithm-confusion attack?**  
-> `alg: none` is a token claiming no signature is needed; a naive verifier that trusts the header accepts it unsigned. Algorithm confusion is signing an `HS256` token using the server's *public* RSA key as the HMAC secret when the server expected `RS256`. Both are defeated by pinning an explicit `algorithms` allow-list at verify time and never deriving the algorithm from the token.
-
-> **Q: Access token vs refresh token — why have both?**  
-> The access token is used on every request and is stateless, so it must be short-lived to limit the damage if leaked. The refresh token is used rarely (only to mint access tokens), can be stored securely and server-side, and is therefore revocable. Together they give you the scalability of stateless verification plus the control of revocation. Rotation on each refresh adds theft detection.
-
-> **Q: localStorage vs cookie for the token?**  
-> `localStorage` is XSS-exposed (any script reads it) but immune to CSRF and easy cross-domain — okay for native/mobile or when you fully control XSS. `HttpOnly` cookies are hidden from JavaScript (XSS-resistant) but auto-sent, so they need `SameSite` and/or CSRF tokens. For browser web apps the recommended default is an `HttpOnly`, `Secure`, `SameSite` cookie.
+> A: The access token is presented on every request and checked with no database lookup, so it has to be short-lived or a leak is a long-lived credential. The refresh token is presented rarely, only to get a new access token, so you can store it server-side, rotate it, and delete it. Together you get stateless checks on the hot path and a real logout. For example, login returns both, API calls send the access token until exp, and the client then posts the refresh token to mint another access token. If you rotate on each refresh, a stolen refresh token used after the real client already rotated it shows up as reuse and you can revoke the whole set. The limit is client complexity and a storage decision: the refresh token has to live somewhere safer than a place any script can read, or the rotation scheme does not help.
 
 ## Cheat-card
 
-- **Structure**: `header.payload.signature`, each Base64URL JSON; signature = HMAC/RSA over first two parts.
-- **Base64URL ≠ encryption** — payload is public. No secrets/PII inside.
-- **Verify order**: signature (constant-time, pinned alg) → then claims (`exp`, `nbf`, `iss`, `aud`).
-- **HS256** = symmetric (one secret). **RS256/ES256** = private signs, public verifies.
-- **Can't revoke** a stateless JWT early → short access token + revocable/rotated refresh token.
-- **Pitfalls**: `alg:none`, RS256→HS256 confusion, no `exp`, weak/committed secret.
-- **Browser storage**: HttpOnly+Secure+SameSite cookie (+CSRF). Mobile: header token.
-- Always pass `algorithms: [...]` to `verify`; use a maintained lib.
+- **Shape:** header, payload, signature. Header and payload are Base64URL JSON. The signature covers the first two parts.
+- **Base64URL is not encryption.** The payload is public. No secrets in it.
+- **Verify order:** signature, constant-time, algorithm you pinned, then claims (`exp`, `nbf`, `iss`, `aud`).
+- **HS256:** one shared secret. **RS256 or ES256:** private key signs, public key verifies.
+- **Cannot revoke a stateless JWT early.** Short access token plus a refresh token you can delete and rotate.
+- **Pitfalls:** `alg` none, RS256 confused with HS256, no `exp`, weak or committed secret.
+- **Browser:** HttpOnly, Secure, SameSite cookie, plus CSRF. **Mobile:** Authorization header.
+- Always pass an `algorithms` list to verify. Use a maintained library.
+
+## Good to know
+
+- **What is the alg none or algorithm-confusion attack?** `alg: none` says no signature is required, and a verifier that trusts the header accepts it unsigned. Algorithm confusion signs an HS256 token with the server's public RSA key when the server expected RS256. Pin `algorithms` at verify time and never take the algorithm from the token.
+- **localStorage or a cookie for the token?** localStorage is readable by any script, so one XSS leak steals it, but it is not sent automatically so it is not a CSRF problem. An HttpOnly, Secure, SameSite cookie is hidden from script and is the usual browser default. It is sent automatically, so cookie-based calls still need CSRF defense.
 
 ---
 

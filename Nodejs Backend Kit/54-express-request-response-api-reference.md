@@ -13,45 +13,49 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Beyond `req.body` and `res.json`, Express adds helpers that compare headers and write headers. `req.is` checks the content type the client sent. `req.accepts` and `res.format` pick a response from the Accept header. `req.ip` and `req.protocol` report the client only after you say which proxies you trust. These helpers exist so content negotiation, caching, and webhooks are a method call instead of hand-parsed headers. The trade-off is that several of them read settings or headers you have to set first, and a JSON parser that runs too early destroys the raw bytes a webhook signature needs.
+
 ## Why it matters
 
-Lesson 51 ([The req and res objects](51-the-req-and-res-objects-reading-and-responding.md)) covers the helpers every handler uses: `params`, `query`, `body`, `get`, `status`, `json`, `send` and `redirect`. Production code needs more of the API than that:
+Lesson 51 covers the helpers every handler uses: `params`, `query`, `body`, `get`, `status`, `json`, `send`, and `redirect`. Production code needs more of the same two objects.
 
-- **Content types.** A route that accepts JSON should reject `text/plain` with `415`. `req.is` does the media-type comparison for you.
-- **Negotiation.** An endpoint that serves JSON to an API client and HTML to a browser needs `req.accepts` or `res.format`, plus a `Vary: Accept` header so caches keep the two versions apart.
-- **Clients behind proxies.** `req.ip`, `req.protocol` and `req.hostname` only report the real client once `trust proxy` is set (lesson 52).
-- **Caching and partial content.** `req.fresh`, `req.range` and `res.vary` are what HTTP caching and range requests are built from.
-- **Raw bodies.** Webhook senders sign the exact bytes they send. If `express.json()` parses the body first, you can no longer check the signature, so you need `express.raw`.
+- **Content types.** A route that accepts JSON should reject `text/plain` with status 415. `req.is` compares the media type for you.
+- **Negotiation.** One endpoint can send JSON to an API client and HTML to a browser. That needs `req.accepts` or `res.format`, plus a `Vary: Accept` header so a cache keeps the two versions apart.
+- **Clients behind proxies.** `req.ip`, `req.protocol`, and `req.hostname` report the real client only after `trust proxy` is set. Lesson 52 covers that setting.
+- **Caching and partial content.** `req.fresh`, `req.range`, and `res.vary` are what conditional requests and range requests are built from.
+- **Raw bodies.** A webhook signs the exact bytes it sent. If `express.json()` parses the body first, you can no longer check the signature. Use `express.raw`.
 
-Each row of the table in Example 1 was sent to a running server, and the Result column is that server's real response.
+Each row of the table in Example 1 was sent to a running server. The Result column is that server's real response.
 
 ## The concept, simply
 
-Every Express handler receives two objects. **`req` reads the request**: the method, URL, headers and body that the client sent, with helpers that parse and compare them. **`res` writes the response**: helpers that set the status, headers and body, and send them back. The read side never sends anything, and the write side never looks at what the client sent, except where the response depends on it (`res.format` reads `Accept`).
+Every handler receives two objects. `req` reads the request: the method, URL, headers, and body, plus helpers that parse and compare them. `res` writes the response: helpers that set the status, headers, and body. The read side does not send anything. The write side does not look at what the client sent, except where the response depends on it. `res.format` reads `Accept`.
 
 ![Two panels: req, incoming, lists req.params, req.query, req.body, req.headers and req.method/path/cookies; res, outgoing, lists res.status, res.json, res.send, res.redirect and res.set/cookie/end](assets/i35_01_be4c0901.svg)
 *Figure: req reads the request, res writes the response. Look at: the left panel is everything you can read, the right panel everything you can write; this lesson adds the less common methods to both sides.*
 
-The less common methods group into five families:
+The less common methods fall into five families.
 
-1. **Request content inspection:** `req.is(type)` checks the request's `Content-Type`.
-2. **Negotiation:** `req.accepts`, `req.acceptsLanguages`, `req.acceptsCharsets` and `req.acceptsEncodings` pick the best match from the client's `Accept*` headers. `res.format` dispatches on `Accept`, and `res.vary` records which request headers the response depends on.
-3. **Connection facts:** `req.hostname`, `req.protocol`, `req.secure`, `req.ip`, `req.ips`, `req.subdomains` and `req.xhr`. Some of them depend on the `trust proxy` and `subdomain offset` settings.
-4. **Caching and ranges:** `req.fresh`, `req.stale` and `req.range`.
-5. **Response shaping:** `res.sendStatus`, `res.type`, `res.links`, `res.append`, `res.locals` and `res.headersSent`.
+1. **Request content.** `req.is(type)` checks the request `Content-Type`.
+2. **Negotiation.** `req.accepts`, `req.acceptsLanguages`, `req.acceptsCharsets`, and `req.acceptsEncodings` pick the best match from the client's `Accept*` headers. `res.format` dispatches on `Accept`. `res.vary` records which request headers the response depends on.
+3. **Connection facts.** `req.hostname`, `req.protocol`, `req.secure`, `req.ip`, `req.ips`, `req.subdomains`, and `req.xhr`. Some of them depend on `trust proxy` and `subdomain offset`.
+4. **Caching and ranges.** `req.fresh`, `req.stale`, and `req.range`.
+5. **Response shaping.** `res.sendStatus`, `res.type`, `res.links`, `res.append`, `res.locals`, and `res.headersSent`.
 
-Then there are the **body parsers**. `express.json`, `express.raw`, `express.text` and `express.urlencoded` are middleware that read the request stream and set `req.body`.
+The body parsers are middleware. `express.json`, `express.raw`, `express.text`, and `express.urlencoded` read the request stream and set `req.body`.
 
 ## How it works
 
-1. **`req` and `res` are Node objects with an extra prototype.** On each request the app runs `Object.setPrototypeOf(req, app.request)` and `Object.setPrototypeOf(res, app.response)`. `app.request` inherits from `http.IncomingMessage.prototype` and `app.response` from `http.ServerResponse.prototype`. So `res.headersSent`, `res.setHeader` and `req.headers` are plain Node, and `res.json` or `req.ip` are Express.
-2. **Most `req` properties are getters.** `req.ip`, `req.protocol`, `req.hostname`, `req.fresh`, `req.xhr` and (in Express 5) `req.query` are computed from headers and settings each time you read them. Nothing is parsed until your code asks for it.
-3. **Negotiation goes through two packages.** `req.accepts*` call the `accepts` package, which uses `negotiator` to sort the header's entries by `q` weight and then by specificity. They return the best item from **your** list, or `false` if none is acceptable. `res.format(obj)` calls `req.accepts(Object.keys(obj))`, sets `Vary: Accept`, and runs the matching function. If nothing matches and there is no `default` key, it calls `next(err)` with `err.status = 406`.
-4. **Content-type checks go through `type-is`.** `req.is('json')` expands the shorthand to `application/json`, compares it with the request's `Content-Type` (ignoring parameters such as `charset`), and returns the matching type, `false`, or `null` when the request has no body.
-5. **`req.fresh` is the conditional-request test.** It uses the `fresh` package to compare the request's `If-None-Match` / `If-Modified-Since` with the response's `ETag` / `Last-Modified` headers **already set on `res`**. `res.send` runs the same test and turns the response into `304` with no body when it is fresh.
-6. **Body parsers only act on their type.** Each parser checks `Content-Type` (by default `application/json`, `application/octet-stream`, `text/plain` or `application/x-www-form-urlencoded`; override with `type`). If it matches, the parser reads the stream up to `limit` (default `100kb`), decodes it and sets `req.body`; otherwise it calls `next()` and leaves `req.body` alone. In Express 5 that means `req.body` stays `undefined` (changed in v5; Express 4 set `{}`).
+1. `req` and `res` are Node objects with an extra prototype. On each request the app runs `Object.setPrototypeOf(req, app.request)` and the same for `res`. `app.request` inherits from `http.IncomingMessage.prototype`. `app.response` inherits from `http.ServerResponse.prototype`. So `res.headersSent`, `res.setHeader`, and `req.headers` are plain Node. `res.json` and `req.ip` are Express.
+2. Most `req` properties are getters. `req.ip`, `req.protocol`, `req.hostname`, `req.fresh`, `req.xhr`, and, on Express 5, `req.query` are computed when you read them. Nothing is parsed until your code asks.
+3. Negotiation goes through two packages. `req.accepts*` calls the `accepts` package, which uses `negotiator` to sort the header by `q` weight and then by specificity. They return the best item from your list, or `false` if none is acceptable. `res.format(obj)` calls `req.accepts` with the object's keys, sets `Vary: Accept`, and runs the matching function. If nothing matches and there is no `default` key, it calls `next(err)` with `err.status` of 406.
+4. Content-type checks go through `type-is`. `req.is('json')` expands the shorthand to `application/json`, compares it with `Content-Type`, and ignores parameters such as `charset`. It returns the matching type, `false`, or `null` when the request has no body.
+5. `req.fresh` is the conditional-request test. The `fresh` package compares the request's `If-None-Match` or `If-Modified-Since` with the `ETag` or `Last-Modified` already set on `res`. `res.send` runs the same test and turns a fresh response into `304` with no body.
+6. Each body parser acts only on its type. The defaults are `application/json`, `application/octet-stream`, `text/plain`, and `application/x-www-form-urlencoded`. Override that with the `type` option. On a match, the parser reads the stream up to `limit`, which defaults to `100kb`, decodes it, and sets `req.body`. Otherwise it calls `next()` and leaves `req.body` alone. On Express 5 that means `req.body` stays `undefined`. Express 4 set `{}`.
 
-**Version notes.** `req.acceptsLanguages`, `req.acceptsCharsets` and `req.acceptsEncodings` are the only spellings in Express 5. The singular forms (`acceptsLanguage`, and so on) were deprecated in 4 and removed in 5 (changed in v5). `req.host` keeps the port in Express 5; Express 4 stripped it (changed in v5); `req.hostname` never includes it. `express.urlencoded()` defaults to `extended: false` in Express 5. Express 4 defaulted to `true` and printed `body-parser deprecated undefined extended: provide extended option` (changed in v5, Example 6). Added in Express 4: `res.sendStatus` (4.9.0), `res.append` (4.11.0), `req.range` options (4.14.0), `express.json` and `express.urlencoded` (4.16.0), `express.raw` and `express.text` (4.17.0).
+On Express 5 the only spellings are the plural `req.acceptsLanguages`, `req.acceptsCharsets`, and `req.acceptsEncodings`. The singular forms were removed. `req.host` keeps the port on Express 5. Express 4 stripped it. `req.hostname` never includes the port. `express.urlencoded()` defaults to `extended: false` on Express 5. Express 4 defaulted to `true` and printed a deprecation warning when you left the option out. Example 6 shows both.
 
 ## Code examples
 
@@ -455,57 +459,58 @@ The migration guide says Express 5 "makes the `extended` option false by default
 
 ## Common mistakes & gotchas
 
-- **Using the singular `req.acceptsLanguage`** on Express 5. It was removed, so the call throws `TypeError: req.acceptsLanguage is not a function`; use the plural.
-- **Reading `req.ip` without `trust proxy` behind a proxy.** It returns the proxy's address. Configure the setting for your topology (lesson 52).
+- **The singular `req.acceptsLanguage` on Express 5.** It was removed, so the call throws `TypeError: req.acceptsLanguage is not a function`. Use the plural.
+- **Reading `req.ip` without `trust proxy` behind a proxy.** You get the proxy's address. Configure the setting for your topology. Lesson 52 shows the values.
 - **Forgetting `Vary`.** If you branch on `Accept` or `Accept-Language` by hand, call `res.vary('Accept')`. `res.format` does it for you.
-- **Testing `req.fresh` before setting `ETag`.** `req.fresh` compares against headers already on `res`. With none set, it is `false`.
-- **`express.json()` app-wide in front of a webhook.** The JSON parser reads the stream first, so `express.raw` on the route finds nothing to read and `req.body` is the parsed object. Mount the webhook route before the app-wide parser, or scope the JSON parser with a `type` that excludes it.
-- **`crypto.timingSafeEqual` on buffers of different length** throws `RangeError` (`ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH`). Check the length first.
-- **Treating `req.range` errors as arrays.** It returns `-1` (unsatisfiable) or `-2` (malformed) as numbers, and `undefined` without a `Range` header. Check `Array.isArray` first.
-- **Calling `res.set` after `res.headersSent` is `true`.** The headers have already gone out, and Node throws `ERR_HTTP_HEADERS_SENT`.
+- **Reading `req.fresh` before you set `ETag`.** It compares against headers already on `res`. With none set, it is `false`.
+- **`express.json()` app-wide in front of a webhook.** The JSON parser reads the stream first, so `express.raw` on the route finds nothing and `req.body` is the parsed object. Mount the webhook before the app-wide parser, or scope the JSON parser so it skips that path.
+- **`crypto.timingSafeEqual` on buffers of different length.** It throws `RangeError` with code `ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH`. Check the length first.
+- **Treating `req.range` errors as arrays.** It returns `-1` when the range cannot be satisfied, `-2` when the header is malformed, and `undefined` when there is no `Range` header. Check `Array.isArray` first.
+- **Calling `res.set` after `res.headersSent` is true.** The headers have already gone out. Node throws `ERR_HTTP_HEADERS_SENT`.
 
 ## Best practices
 
-- **Reject wrong content types early:** `if (!req.is('application/json')) return res.sendStatus(415)`.
-- **Prefer `res.format` over hand-written `Accept` checks.** It handles `q` weights, sets `Vary`, and gives a 406 path.
-- **Keep raw-body routes separate:** mount `express.raw` on the webhook path only, verify the signature, then parse.
-- **Use `res.sendStatus` for bodiless status replies** (`204`, `404`) instead of `res.status(n).send('')`.
-- **Use `res.append` for headers that can repeat** (`Set-Cookie`, `Link`, `Warning`). `res.set` replaces the existing value.
-- **Pass `extended` explicitly to `express.urlencoded`** and `limit` to every parser.
-- **Split health checks into liveness and readiness**, send `Cache-Control: no-store`, and let HEAD work through the GET route.
+- Reject the wrong content type early: `if (!req.is('application/json')) return res.sendStatus(415)`.
+- Prefer `res.format` over a hand-written `Accept` check. It handles `q` weights, sets `Vary`, and gives you a 406 path.
+- Keep raw-body routes separate. Mount `express.raw` on the webhook path only, verify the signature, then parse.
+- Use `res.sendStatus` for a status with no extra body, such as 204 or 404, instead of `res.status(n).send('')`.
+- Use `res.append` for headers that can repeat, such as `Set-Cookie`, `Link`, and `Warning`. `res.set` replaces the value.
+- Pass `extended` explicitly to `express.urlencoded`, and pass `limit` to every parser.
+- Split health checks into liveness and readiness, send `Cache-Control: no-store`, and let HEAD fall through to the GET route.
 
 ## ⭐ Interview lens
 
 > **Q: “How do you serve JSON to API clients and HTML to browsers from one route?”**  
-> A: `res.format({ 'application/json': …, 'text/html': … })`. It calls `req.accepts` with the keys, runs the best match, sets `Vary: Accept`, and if nothing matches it calls `next` with a 406 error (or runs `default`). *Trap:* without `Vary`, a CDN can serve the cached HTML to an API client.
+> A: Call `res.format` with one function per content type, for example `application/json` and `text/html`. It asks `req.accepts` which of those keys the client's `Accept` header prefers, runs that function, and sets `Vary: Accept` so a shared cache stores the versions separately. With no `Accept` header, every type is acceptable and the first key you listed wins, so put your preferred type first. If nothing matches and you did not pass a `default` function, `res.format` calls `next` with an error whose `status` is 406. The trap is skipping `Vary`. A CDN can then cache the HTML and hand that HTML to the next client that asked for JSON.
 
 > **Q: “Why does a webhook route use `express.raw` instead of `express.json`?”**  
-> A: The signature is an HMAC over the exact bytes sent. After `express.json` parses the body, re-serialising it can change whitespace, key order or number formatting, so the HMAC would not match. Keep the `Buffer`, verify it with `crypto.timingSafeEqual` after a length check, then `JSON.parse`.
+> A: The signature is an HMAC over the exact bytes the sender transmitted. `express.json` parses those bytes into an object, and `JSON.stringify` of that object can change whitespace, key order, or number formatting, so the HMAC would not match. `express.raw({ type: 'application/json' })` leaves `req.body` as the Buffer you received. Check that the digest length matches, then `crypto.timingSafeEqual`, then `JSON.parse`. Register the raw parser on this route only. An app-wide `express.json()` placed before it consumes the stream first. `timingSafeEqual` throws if the lengths differ, so the length check also keeps a bad signature from becoming a 500.
 
 > **Q: “What is the difference between `req.fresh` and a 304?”**  
-> A: `req.fresh` is a boolean that compares the request's conditional headers with the `ETag`/`Last-Modified` already set on `res`. `res.send` performs the same check and, when it is fresh, changes the response to `304` with no body. You only read `req.fresh` yourself to skip expensive work before building the body.
-
-> **Q: “What changed for `express.urlencoded` in Express 5?”**  
-> A: `extended` now defaults to `false`, so the body is parsed with Node's `querystring`, and `a[b]=c` stays a flat key. Express 4 defaulted to `true` (`qs`, nested objects) with a deprecation warning when you left it out.
+> A: `req.fresh` is a boolean. It compares the request's `If-None-Match` or `If-Modified-Since` with the `ETag` or `Last-Modified` you have already set on `res`. It does not send anything. `res.send` runs the same check and, when the representation is fresh, changes the response to `304` with no body. You read `req.fresh` yourself only to skip expensive work before you build a body you would then throw away. The limit is order. If you have not set `ETag` or `Last-Modified` yet, `req.fresh` is `false`, and `res.send` will not turn the response into a 304.
 
 > **Q: “Liveness vs readiness probe?”**  
-> A: Liveness says the process can answer and should not be restarted, so it checks nothing external. Readiness says whether to route traffic here now, so it checks dependencies and returns 503 during shutdown. Both send `Cache-Control: no-store`.
+> A: A liveness probe answers "can this process respond?" and checks nothing else. An orchestrator restarts the container when it fails. If liveness also checked the database, a database outage would restart every replica, which does not fix the database. A readiness probe answers "should the load balancer send traffic here now?" It checks dependencies and returns 503 while a dependency is down, and again during shutdown after `SIGTERM`, while liveness stays 200. That lets in-flight requests finish and sends new traffic elsewhere. Both send `Cache-Control: no-store`, and you turn the ETag off, so a probe cannot be answered from a stale 304. HEAD needs no extra route. Express runs the GET handler and Node drops the body.
 
 ## Cheat-card
 
-- **`req.is(t)`** → matching type, `false`, or `null` (no body). Shorthands: `'json'`, `'html'`, `'application/*'`.
-- **`req.accepts([…])`** → best of *your* list or `false`. Plurals only in v5: `acceptsLanguages`, `acceptsCharsets`, `acceptsEncodings`.
-- **Behind proxies:** `req.ip`, `ips`, `protocol`, `secure`, `hostname` follow `trust proxy`; `req.subdomains` follows `subdomain offset` (default 2).
-- **`req.fresh` / `req.stale`** compare against `res`'s `ETag`/`Last-Modified`; `res.send` auto-304s.
-- **`req.range(size, { combine })`** → array of `{ start, end }` with `.type`, `-1`, `-2` or `undefined`.
-- **`res.sendStatus(n)`**: status + reason-phrase body. **`res.type('csv')`**: sets `Content-Type` from an extension or a MIME type.
-- **`res.format`** sets `Vary: Accept` and gives a 406 (`err.status`) without `default`.
-- **`res.links`** builds `Link`; **`res.vary`** adds to `Vary` once; **`res.append`** adds a header value instead of replacing.
-- **`res.headersSent`** (Node) turns `true` once the status line and headers are written.
-- **Parsers:** `express.json` / `raw` (Buffer) / `text` (string) / `urlencoded` (`extended` default `false` in v5, `true` in v4); default `limit` `100kb`; v5 leaves `req.body` `undefined` when not matched.
-- **Webhooks:** `express.raw` → HMAC → length check → `timingSafeEqual` → `JSON.parse`.
+- `req.is(type)` returns the matching type, `false`, or `null` when there is no body. Shorthands include `'json'`, `'html'`, and `'application/*'`.
+- `req.accepts` returns the best item from your list, or `false`. On Express 5 only the plurals exist: `acceptsLanguages`, `acceptsCharsets`, `acceptsEncodings`.
+- Behind proxies, `req.ip`, `req.ips`, `req.protocol`, `req.secure`, and `req.hostname` follow `trust proxy`. `req.subdomains` follows `subdomain offset`, default 2.
+- `req.fresh` and `req.stale` compare against `ETag` and `Last-Modified` already on `res`. `res.send` turns a fresh response into 304.
+- `req.range(size, { combine })` returns an array of `{ start, end }` with a `.type`, or `-1`, `-2`, or `undefined`.
+- `res.sendStatus(n)` sends the status and the reason phrase as the body. `res.type('csv')` sets `Content-Type` from an extension or a MIME type.
+- `res.format` sets `Vary: Accept`. With no `default`, a miss is a 406 on `err.status`.
+- `res.links` builds `Link`. `res.vary` adds a `Vary` value once. `res.append` adds a header value instead of replacing it.
+- `res.headersSent` is Node's flag. It becomes true once the status line and headers are written.
+- Parsers: `express.json`, `express.raw` for a Buffer, `express.text` for a string, and `express.urlencoded`. `extended` defaults to `false` on Express 5 and `true` on Express 4. The default `limit` is `100kb`. Express 5 leaves `req.body` `undefined` when the parser does not match.
+- A webhook is `express.raw`, then HMAC, then a length check, then `timingSafeEqual`, then `JSON.parse`.
 
----
+## Good to know
+
+- `express.urlencoded` on Express 5 defaults `extended` to `false`, so the body is parsed with Node's `querystring` and `a[b]=c` stays a flat key. Express 4 defaulted to `true`, which uses `qs` and builds nested objects, and it printed `body-parser deprecated undefined extended` when you omitted the option.
+- Added in Express 4: `res.sendStatus` in 4.9.0, `res.append` in 4.11.0, `req.range` options in 4.14.0, `express.json` and `express.urlencoded` in 4.16.0, `express.raw` and `express.text` in 4.17.0.
+- On Express 4.22.3, a malformed `Range` makes `req.range` return `-1`. Express 5.3.0, with range-parser 1.3.0, returns `-2`.
 
 ## Learn More
 

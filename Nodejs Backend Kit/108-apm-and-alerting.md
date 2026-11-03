@@ -13,27 +13,27 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Application performance monitoring, or APM, is the product that groups errors and shows traces and dashboards. Sentry, Datadog, and New Relic are the usual ones. An SDK in your process catches an exception, sends an event, and the service groups matching stack traces into one issue. Alerting then decides when a person should be woken up, using an error budget, the small share of requests you are allowed to fail, and a burn rate, how fast you are spending that share. The trade-off is alert fatigue. A rule that pages on every short blip trains people to ignore the page that matters.
+
 ## Why it matters
 
-Tracing (lesson [111](107-observability-with-opentelemetry.md)) tells you *why* one request was slow. Two other questions decide whether you hear about problems at all:
+Tracing (lesson [111](107-observability-with-opentelemetry.md)) tells you why one request was slow. Two other questions decide whether you hear about problems at all.
 
-- **Which errors are happening, how often, and to whom?** A thrown exception in a route returns a 500 and a log line. With 200 instances and 50 million requests a day, nobody reads that line. Error tracking groups identical exceptions into one issue, counts them, keeps the stack trace with source context and the request details, and tells you when a new one appears after a deploy.
-- **When should a human be woken up?** Alerting on raw symptoms ("error rate > 1 % for 5 minutes") pages people for blips that don't matter and stays quiet during slow leaks that do. Teams that get many false pages start ignoring them, and then they miss the real one. That is **alert fatigue**.
+Which errors are happening, how often, and to whom? A thrown exception in a route returns a 500 and a log line. With 200 instances and 50 million requests a day, nobody reads that line. Error tracking groups identical exceptions into one issue, counts them, keeps the stack trace with source context and the request details, and tells you when a new one appears after a deploy.
 
-**APM** (application performance monitoring) products such as Sentry, Datadog and New Relic package error tracking, tracing, metrics and dashboards. **SLOs and burn-rate alerts** are the method for deciding, with arithmetic instead of guesses, which problems are worth a page.
+When should a human be woken up? A rule like "error rate over 1 percent for 5 minutes" pages people for blips that do not matter and stays quiet during slow leaks that do. Teams that get many false pages start ignoring them, and then they miss the real one. That is alert fatigue.
+
+APM products such as Sentry, Datadog, and New Relic package error tracking, tracing, metrics, and dashboards. Service level objectives and burn-rate alerts are the method for deciding, with arithmetic instead of guesses, which problems are worth a page.
 
 ## The concept, simply
 
-**Error tracking.** An SDK in your process catches unhandled exceptions (and anything you pass to `captureException`), builds an **event** (exception type, message, stack frames with source lines, request, release, environment, trace id), and sends it to the service. The service groups events by fingerprint (mostly the stack trace) into **issues**. You configure the destination with a **DSN** (`http://<public-key>@<host>/<project-id>`), which is a write-only address, not a secret API key.
+Error tracking starts with an SDK in your process. It catches unhandled exceptions, and anything you pass to `captureException`, and builds an event: exception type, message, stack frames with source lines, request, release, environment, and trace id. The service groups events by fingerprint, mostly the stack trace, into issues. You point it at a DSN, a string like `http://<public-key>@<host>/<project-id>`. That is a write-only address, not a secret API key.
 
-**SLI, SLO, error budget.**
+Three ratios decide the alerts. An SLI, a service level indicator, is good events divided by all events, measured where users feel it. Example: the fraction of `GET /checkout` requests that return non-5xx in under 500 ms, measured at the load balancer. An SLO, a service level objective, is the target for that ratio over a window, such as 99.9 percent over 30 days. The error budget is what is left: 0.1 percent of requests may be bad. For 30 days that is 43.2 minutes of total outage, or 10,000 failed requests out of 10 million (Example 5). The burn rate is how fast you are spending that budget compared with the rate that would use it up exactly at the end of the window. Burn rate 1 means an error ratio of 0.1 percent, the whole budget in 30 days. Burn rate 14.4 means 1.44 percent, about 2 days.
 
-- An **SLI** (service level indicator) is a ratio of good events to all events, measured where users feel it. Example: the fraction of `GET /checkout` requests that return non-5xx in under 500 ms, measured at the load balancer.
-- An **SLO** (objective) is the target for that ratio over a window: 99.9 % over 30 days.
-- The **error budget** is what's left over: 0.1 % of requests may be bad. For a 30-day window that is 43.2 minutes of total outage, or 10,000 failed requests out of 10 million (Example 5).
-- The **burn rate** is how fast you're spending the budget compared with the rate that would use it up exactly at the end of the window. Burn rate 1 = an error ratio of 0.1 %, which uses the whole budget in 30 days. Burn rate 14.4 = 1.44 %, which uses it in about 2 days.
-
-**Multiwindow, multi-burn-rate alerts** (Google SRE Workbook, chapter "Alerting on SLOs") page only when the budget is being spent fast enough to matter, and only while that's still happening:
+Multiwindow, multi-burn-rate alerts, from the Google SRE Workbook chapter "Alerting on SLOs", page only when the budget is being spent fast enough to matter, and only while that is still happening:
 
 text
 
@@ -555,16 +555,16 @@ The 5-minute window alone would have fired at minute 120, on the first bad minut
 ## ⭐ Interview lens
 
 > **Q: “What's an error budget and what is a burn rate?”**  
-> A: The error budget is 1 − SLO: with 99.9 % availability over 30 days, 0.1 % of requests may fail, which is 43.2 minutes of full outage or 10,000 failures out of 10 million requests. The burn rate is the current error ratio divided by that budget ratio. At burn rate 1 you use the budget up exactly at the end of the window; at 14.4 you use it up in about 2 days, which is 2 % of the budget per hour.
+> A: An error budget is one minus the SLO. With 99.9 percent availability over 30 days, 0.1 percent of requests may fail. Example 5 prints that as 43.2 minutes of full outage, or 10,000 failures out of 10 million requests. The burn rate is the current error ratio divided by that 0.1 percent. At burn rate 1 you use the budget up exactly at the end of the 30 days. At 14.4 the error ratio is 1.44 percent, and you use the budget up in about 2.1 days, which is 2 percent of the budget in one hour. The workbook's formula is burn equals the fraction of budget you are willing to spend, times the period, divided by the alert window. Two percent of a 720 hour budget inside 1 hour is 0.02 times 720, which is 14.4. The limit is a quiet service. At 10 requests an hour, one failure is a 10 percent hourly error rate, a thousand times burn for a 99.9 percent SLO, and it would page at once. The workbook's options are synthetic traffic, combining small services for monitoring, or changing the product so one failure matters less.
 
 > **Q: “Why use multiwindow, multi-burn-rate alerts instead of 'error rate > 1 % for 5 minutes'?”**  
-> A: A fixed short-window threshold pages on blips that cost almost nothing and misses slow burns that use up the month. Burn-rate alerts tie the threshold to budget spent: page when 2 % is spent in an hour or 5 % in 6 hours, ticket when 10 % is spent in 3 days. Requiring a short window (1/12 of the long one) to also be over the threshold makes the alert stop a few minutes after recovery instead of an hour later. In my replay of a 10-minute, 15 % incident, the 1-hour rule alone kept firing 55 minutes after the errors stopped; with the 5-minute window it reset after 5.
+> A: A fixed short window pages on blips that spend almost no budget, and it misses a slow leak that uses the month. Burn-rate alerts tie the threshold to budget spent. For a 99.9 percent SLO the workbook's Table 5-8 says page when 2 percent is spent in 1 hour and the last 5 minutes are also over the line, page again at 5 percent in 6 hours with a 30 minute check, and open a ticket when 10 percent is spent in 3 days. The short window is one twelfth of the long one. Both windows have to be over the threshold. The long window proves a real amount of budget is gone. The short window makes the alert stop soon after the problem stops. Example 5 replayed 15 percent errors for minutes 120 to 129. The 1 hour and 5 minute rule fired at minute 125 and reset at minute 134, 5 minutes after the errors stopped. The 1 hour window alone stayed firing until minute 184, 55 minutes after recovery. The incident spent 3.5 percent of the month's budget. The limit of the 5 minute window by itself is that it would have fired on the first bad minute, before 2 percent of the budget was actually gone.
 
 > **Q: “How do you set up Sentry in an Express 5 app, and what changed in v11?”**  
-> A: Put `Sentry.init({ dsn, release, environment, beforeSend })` in `instrument.mjs` and start with `node --import ./instrument.mjs app.mjs`. In v11, `expressIntegration` captures route errors itself and skips 3xx/4xx, and `setupExpressErrorHandler` is deprecated; in v10 you had to call it after your routes. Flush on SIGTERM. *Trap:* thinking the DSN is a secret. It's a write-only public key.
+> A: Put `Sentry.init` in `instrument.mjs` with the DSN, release, environment, and a `beforeSend` function, and start the app with `node --import ./instrument.mjs app.mjs`. The SDK is built on OpenTelemetry, so it has to load before Express. In version 11, `expressIntegration` captures route and middleware errors by itself and skips errors whose status is 3xx or 4xx. Example 1 sent one event for the 500 and none for the 404. `setupExpressErrorHandler` still exists in 11.7.0 but is deprecated. In 10.76.2 it is not deprecated, and that is how errors were captured. Call `Sentry.flush` or `Sentry.close` on SIGTERM, or the last event can be lost. The DSN is not a secret. It is a write-only public key, and Example 1 turned `http://abc123@127.0.0.1:7220/1` into a POST whose query string carried `sentry_key=abc123`. The limit of the built-in scrubber is that it filters by key name. `authorization` and `cookie` became `[Filtered]` with no code, but the customer's email in the message and in `x-customer-email` left the process until `beforeSend` rewrote them.
 
 > **Q: “How do you reduce alert fatigue?”**  
-> A: Page only for urgent, actionable, user-facing problems, which in practice means SLO burn-rate alerts. Send causes (CPU, restarts, queue depth) to dashboards and tickets. Group and deduplicate notifications, attach runbooks, and review every page afterwards, deleting rules that fired without needing action.
+> A: Page only when the problem is urgent, actionable, and user-facing. In practice that means SLO burn-rate alerts, not a page for high CPU, a full disk queue, or one pod restarting. Those causes go on dashboards and into tickets, and you page only if users are affected. Use two severities. Page for a fast burn, someone acts in minutes. Ticket for a slow burn, someone acts this week. Group notifications so 40 pods failing one health check is one incident, and let a page suppress the ticket for the same SLO. Put a runbook on every alert: what it means, the first three checks, how to mitigate. For error tracking, alert on a new issue or a regression after a deploy, not on every event. Then review pages on a schedule and delete any rule that fired when nobody needed to act. The limit is a low-traffic service, where one failed request looks like a huge burn rate. Add synthetic traffic or group the small service with others before you trust the page.
 
 ## Cheat-card
 
@@ -577,7 +577,14 @@ The 5-minute window alone would have fired at minute 120, on the first bad minut
 - **Scrubbing:** built-in denylist by key name → `[Filtered]`; messages and custom headers need `beforeSend` (return `null` to drop).
 - **Datadog:** `dd-trace` 6.20.1, `--require dd-trace/init` / `--import dd-trace/initialize.mjs`, Agent on 8126, `DD_SERVICE`/`DD_ENV`/`DD_VERSION`.
 - **New Relic:** `newrelic` 14.7.0, `-r newrelic` (+ `--import newrelic/esm-loader.mjs`), OTLP at `otlp.nr-data.net` with `api-key` header.
-- **Alert fatigue:** page = urgent + actionable + user-facing; group, dedupe, runbook, review.
+- **Alert fatigue:** page only when it is urgent, actionable, and user-facing. Group, dedupe, attach a runbook, and review.
+
+## Good to know
+
+- `dataCollection: { userInfo: false }` is how the Sentry Express guide stops sending the IP. The option is in the 11.7.0 typings and was not run here.
+- Type-definition check: `@sentry/node` 10.76.2 has `setupExpressErrorHandler` with no `@deprecated` tag. `@sentry/server-utils` 11.0.0 and 11.7.0 mark it deprecated and say it will be removed in the next major.
+- In Example 4, an invented `api.region` key still passed `otelcol-contrib` 0.162.0 `validate` (exit 0). An empty `DD_API_KEY` failed with `exporters::datadog: api.key is not set` and exit 1.
+- Datadog and New Relic were not run. `dd-trace` 6.20.1 and `newrelic` 14.7.0 facts are from docs and READMEs checked on 12 Oct 2026. Both declare `engines.node >=22`.
 
 ---
 

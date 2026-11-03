@@ -13,20 +13,27 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Internationalization means the server stores neutral values and only turns them into text at the edge, for one locale. A locale is a language tag such as en-US or pl. Numbers, dates, and plurals come from the built-in Intl APIs, which sit on ICU, the Unicode formatting library. You do this because a hard-coded dollar sign, a US date, or "1 item" versus "many items" is wrong for other languages. The trade-off is that formatting uses the process locale and time zone unless you pass both yourself, so the same instant can print as a different day on two servers.
+
 ## Why it matters
 
-An API that only ever talks to one country can hard-code `$`, `MM/DD/YYYY` and `"1 items"`. As soon as users in other places sign up, every hard-coded format is a bug report:
+An API that only talks to one country can hard-code a dollar sign, a US date, and the words "1 items". As soon as users in other places sign up, every hard-coded format is a bug.
 
-- **Numbers and money look different.** `1234.5` euros is `1.234,50 €` in Germany, `€1,234.50` in Ireland, and a yen amount has no decimals at all. India groups digits as `12,34,567`.
-- **Dates hide a time zone.** `2026-10-12T22:30Z` is still the 12th in London but already the 13th in Kolkata. A server that formats dates in its own zone shows customers the wrong day.
-- **Plurals are not "1 vs many".** English has two plural forms. Polish has four (`1 produkt`, `2 produkty`, `5 produktów`, `1,5 produktu`) and Arabic has six. Code like `count === 1 ? 'item' : 'items'` cannot be translated.
-- **Sorting and splitting text depend on language.** JavaScript's default sort puts `Zebra` before `apple` and `Ärzte` after `Zoë`; `'👨‍👩‍👧'.length` is 8.
+Numbers and money look different. 1234.5 euros is 1.234,50 € in Germany and €1,234.50 in Ireland, and a yen amount has no decimals. India groups digits as 12,34,567.
 
-Internationalization (i18n) is the work of making code locale-neutral: it keeps the data in neutral forms (UTC instants, numbers, message keys) and formats them for a locale only at the edge. Localization (l10n) is the per-language work done on top: the translations and any locale-specific choices.
+Dates hide a time zone. 2026-10-12T22:30Z is still the 12th in London and already the 13th in Kolkata. A server that formats dates in its own zone shows the wrong day.
+
+Plurals are not "one versus many". English has two forms. Polish has four: 1 produkt, 2 produkty, 5 produktów, 1,5 produktu. Arabic has six. `count === 1 ? 'item' : 'items'` cannot be translated.
+
+Sorting and splitting text depend on language. JavaScript's default sort puts Zebra before apple, and Ärzte after Zoë. The family emoji's `.length` is 8, which is not one character a person sees. `Intl.Segmenter` splits graphemes. Example data in the table is a string whose length is 24 and whose grapheme count is 14.
+
+Internationalization, i18n, keeps data in neutral forms: UTC instants, numbers, message keys. It formats them for a locale only at the edge. Localization, l10n, is the per-language work on top: the translations and the locale-specific choices.
 
 ## The concept, simply
 
-A **locale** is a BCP 47 language tag such as `en-US`, `de-AT` or `pl`: a language, optionally a region, and optionally extras such as a numbering system. Three rules cover most server-side i18n:
+A locale is a BCP 47 language tag such as `en-US`, `de-AT`, or `pl`: a language, optionally a region, and optionally extras such as a numbering system. Three rules cover most server-side i18n.
 
 1. **Store neutral values.** Instants in UTC (`timestamptz`, ISO strings ending in `Z`), money in integer minor units plus a currency code, text as message keys.
 2. **Pick a locale per request.** Read the user's saved preference, a `?lng=` parameter, or the `Accept-Language` header, and match it against the languages you support.
@@ -69,7 +76,7 @@ text
 - Region tags need a rule. With `supportedLngs: ['de']`, a request for `de-AT` should get German. In i18next that is `nonExplicitSupportedLngs: true`; Express's `req.acceptsLanguages(['de'])` already matched `de-AT` to `de`.
 - A saved user preference or an explicit `?lng=` beats the header, because the header reflects a browser setting the user may never have changed. The i18next detector's `order` option sets this priority.
 
-**i18next and its Express middleware.** i18next is a framework-neutral translation library. i18next-http-middleware is its HTTP adapter for Express, Fastify, Hapi, Koa and Deno. Its README says it is "based on the deprecated i18next-express-middleware" and is a drop-in replacement, and npm marks `i18next-express-middleware` as deprecated ("replaced by i18next-http-middleware"), so do not install the old package. The new one is maintained: 3.9.9 was published on 2026-09-08, the seventh release of 2026 (npm `time` field, 3.9.3 on 2026-04-18 through 3.9.9). What `middleware.handle(i18next)` does per request (read from `esm/index.js` of 3.9.9):
+**i18next and its Express middleware.** i18next is a framework-neutral translation library. i18next-http-middleware is its HTTP adapter for Express, Fastify, Hapi, Koa and Deno. Its README says it is "based on the deprecated i18next-express-middleware" and is a drop-in replacement, and npm marks `i18next-express-middleware` as deprecated ("replaced by i18next-http-middleware"), so do not install the old package. What `middleware.handle(i18next)` does per request, read from `esm/index.js` of 3.9.9:
 
 1. It clones the shared i18next instance (`i18next.cloneInstance`) so one request's `changeLanguage` cannot affect another request.
 2. It runs the `LanguageDetector`, which tries each source in `detection.order` (`querystring`, `cookie`, `header`, and optionally `path` and `session`) and returns the first language that `supportedLngs` allows.
@@ -818,19 +825,16 @@ The arithmetic is right (adding 2 hours across the spring-forward gap lands on 0
 ## ⭐ Interview lens
 
 > **Q: “How would you store and display timestamps for users in many time zones?”**  
-> A: Store the instant in UTC: `timestamptz` in PostgreSQL (stored internally as UTC; the session `TimeZone` only changes display), ISO strings with `Z` in JSON. Store each user's IANA zone name. Convert only when formatting, with `Intl.DateTimeFormat(locale, { timeZone: user.zone })`, or in SQL with `AT TIME ZONE`. *Trap:* `timestamp` without time zone: node-postgres writes and reads it in the process's local zone, so servers in different zones disagree about the same row.
+> A: I store the instant, not a wall clock. In PostgreSQL that is `timestamptz`. The 18 docs say the value is stored internally as UTC, and the originally stated zone is not retained. `SET TIME ZONE` only changes how it is printed and how a zone-less input is read. In JSON I send an ISO string from `toISOString()`, which always ends in Z. I store the user's IANA zone name, `Europe/Warsaw`, not an offset like `+02:00`, because the offset changes with daylight saving. I convert only when formatting, with `Intl.DateTimeFormat(locale, { timeZone: user.zone })`, or in SQL with `AT TIME ZONE`. Example 3 takes `2026-10-12T15:30:00Z` and shows Tokyo as the next day, `2026/10/13 0:30`. The trap is `timestamp` without time zone. node-postgres writes a JavaScript `Date` into it as local time and reads it back as local time, so two servers in different zones disagree about the same row.
 
 > **Q: “Why can't you just do `count === 1 ? singular : plural`?”**  
-> A: Plural categories are language-specific. CLDR defines up to six (`zero one two few many other`); Polish uses `one/few/many/other`, so 2, 3, 22 are `few` and 5, 11, 25 are `many`; Arabic uses all six. `Intl.PluralRules(locale).select(n)` gives the category, and i18next suffixes or ICU `plural` messages pick the matching text. *Trap:* in ICU, `zero` is a category, `=0` is an exact match; English never selects `zero`.
+> A: Plural categories come from CLDR, and they are not the same list in every language. There are up to six: zero, one, two, few, many, and other. English uses one and other. Polish uses one, few, many, and other, so 2, 3, and 22 are few, and 5, 11, and 25 are many. Arabic uses all six. `Intl.PluralRules(locale).select(n)` returns the category, and you pick the string from that. i18next does it with key suffixes such as `items_one` and `items_few`. ICU MessageFormat puts the choice in one string: `{count, plural, one {…} other {…}}`. The trap is `zero` versus `=0`. `zero` is a category English never selects. `=0` is an exact match, which is how you say "no items" in English. The other limit is word order. Concatenating translated fragments fixes the sentence in English shape. Translate the whole sentence, with placeholders.
 
 > **Q: “How does an Express server pick a response language?”**  
-> A: A stored user preference or an explicit `?lng=`/path segment first, then `Accept-Language`: parse the ranges and weights, drop `q=0`, sort by weight, and match against supported languages with prefix matching (`de-AT` → `de`), else a default. `req.acceptsLanguages(list)` does the negotiation; i18next-http-middleware's detector chains querystring, cookie, header and other sources. Then send `Content-Language` and `Vary: Accept-Language`.
+> A: I decide once per request, in this order: a saved user preference, then an explicit `?lng=` or a path segment, then the `Accept-Language` header, then a default. The header is a list of ranges with weights from 0 to 1, and 1 if the weight is omitted. Weights beat position, so `pl;q=0.5, de;q=0.9` prefers German. `q=0` means not acceptable. `req.acceptsLanguages(['en', 'de'])` sorts by weight and returns the best item from my list, or false. It already matches `de-AT` to `de`. i18next-http-middleware clones the i18next instance per request, then runs a detector over `querystring`, `cookie`, and `header`, and sets `req.language` and `req.t`. For i18next, region matching needs `nonExplicitSupportedLngs: true` when `supportedLngs` is `de` and the request is `de-AT`. I send `Content-Language` for what I actually served, and `Vary: Accept-Language` so a shared cache does not serve Polish to a German user. The limit in this version of the middleware, 3.9.9, is `q=0`. Its header lookup sorts by `q` and does not drop a zero, so `Accept-Language: pl;q=0` still chose `pl`.
 
 > **Q: “What happens if you call `toLocaleString()` on a server without passing anything?”**  
-> A: It uses the process default locale (from `LANG`/ICU) and the process time zone (`TZ` or the OS zone). The same instant can print as a different day on servers in different zones, and tests that pass on a laptop fail in a UTC CI runner. Pass both a locale and `timeZone`.
-
-> **Q: “Is Temporal available in Node 24?”**  
-> A: Not by default: `typeof Temporal` is `'undefined'` in Node v24.19.0. V8's `--harmony-temporal` flag exposes an experimental, outdated build (it still has `Temporal.TimeZone`/`Calendar`, lacks `Now.timeZoneId()`, and its `toLocaleString` ignored the value's zone). Use `Date` + `Intl` with explicit `timeZone`, or a library, for now.
+> A: With no locale, `Intl` uses the process default. On this machine that was `en-US`, and `LANG=de_DE.UTF-8` changed it to `de-DE`. With no `timeZone`, it uses the `TZ` environment variable or the operating system zone. Example 1's default zone was `Asia/Calcutta`, which is ICU's older alias for `Asia/Kolkata`. `Date#toString`, `toLocaleString`, and `getDate` all use that process zone. `toISOString` does not. It always prints UTC with a Z. So the same instant can print as a different day on two servers, and a test that passes on a laptop fails in a UTC CI runner. I pass both a locale and a `timeZone` on every format call, and I cache the formatter, because building it is the expensive part and `format()` only applies the patterns. The limit of a small-ICU Node build is that non-English data may be missing. Check `process.config.variables.icu_small`. This binary was full ICU 78.3, `icu_small` false, 418 time zones.
 
 ## Cheat-card
 
@@ -844,7 +848,14 @@ The arithmetic is right (adding 2 hours across the spring-forward gap lands on 0
 - **ICU messages (i18next-icu 2.5.0, intl-messageformat 12.1.3):** `{n, plural, =0 {…} one {# …} other {# …}}`, `{g, select, female {…} other {…}}`; `other` is required; `{name}` not `{{name}}`.
 - **Time:** store UTC (`timestamptz`, `toISOString()`); `SET TIME ZONE` changes display only; avoid `timestamp` without time zone; store IANA zone names.
 - **Temporal:** not in Node v24.19.0 by default; `--harmony-temporal` = experimental, outdated build.
-- **Money:** integer minor units; format only for display.
+- **Money:** integer minor units. Format only for display.
+
+## Good to know
+
+- Q: Is Temporal available in Node 24? Not by default. `typeof Temporal` is `undefined` in v24.19.0 (V8 13.6.233.17-node.51). `--harmony-temporal` exposes an experimental build that still has `Temporal.TimeZone` and `Temporal.Calendar`, has no `Now.timeZoneId()`, and whose `toLocaleString` used the process zone. Adding 2 hours across the Berlin spring-forward landed on `2026-03-29T03:30:00+02:00`. 31 January plus 1 month clamped to 28 February. Do not use the flag in production.
+- i18next-http-middleware 3.9.9 was published on 2026-09-08, the seventh 2026 release (3.9.3 on 2026-04-18 through 3.9.9). It replaces the deprecated `i18next-express-middleware`.
+- Node v24.19.0 here: full ICU 78.3, Unicode 17.0, CLDR 48.0, tz data 2026b, 418 time zones, 162 currencies. `supportedLocalesOf` dropped `xx-XX`. `ar` numbering system was `latn`. `ar-EG` was `arab`.
+- JPY formatted `1234.5` as `￥1,235` because the currency has no decimals. `en-IN` INR grouped as `₹12,34,567.50`.
 
 ---
 

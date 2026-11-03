@@ -13,45 +13,44 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Manual routing means you read the method and the URL pathname and call the matching function, or you send 404, or 405 when the path exists and the verb does not. That is what `app.get` does under the hood. You do it by hand once so path parameters, query strings, and the missing default response are obvious. The trade-off is order and a forgotten `return`. The first match wins, and a second write after `res.end()` throws because the headers were already sent.
+
 ## Why it matters
 
-A real API answers *different requests differently*: `GET /users` lists, `POST /users` creates, `GET /users/42` fetches one, and anything else returns 404. That dispatch — deciding which handler runs based on method and path — is **routing**. Frameworks give you `app.get('/users', ...)`, but under the hood they are doing exactly what you will build by hand here: reading `req.method` and the URL pathname and choosing a function.
+A real API answers different requests differently. `GET /users` lists, `POST /users` creates, `GET /users/42` fetches one, and anything else is 404. That dispatch is routing. A framework's `app.get('/users', ...)` is this same check on `req.method` and the pathname.
 
-Writing routing yourself once is worth a dozen framework tutorials. It shows you where path parameters come from, why route order matters, how query strings are parsed, and why a missing default case leaves requests hanging. It is also a staple interview exercise — “implement a tiny router” — because it exercises string handling, HTTP semantics, and clean control flow all at once.
+Writing it once shows where a path parameter comes from, why order matters, how a query string is parsed, and why a missing default leaves the client hanging until timeout.
 
 ## The concept, simply
 
-Routing is a two-key lookup: **method + path → handler**. You take the incoming `req.method` and the URL's `pathname`, compare them against the routes you know about, and call the matching handler. If nothing matches, you send a `404`. If the path matches but the method does not, you send a `405`. Everything else — parsing the query string, extracting an id from `/users/42`, serving JSON — is detail layered on top of that core decision.
+Routing is a lookup of method plus path to a handler. You compare `req.method` and the pathname to the routes you know, and you call the match. Nothing matches: 404. The path matches and the method does not: 405. Query strings, an id in `/users/42`, and JSON are details on top of that decision.
 
 ![Diagram of a request being matched by method and path to one of several handlers, with a 404 fallthrough](assets/i29_01_610f0065.svg)
 
-Manual routing matches method plus path; an unmatched request must still get a default 404.
 
 ## How it works
 
-**Separating path from query.** `req.url` bundles both (`/users?active=1`). Build a `URL` object — `` const u = new URL(req.url, `http://${req.headers.host}`) `` — and route on `u.pathname` (`/users`), reading filters from `u.searchParams`. Never route on the raw `req.url`, or a query string would break every equality check.
+`req.url` bundles the path and the query, `/users?active=1`. Build `const u = new URL(req.url, 'http://' + req.headers.host)` and route on `u.pathname`. Read filters from `u.searchParams`. Do not compare `req.url` itself, or a query string breaks every equality check.
 
-**Static vs dynamic paths.** A static route is a literal string compare: `pathname === '/users'`. A dynamic route has a parameter, like `/users/:id`. Two common techniques: split the pathname on `/` and inspect segments (`parts[1] === 'users' && parts[2]`), or match a `RegExp` with a capture group (`/^\/users\/([^/]+)$/`) and read the captured id. Real routers precompile a set of such patterns.
+A static route is `pathname === '/users'`. A dynamic route such as `/users/:id` is either a split on `/` (`parts[1] === 'users' && parts[2]`) or a regular expression with a capture, `/^\/users\/([^/]+)$/`. Real routers compile a set of those patterns.
 
-**Method matters.** The same path serves different verbs. Structure the dispatch so that a matched path checks the method and returns `405` (with an `Allow` header) when the verb is unsupported, rather than falling through to `404` — that distinction is semantically correct and helps clients.
+The same path can serve several verbs. If the path matched and the verb did not, answer 405 and send an `Allow` header. Falling through to 404 says the resource does not exist, which is a different fact.
 
-**Query parsing.** `u.searchParams` is a `URLSearchParams` instance: `.get('q')` for a single value, `.getAll('tag')` for repeats, `Object.fromEntries(u.searchParams)` for a plain object (note: that collapses repeated keys to the last). Values are already percent-decoded.
+`u.searchParams.get('q')` is one value. `getAll('tag')` is every repeat. `Object.fromEntries(u.searchParams)` is a plain object, and it keeps only the last value of a repeated key. Values are already percent-decoded.
 
-**Serving JSON.** Set `Content-Type: application/json`, then `res.end(JSON.stringify(data))`. A small `sendJson(res, status, data)` helper removes repetition and guarantees every response has the right header and a single `end()`. The key discipline: *every branch must terminate the response exactly once*, and there must be a catch-all 404 so no request escapes unanswered.
+JSON: set `Content-Type: application/json` and `res.end(JSON.stringify(data))`. A small `sendJson(res, status, data)` helper makes every response set the header and call `end` once. Every branch ends the response exactly once, and a final 404 catches whatever did not match.
 
-**Order and fallthrough.** Routes are evaluated in order; the first match wins. Put specific routes before general ones. After all checks, an explicit `else` sends the 404 — this is the single most common bug when hand-rolling routing: forgetting the default leaves unmatched requests to hang until the client times out.
+Routes run in order. The first match wins. Put specific routes before general ones. The missing `else` is the common bug: the client waits until timeout.
 
-**Normalising the path before you match.** Two URLs that look the same to a human can be different strings to a naive router. `/Users` and `/users` differ in case; `/users/` has a trailing slash; `/users/%34%32` is a percent-encoded `/users/42`. The `URL` class already percent-decodes `pathname` for you, but it does *not* lower-case or strip trailing slashes — those are policy decisions you make. A common approach is to canonicalise once at the top of the handler: lower-case the pathname if your routes are case-insensitive, and strip a single trailing slash (except for the root `/`) so `/users` and `/users/` hit the same handler. Do this *before* any comparison so every route benefits, and be deliberate about it — some APIs treat a trailing slash as a distinct “collection” resource on purpose.
-
-**Matching strategies at a glance.** The three techniques you will reach for scale differently:
+Two URLs can look the same and be different strings. `/Users` and `/users` differ in case. `/users/` has a trailing slash. The `URL` class percent-decodes `pathname` and does not lower-case it or strip a trailing slash. If you want those to match, canonicalise once before any comparison. Some APIs keep the trailing slash on purpose, as a different resource.
 
 | Strategy | Good for | Cost |
 | --- | --- | --- |
-| `if`/`else` ladder | A handful of routes; learning | O(n) string compares; unwieldy past ~10 routes. |
-| Object/`Map` lookup by `"METHOD path"` | Many *static* routes | O(1) lookup, but cannot express `:param` segments. |
-| Compiled `RegExp` list | Dynamic routes with params | O(n) regex tests; what Express/Fastify do under the hood (Fastify uses a radix tree for O(k)). |
-
-Most real frameworks combine these: a fast structure (hash map or radix/trie tree) keyed on static segments, with regex only for the dynamic pieces. Understanding the trade-off is exactly what “how would this scale to 500 routes?” is probing for in an interview.
+| `if` / `else` | A handful of routes, and for learning | One string compare per route. Awkward past about 10. |
+| A `Map` keyed by method and path | Many static routes | A direct lookup, and no `:param` segment. |
+| A list of regular expressions | Dynamic routes | One test per route. Express and Fastify compile patterns. Fastify uses a radix tree. |
 
 ## Code examples
 
@@ -155,64 +154,58 @@ const all = Object.fromEntries(url.searchParams); // { q, tag: 'tls' } — last 
 
 ## Common mistakes & gotchas
 
-- **Routing on `req.url` directly.** The query string makes `req.url === '/users'` false for `/users?x=1`. Route on `url.pathname`.
-- **No default 404.** Forgetting the catch-all means unmatched requests never get a response and the client hangs.
-- **Not distinguishing 404 from 405.** A known path with an unsupported method should be `405` with an `Allow` header, not `404`.
-- **Falling through after responding.** Without `return` after `res.end()`, later branches may also write and throw `ERR_HTTP_HEADERS_SENT`.
-- **Trailing-slash and case surprises.** `/users` and `/users/` are different strings; decide whether to normalise.
-- **Trusting path segments as safe.** Using a path segment as a filename enables path-traversal (`../`); validate/normalise before touching the filesystem.
-- **Assuming `Object.fromEntries(searchParams)` keeps duplicates.** It keeps only the last value; use `getAll()` for multi-value params.
-- **Comparing against a percent-encoded pathname.** The `URL` class decodes `%2F` and friends in `pathname`, but a literal encoded slash inside a segment can still smuggle a `/` past a naive `split('/')`; validate decoded segments rather than trusting them as one token.
-- **Awaiting the body on a route that has none.** Reading the stream on a `GET` just resolves empty, but forgetting to consume (or `req.resume()`) a body on a route that ignores it can, with some clients, hold the keep-alive socket until timeout.
+- **Routing on `req.url`.** The query makes `req.url === '/users'` false for `/users?x=1`. Use `pathname`.
+- **No default 404.** An unmatched request never gets a response, and the client hangs.
+- **404 where you needed 405.** A known path and a bad verb is 405 with `Allow`.
+- **No `return` after `res.end()`.** A later branch writes again and throws `ERR_HTTP_HEADERS_SENT`.
+- **`/users` and `/users/` are different strings** until you decide to normalise.
+- **A path segment used as a filename.** `../` walks out of the directory. Normalise before you touch the filesystem.
+- **`Object.fromEntries(searchParams)` keeps duplicates.** It keeps the last value. Use `getAll` for repeated keys.
+- **Trusting a decoded segment as one token.** `URL` decodes percent-encoding. Validate the segment.
+- **Ignoring a body on a route that does not read it.** Some clients hold the keep-alive socket until you consume it or `req.resume()`.
 
 ## Best practices
 
-- **Always route on `url.pathname`**, parsed via the `URL` class.
-- **Centralise response-sending** in a `sendJson` helper so headers and `end()` are consistent.
-- **Return after responding** in every branch to prevent double-writes.
-- **Emit `405` with `Allow`** for known paths hit with the wrong verb.
-- **Set `Content-Length`** with `Buffer.byteLength(body)` for fixed JSON responses — it avoids chunked encoding overhead.
-- **Validate input** before mutating state; reject with `400` and a clear message.
-- **Keep a route table** once you have more than a handful of routes; it scales better than an `if/else` ladder.
-- **Reach for a framework** (Express/Fastify) once you need middleware, param matching, and nested routers — hand-rolling is for learning and tiny services.
+- **Route on `url.pathname`** from the `URL` class.
+- **Send responses from one `sendJson` helper** so the header and `end()` stay consistent.
+- **Return after every response** so a later branch cannot write again.
+- **Send 405 with `Allow`** when the path is known and the verb is not.
+- **Set `Content-Length` with `Buffer.byteLength(body)`** for a JSON body you already have, so you skip chunked encoding.
+- **Validate input** before you change state. Reject with 400 and a clear message.
+- **Use a route table** once you have more than a handful of routes.
+- **Use a framework** when you need middleware, nested routers, and compiled parameters. Hand-rolled routing is for learning and for a tiny service.
 
 ## ⭐ Interview lens
 
 > **Q: Implement a minimal router without a framework.**  
-> Parse `req.url` with `new URL(req.url, base)`, then branch on `req.method` and `url.pathname`. Each branch responds and `return`s. End with a default `404`. Show a dynamic route via regex/segment split for `/users/:id`, and a `405` for a known path with the wrong method.
+> A: Parse `req.url` with `new URL(req.url, 'http://' + req.headers.host)`, then branch on `req.method` and `url.pathname`. Each branch writes the response and returns, so a later branch cannot write again. After the branches, send 404. A dynamic route such as `/users/:id` is a split on slashes or a regular expression with a capture group. A path you recognise with the wrong verb is 405 and an `Allow` header, not 404. JSON responses set `Content-Type: application/json` and `JSON.stringify` the body. The limit of an `if` ladder is the number of routes. Past a handful, a map of static routes, or a compiled pattern list, stays easier to read, and a framework takes over once you need middleware.
 
 > **Q: Why route on `pathname` and not `req.url`?**  
-> Because `req.url` includes the query string, so `req.url === '/users'` fails for `/users?active=1`. `url.pathname` strips the query, giving a stable key to match on.
+> A: `req.url` is the path and the query string together. `req.url === '/users'` is false for `/users?active=1`, so a query from a normal client misses the route and you send 404 for a resource that exists. `new URL(req.url, base).pathname` drops the query and gives you a stable string to compare. You still read the query, from `searchParams`, you just do not route on it. The limit is a trailing slash or a different case. `pathname` will not fold `/users/` into `/users` unless you normalise it yourself before the comparison.
 
 > **Q: What's the difference between a 404 and a 405?**  
-> `404` means the resource/route does not exist at all. `405` means the path exists but the HTTP method is not supported for it — and the response must include an `Allow` header listing the valid methods.
-
-> **Q: How do you extract a path parameter like the `42` in `/users/42`?**  
-> Either split `pathname` on `/` and read the segment, or match a regex with a capture group such as `/^\/users\/(\d+)$/` and take `match[1]`. Real routers compile `:param` patterns into exactly this kind of regex.
+> A: 404 means nothing in your route table matches this path. The resource is not there. 405 means the path is real and this HTTP method is not one of the ones you implemented for it. The 405 response has to include an `Allow` header listing the verbs you do accept, so the client can retry with one of them. Using 404 for a POST to a GET-only URL hides the route from anything that is probing which methods exist. The limit is a path that matches a pattern too loosely, such as a regex that treats every suffix as an id. You then send 405 for a URL you never meant to own.
 
 > **Q: Trap — you respond in one branch but the request still errors with “headers already sent.” Why?**  
-> You forgot to `return` after `res.end()`, so control fell through to a later branch that wrote to `res` again. Each responding branch must `return` (or the logic must be mutually exclusive).
-
-> **Q: How do you read a query parameter that can appear multiple times, like `?tag=a&tag=b`?**  
-> Use `url.searchParams.getAll('tag')`, which returns `['a','b']`. `get('tag')` returns only the first, and `Object.fromEntries` keeps only the last — both lose data for repeated keys.
+> A: You called `res.end()` in one branch and did not return, so the function kept going and a later branch called `write` or `end` again. The first call had already flushed the status line and the headers. Node throws `ERR_HTTP_HEADERS_SENT` on the second write. Every branch that responds has to return, or the branches have to be structured so only one of them can run. The limit is a helper that ends the response and does not stop your function. `sendJson` should be the last call, and the line after it should be a return, or the helper is easy to misuse in the same way.
 
 ## Cheat-card
 
-- Routing = match `req.method` + `url.pathname` → handler.
-- `` const url = new URL(req.url, `http://${req.headers.host}`) ``.
-- Static: `pathname === '/users'`. Dynamic: regex `/^\/users\/(\d+)$/`.
-- Query: `searchParams.get` / `.getAll` / `Object.fromEntries`.
-- JSON: `Content-Type: application/json` + `JSON.stringify`.
-- `return` after every response; end with a default `404`.
-- Known path, wrong verb → `405` + `Allow` header.
-- Scale up: route table, then a real framework.
-- Static files: extension → type map, `; charset=utf-8` on text, `X-Content-Type-Options: nosniff`, stream with `pipeline`.
-- Traversal guard: decode → `path.resolve(root, '.' + p)` → `startsWith(root + path.sep)` → `realpath()` check again; 400 for NUL / bad encoding.
-- `new URL` resolves `..` and `%2e%2e` segments but not `..%2f`; test attacks with `curl --path-as-is`.
-- `URLPattern`: global since v24.0.0 (in `node:url` since v23.8.0), Stability 1 Experimental; `exec(url).pathname.groups`.
+- Routing matches `req.method` plus `url.pathname`, then calls a handler.
+- `const url = new URL(req.url, 'http://' + req.headers.host)`.
+- Static: `pathname === '/users'`. Dynamic: `/^\/users\/(\d+)$/`.
+- Query: `searchParams.get`, `getAll`. `Object.fromEntries` keeps the last repeat.
+- JSON: `Content-Type: application/json` and `JSON.stringify`.
+- `return` after every response. End with 404.
+- A known path and the wrong verb is 405 plus `Allow`.
 
----
+## Good to know
 
+- How do you extract the `42` in `/users/42`? Split `pathname` on `/` and read the segment, or match `/^\/users\/(\d+)$/` and take the capture. A router compiles a `:param` pattern into that kind of test.
+- How do you read `?tag=a&tag=b`? `url.searchParams.getAll('tag')` returns both. `get('tag')` returns the first. `Object.fromEntries` keeps the last.
+- Static files: map the extension to a type, add `; charset=utf-8` on text types, send `X-Content-Type-Options: nosniff`, and stream with `pipeline`. `application/json` gets no charset. Unknown types are `application/octet-stream`. 404 means nothing at this URL, including dotfiles you will not admit exist. 403 means it is there and the caller may not have it. 400 is a bad encoding or a NUL. 405 with `Allow` is for methods other than GET and HEAD.
+- Path traversal: `path.join(root, urlPath)` lets `/../secret.txt` escape. Refuse an encoded dot in the raw target. Let `new URL` resolve `.` and `..`. `decodeURIComponent`, reject a NUL, then `path.resolve(root, '.' + pathname)` and require `file === root` or `file.startsWith(root + path.sep)`. `realpath` the result and check again, because a symlink can point outside. `new URL` resolves `..` and `%2e%2e` and does not treat `..%2f` as a parent segment. Probe with `curl --path-as-is`.
+- `URLPattern` is a global since v24.0.0, and it has been in `node:url` since v23.8.0. It is Stability 1, Experimental. `exec(url).pathname.groups` is the captured parameters.
 ## Learn More
 
 - [HTTP | Node.js Documentation nodejs.org](https://nodejs.org/api/http.html)

@@ -13,26 +13,28 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Kubernetes keeps a set of Node containers running, sends them traffic only when a readiness check passes, and replaces them on each deploy by sending SIGTERM to the old ones. You describe that desired state in YAML, and controllers keep fixing the gap between what you asked for and what is running. The trade-off is that the cluster only knows what your probes, memory limit, and signal handler tell it: a liveness check that calls the database restarts every pod together, and a heap set larger than the memory limit gets the process killed with no JavaScript error.
+
 ## Why it matters
 
-Kubernetes runs your Node process for you: it decides where it runs, restarts it when it hangs, sends it traffic only when it says it is ready, kills it when it uses too much memory, and replaces every copy of it on each deploy. Each of those decisions is driven by something you write: a probe endpoint, a memory limit, a signal handler, a number in a YAML file. If they do not match how Node behaves, the cluster does the wrong thing:
+Kubernetes decides where your Node process runs, restarts it when it hangs, sends traffic only when it says it is ready, kills it when it uses too much memory, and replaces every copy on each deploy. Each decision is driven by something you write: a probe endpoint, a memory limit, a signal handler, a number in YAML. If those do not match how Node behaves, the cluster does the wrong thing.
 
-- **A liveness probe that checks the database** restarts every Pod at once when the database has a slow minute.
-- **A memory limit of 512 MiB with the default V8 heap** gives Node a heap of 259 MiB inside that limit (measured in Example 7), so the app runs out of heap long before it uses the memory you paid for. Setting the heap too *large* is worse: the kernel kills the process with no JavaScript error at all.
-- **A SIGTERM handler that closes the server at once** drops requests on every rolling update, because traffic keeps arriving for a few seconds after Kubernetes decides to stop the Pod.
+A liveness probe that checks the database restarts every Pod when the database has a slow minute. A memory limit of 512 MiB with the default V8 heap stops the heap around half of that limit, so you run out of heap while memory is still free. A heap set too large is worse: the kernel kills the process and there is no JavaScript error. A SIGTERM handler that closes the server at once drops requests on every rolling update, because traffic keeps arriving for a few seconds after Kubernetes decides to stop the Pod.
 
-This lesson covers the objects a Node developer writes (Pod, Deployment, Service, Ingress, ConfigMap, Secret, HorizontalPodAutoscaler), how probes and shutdown fit lesson [66](102-graceful-shutdown-monitoring.md), and how the memory limit interacts with `--max-old-space-size`. Everything Node-side was run. The manifests were validated with kubeconform and `kubectl --dry-run=client`. Cluster behaviour comes from the Kubernetes docs.
+This lesson is the objects a Node developer writes, how probes and shutdown fit lesson 102, and how the memory limit interacts with `--max-old-space-size`. The Node side was run. The manifests were validated with kubeconform and `kubectl --dry-run=client`. Cluster behaviour comes from the Kubernetes docs.
 
 ## The concept, simply
 
-You describe the state you want in YAML objects and send them to the cluster's API server. Controllers keep comparing what you asked for with what is running and fix the difference. The objects a Node service needs:
+You describe the state you want in YAML and send it to the API server. Controllers compare that with what is running and fix the difference.
 
-- **Pod:** one or more containers that run together on one node, sharing an IP address. Your Node process runs in a container in a Pod. Pods are disposable; you rarely create them yourself.
-- **Deployment:** "keep 3 Pods of this template running". It creates a ReplicaSet per version of the template, and on a change it rolls Pods from the old ReplicaSet to the new one.
-- **Service:** a stable virtual IP and DNS name in front of every Pod whose labels match its `selector` *and* that is currently ready. Clients inside the cluster call `http://orders-api`, never a Pod IP.
-- **Ingress:** HTTP routing from outside the cluster (host and path) to a Service, carried out by an Ingress controller you install. The Kubernetes docs now say the Ingress API "has been frozen" and recommend the newer Gateway API. Ingress remains generally available, with "no plans to remove" it.
-- **ConfigMap and Secret:** key-value settings injected into the container as environment variables or files. The docs warn that Secrets are "by default, stored unencrypted in the API server's underlying data store (etcd)".
-- **HorizontalPodAutoscaler (HPA):** changes the Deployment's replica count based on a metric such as CPU usage.
+- A **Pod** is one or more containers that run together on one node and share an IP. Your Node process runs in a container in a Pod. Pods are disposable. You rarely create them yourself.
+- A **Deployment** means "keep this many Pods of this template running". It creates a ReplicaSet per template version and, on a change, rolls Pods from the old ReplicaSet to the new one.
+- A **Service** is a stable virtual IP and DNS name in front of Pods whose labels match its selector and that are currently ready. Clients inside the cluster call `http://orders-api`, not a Pod IP.
+- An **Ingress** is HTTP routing from outside the cluster, by host and path, to a Service. An Ingress controller you install does the work. The docs say the Ingress API has been frozen and recommend the Gateway API. Ingress remains generally available, and the docs say there are no plans to remove it.
+- A **ConfigMap** and a **Secret** are key-value settings injected as environment variables or files. Secrets are, by default, stored unencrypted in etcd, the API server's data store.
+- A **HorizontalPodAutoscaler**, the HPA, changes the Deployment's replica count from a metric such as CPU.
 
 How they point at each other:
 
@@ -56,41 +58,28 @@ text
                                                         └───────────┘ └───────────┘
 ```
 
-Three **probes** tell the kubelet (the agent on each node) how your process is doing:
+Three probes tell the kubelet, the agent on each node, how the process is doing.
 
-- **Startup:** "has it finished starting?" Until it succeeds, the other two probes do not run.
-- **Liveness:** "is it stuck?" Failing it restarts the container.
-- **Readiness:** "should it get traffic right now?" Failing it removes the Pod from the Service's endpoints without restarting it.
+- **Startup:** has it finished starting? Until this succeeds, the other two probes do not run.
+- **Liveness:** is it stuck? Failure restarts the container.
+- **Readiness:** should it get traffic right now? Failure removes the Pod from the Service and does not restart it.
 
 ## How it works
 
-What happens from `kubectl apply` to a request reaching your Node process:
+From `kubectl apply` to a request reaching Node:
 
-1. The API server stores the Deployment. The Deployment controller creates a ReplicaSet for this Pod template, and the ReplicaSet creates 3 Pod objects.
-2. The scheduler picks a node for each Pod. It counts only **requests** (here 250m CPU and 512Mi memory), not actual usage, against each node's capacity.
-3. The kubelet on that node pulls the image and starts the container. Your `CMD` becomes PID 1 in the container, which is the process that will receive SIGTERM later. So run `node server.mjs` directly, not through `npm start`. Node as PID 1 gets no default signal handling, so the app must install its own SIGTERM handler, as Example 1 does, or run under an init such as `tini` (lesson [65](101-pm2-docker.md) and the appendix of lesson [04](04-the-global-object-process-and-environment.md)).
-4. The kubelet runs the **startup probe** (`GET /healthz` every 2 s, up to 30 failures, so 60 s to start). Liveness and readiness probes wait until it passes.
-5. The **readiness probe** (`GET /readyz` every 5 s) starts returning 200 once the app has warmed up. Only then is the Pod listed as ready in the Service's EndpointSlices, and only then do kube-proxy and the Ingress controller send it traffic.
-6. The **liveness probe** (`GET /healthz` every 10 s, 2 s timeout, 3 failures) runs for the life of the container. If the event loop is blocked for longer than about 30 s, three probes in a row time out and the kubelet restarts the container.
+1. The API server stores the Deployment. The Deployment controller creates a ReplicaSet, and the ReplicaSet creates the Pods. This lesson's example keeps 3.
+2. The scheduler picks a node using **requests** only, here 250m CPU and 512Mi memory, not actual usage.
+3. The kubelet pulls the image and starts the container. Your `CMD` is PID 1, the process that will receive SIGTERM. Run `node server.mjs` directly, not `npm start`. Node as PID 1 gets no default signal handling, so install a SIGTERM handler or run under an init such as tini.
+4. The startup probe is `GET /healthz` every 2 seconds, up to 30 failures, so about 60 seconds to start. Liveness and readiness wait until it passes.
+5. The readiness probe is `GET /readyz` every 5 seconds. Only a ready Pod is listed in the Service's EndpointSlices, and only then do kube-proxy and the Ingress controller send traffic.
+6. The liveness probe is `GET /healthz` every 10 seconds, with a 2 second timeout and 3 failures. If the event loop is blocked longer than about 30 seconds, three probes time out and the kubelet restarts the container.
 
-**Probe fields and defaults** (Kubernetes docs, "Liveness, Readiness, and Startup Probes"):
+Readiness runs for the whole life of the container, so a Pod can leave the Service and come back without a restart. That is what a 503 from `/readyz` is for. Liveness restarts the process, so it must check only the process, never the database. Readiness only stops traffic, so it may check critical dependencies, and it must report not-ready once shutdown begins.
 
-| Field | Default | Note |
-|---|---|---|
-| `initialDelaySeconds` | 0 | "If a startup probe is defined, liveness and readiness probe delays do not begin until the startup probe has succeeded." |
-| `periodSeconds` | 10 | Minimum 1 |
-| `timeoutSeconds` | 1 | A Node process with a busy event loop can miss 1 s; this lesson uses 2 for liveness |
-| `successThreshold` | 1 | "Must be 1 for liveness and startup Probes." |
-| `failureThreshold` | 3 | Startup budget = `failureThreshold × periodSeconds` |
+**Rolling update and SIGTERM.** When a Pod is deleted, two things happen together. On the node, the kubelet runs `preStop` if there is one, then sends SIGTERM to PID 1. If the container is still running when `terminationGracePeriodSeconds` ends, the default is 30 seconds, the runtime sends SIGKILL. The grace period covers both the `preStop` hook and the normal stop. In the control plane, the endpoint is marked terminating, and terminating endpoints are not ready, so load balancers should not use them for regular traffic.
 
-Readiness probes "run on the container during its whole lifecycle", so a Pod can drop out of the Service and come back without a restart. That is what the 503 from `/readyz` is for. What each probe should check follows from what failing it does. Liveness restarts the process, so it must check only the process itself: never the database, or one database blip restarts every Pod. Readiness only stops traffic, so it may check critical dependencies, and it must report not-ready once shutdown begins (lesson 102).
-
-**How readiness and SIGTERM work together during a rolling update.** When a Pod is deleted (by a rolling update, a scale-down or a node drain), the Kubernetes "Pod termination flow" runs two things at the same time:
-
-- **On the node:** the kubelet runs the container's `preStop` hook if there is one, then sends SIGTERM to PID 1. If the container is still running when `terminationGracePeriodSeconds` (default 30) runs out, the runtime sends SIGKILL. The grace period "applies to the total time it takes for both the PreStop hook to execute and for the Container to stop normally".
-- **In the control plane:** the Pod's endpoint is marked terminating, and "Terminating endpoints always have their ready status as false … so load balancers will not use it for regular traffic".
-
-The endpoint change is not instant everywhere. kube-proxy on every node and the Ingress controller each have to notice it and update their routing. Until they do, new connections still arrive at the Pod. So the Pod must keep serving for a few seconds after it learns it is being stopped, and only then stop accepting connections. In this lesson's Deployment, that wait is a `preStop` `sleep` of 5 s, which runs before SIGTERM. The app's own `DRAIN_DELAY_MS` is therefore set to 0 in the ConfigMap, so the two waits do not add up. When SIGTERM arrives, the app flips `/readyz` to 503. That matters for anything that still probes the Pod directly, and it is the only signal on platforms without endpoint tracking. Then the app calls `server.close()`, lets in-flight requests finish, closes its pools and exits 0. A forced-exit timer (20 s) fires first if a request hangs, so 5 s + 20 s stays inside the 30 s grace period and the kubelet never needs SIGKILL.
+That endpoint change is not instant on every node. Until kube-proxy and the Ingress controller notice, new connections still arrive. The Pod must keep serving for a few seconds, then stop accepting. This Deployment's `preStop` is a `sleep` of 5 seconds, which runs before SIGTERM. `DRAIN_DELAY_MS` is 0 in the ConfigMap so the two waits do not add up. On SIGTERM the app flips `/readyz` to 503, calls `server.close()`, finishes in-flight requests, closes pools, and exits 0. A forced-exit timer of 20 seconds fires first if a request hangs, so 5 seconds plus 20 seconds stays inside the 30 second grace period.
 
 ![Graceful Shutdown on SIGTERM: the orchestrator sends SIGTERM, the app flips its readiness probe to not ready, server.close() stops new connections, in-flight requests drain, resources close, and the process exits, with a forced-exit timer as a safety net](assets/i63_01_85ccfa6f.svg)
 *Figure: the shutdown sequence lesson 102's handler runs on SIGTERM, which is what the kubelet sends after `preStop`. Look at: step 2, readiness flips to not ready before `server.close()`, so the Pod keeps serving while traffic moves away.*
@@ -111,37 +100,15 @@ t=30s  terminationGracePeriodSeconds ends → SIGKILL to anything still running
 
 > ⚠️ Unverified: how long endpoint removal takes to reach kube-proxy and Ingress controllers in a real cluster, and therefore whether 5 s of `preStop` is enough. No cluster was available. The local run in Example 2 shows only the Node side.
 
-**The `preStop` `sleep` action** (stable in Kubernetes 1.34, beta and on by default from 1.30) is run by the kubelet, so the image needs no `sleep` binary. That matters for distroless images. On older clusters the usual form is `exec: { command: ["sleep", "5"] }`, which does need the binary in the image.
+The `preStop` `sleep` action is run by the kubelet, so the image needs no `sleep` binary. That matters for distroless images. On older clusters the form is an `exec` of `sleep`, which does need the binary.
 
-**Resources: requests and limits.** A **request** is what the scheduler reserves for the container. HPA's CPU utilisation is also measured against it. A **limit** is enforced by the kernel through cgroups, and the Kubernetes docs describe the two resources differently:
+**Requests and limits.** A request is what the scheduler reserves, and it is what HPA CPU utilisation is measured against. A limit is enforced by the kernel through cgroups. CPU over the limit is throttled, which shows up as event-loop lag and slow probes. Memory over the limit is an out-of-memory kill: SIGKILL, no chance to log or drain, and not always immediate, because it happens when the kernel detects pressure. This Deployment sets a CPU request, no CPU limit, and a memory request equal to the memory limit, 512Mi, so the memory is reserved and the limit is a known point.
 
-- **CPU limit:** "enforced by CPU throttling". A Node process over its CPU limit is slowed down, which shows up as event-loop lag and slow probes.
-- **Memory limit:** "enforced by the kernel with out of memory (OOM) kills". The process gets SIGKILL with no chance to log or drain. It "may not be immediately killed", because the kill happens when the kernel detects memory pressure.
-
-This lesson's Deployment sets a CPU request, no CPU limit, and a memory request equal to the memory limit (512Mi). The memory is then reserved on the node, and the limit sits at a known point.
-
-**The memory limit and the V8 heap.** Node's memory is the V8 heap (your objects) plus memory outside it: Buffers, compiled code, thread stacks, native libraries. The memory limit applies to all of it. V8 has its own ceiling for the heap, `heap_size_limit`. When the heap reaches it, Node aborts with `FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory` (exit code 134). In one re-run the same script printed `FATAL ERROR: Ineffective mark-compacts near heap limit …` instead, so match on `JavaScript heap out of memory`. Measured on Node v24.19.0 with the same script under different cgroup memory limits (Example 7):
-
-| Memory limit (cgroup `MemoryMax`) | Node flags | `process.constrainedMemory()` | `heap_size_limit` |
-|---|---|---|---|
-| none (15 GiB machine) | — | 18446744073709552000 | 2240 MiB |
-| 512 MiB | — | 536870912 | 259 MiB |
-| 1 GiB | — | 1073741824 | 560 MiB |
-| 2 GiB | — | 2147483648 | 1120 MiB |
-| 512 MiB | `--max-old-space-size=384` | 536870912 | 387 MiB |
-| 512 MiB | `--max-old-space-size-percentage=75` | 536870912 | 387 MiB |
-| 512 MiB | `--max-old-space-size=4096` | 536870912 | 4099 MiB |
-
-What this shows for Node 24:
-
-- **Node reads the cgroup limit.** `process.constrainedMemory()` returned the cgroup value, and the default heap followed it: about half of the limit at each size tested. With a 512Mi limit and no flag, the heap stops at 259 MiB even though another ~250 MiB is free.
-- **`--max-old-space-size=<MiB>` overrides the default** with a fixed number. 384 MiB of a 512 MiB limit leaves 128 MiB for everything outside the heap.
-- **`--max-old-space-size-percentage=<n>`** (added in v24.6.0) sets the old space as a percentage of "available system memory". Here that was the cgroup limit, not the host's 15 GiB: 75% gave the same 387 MiB as the fixed 384. The docs say it "takes precedence over `--max-old-space-size` when both are specified". It works in `NODE_OPTIONS` too. Because it follows the limit, one image works at any memory size.
-- **A heap larger than the limit is the dangerous case.** With `--max-old-space-size=4096` under 512 MiB, V8 never runs out of heap. The kernel kills the process first, with exit code 137 (128 + SIGKILL 9), no error and no stack (Example 7). In Kubernetes that is the container status `OOMKilled`.
+**The V8 heap and the memory limit.** Node's memory is the heap plus everything outside it: Buffers, compiled code, stacks, and native libraries. The limit applies to all of it. V8's own ceiling is `heap_size_limit`. When the heap reaches it, Node aborts with a fatal JavaScript heap out of memory error, exit code 134. One re-run printed "Ineffective mark-compacts near heap limit" instead, so match on `JavaScript heap out of memory`. On Node 24, V8 reads the cgroup limit. With no flag, the default heap in this lesson's measurements was about half the limit: 259 MiB under 512 MiB. `--max-old-space-size=384` leaves room under a 512 MiB limit for off-heap use. `--max-old-space-size-percentage` sets the old space as a percentage of available memory, which here followed the cgroup limit, not the host. The docs say the percentage flag takes precedence when both are set, and it works in `NODE_OPTIONS`. A heap larger than the limit is the dangerous case. V8 never runs out of heap, the kernel kills the process with exit code 137, which is 128 plus signal 9, and there is no Node error. In Kubernetes that status is `OOMKilled`. The full measurements are in Good to know.
 
 > ⚠️ Unverified: the `OOMKilled` status and restart count as shown by `kubectl describe pod`. The kill itself (exit 137 under a 512 MiB cgroup limit) was reproduced with `systemd-run`, not with a kubelet.
 
-**HPA (autoscaling/v2).** The HPA controller runs every 15 seconds by default (`--horizontal-pod-autoscaler-sync-period`). It reads CPU usage from the `metrics.k8s.io` API, "usually provided by an add-on named Metrics Server, which needs to be launched separately". It computes utilisation "as a percentage of the equivalent resource request", so a Deployment with no CPU request cannot be scaled on CPU utilisation. The formula from the docs:
+**HPA.** The controller runs every 15 seconds by default. It reads CPU from the `metrics.k8s.io` API, usually from Metrics Server, which you install separately. Utilisation is a percentage of the resource request, so a Deployment with no CPU request cannot scale on CPU. The formula is `desiredReplicas = ceil(currentReplicas × currentMetricValue / desiredMetricValue)`.
 
 text
 
@@ -152,16 +119,11 @@ desiredReplicas = ceil( currentReplicas × currentMetricValue / desiredMetricVal
 6 Pods averaging  35%,                     target 70%:  ceil(6 ×  35 / 70) = 3  (after the 300 s window)
 ```
 
-The default behaviour has no stabilisation window for scale-up: it may add "4 pods or a 100% of the currently running replicas" every 15 s, whichever is more. Scale-down uses a 300 s window and takes "the highest value from the specified interval", so a short dip does not remove Pods. `minReplicas: 3` keeps capacity for a rolling update and for a node failure.
+Scale-up has no stabilisation window by default. It may add 4 pods or 100% of the currently running replicas every 15 seconds, whichever is more. Scale-down uses a 300 second window and takes the highest recommendation in that window, so a short dip does not remove Pods. `minReplicas: 3` keeps capacity for a rolling update and a node failure.
 
 > ⚠️ Unverified: actual scaling events and timing. No cluster and no Metrics Server were available. The arithmetic above is the docs' formula, worked by hand.
 
-**Rolling updates: `maxSurge` and `maxUnavailable`.** On a template change (for example a new image tag), the Deployment creates a new ReplicaSet and moves Pods to it within two limits:
-
-- **`maxSurge`:** how many Pods may exist *above* `replicas`.
-- **`maxUnavailable`:** how many may be *missing* from `replicas`.
-
-Both accept a number or a percentage, and both default to 25%. The docs' example: with 3 replicas and the defaults, the rollout "makes sure that at least 3 Pods are available and that at max 4 Pods in total are available". This lesson sets them explicitly to `maxSurge: 1, maxUnavailable: 0`: start one new Pod, wait until it is ready, then terminate one old Pod (which runs the shutdown sequence above), and repeat:
+**`maxSurge` and `maxUnavailable`.** On a template change the Deployment moves Pods within two limits. `maxSurge` is how many Pods may exist above `replicas`. `maxUnavailable` is how many may be missing. Both default to 25%, as a number or a percentage. The docs' example with 3 replicas and the defaults keeps at least 3 Pods available and at most 4 in total. This lesson sets `maxSurge: 1` and `maxUnavailable: 0`: start one new Pod, wait until it is ready, then terminate one old Pod, and repeat. A new Pod counts as available only after readiness passes, plus `minReadySeconds`, which defaults to 0. A readiness endpoint that returns 200 before the database is connected will replace working Pods with broken ones.
 
 text
 
@@ -174,11 +136,9 @@ create new-2 …                                               2          1     
 … until                                                      0          3      3
 ```
 
-A new Pod counts as available only after its readiness probe passes (plus `minReadySeconds`, default 0). That is why a readiness endpoint that returns 200 before the app has connected to its database lets a rollout replace working Pods with broken ones.
-
 > ⚠️ Unverified: the rollout sequence above was not observed with `kubectl rollout status` on a cluster. It follows the Deployment docs.
 
-**ConfigMap changes need a restart for environment variables.** The docs: "ConfigMaps consumed as environment variables are not updated automatically and require a pod restart." `kubectl rollout restart deployment/orders-api` replaces the Pods using the same rolling-update rules.
+**ConfigMap changes** consumed as environment variables are not updated automatically. The docs say you need a Pod restart. `kubectl rollout restart deployment/orders-api` replaces Pods with the same rolling-update rules.
 
 ## Code examples
 
@@ -803,56 +763,70 @@ The three runs end in three different ways:
 
 ## Common mistakes & gotchas
 
-- **Dependencies in the liveness probe.** A database outage then restarts every Pod at once, and the restarts make it worse. Liveness checks the process. Readiness checks dependencies.
-- **No startup probe for a slow start.** Without it, the liveness probe starts at once and can kill a Pod that is still loading. Use `failureThreshold × periodSeconds` as the startup budget.
-- **`timeoutSeconds: 1` on a busy Node process.** A garbage-collection pause or a burst of synchronous work can miss a 1 s probe. Three misses restart a healthy Pod. Use 2–5 s for liveness, and fix event-loop blocking (lesson [10](10-blocking-the-event-loop.md)).
-- **Closing the server the moment SIGTERM arrives.** Endpoint removal takes time to reach every node. Keep serving for a few seconds (`preStop` sleep) before `server.close()`.
-- **Adding the waits up past the grace period.** `preStop` + drain delay + forced-exit timer must be less than `terminationGracePeriodSeconds`, which includes the `preStop` time. Otherwise SIGKILL cuts the drain short.
-- **`npm start` as PID 1.** SIGTERM goes to PID 1. Run `node` directly, or use an init such as `tini`, as lesson 101 does.
-- **A heap bigger than the memory limit.** `--max-old-space-size` above the limit turns a debuggable heap OOM into a silent SIGKILL (exit 137). Without any flag, the default heap is only about half the limit.
-- **CPU utilisation HPA with no CPU request.** Utilisation is a percentage of the request, so with no request the HPA cannot compute it.
-- **`replicas` in the Deployment fighting the HPA.** Every `kubectl apply` resets the count to the file's value, and the HPA then scales it back. The HPA docs recommend removing `spec.replicas` once an HPA is enabled, as Example 4 does. On an existing Deployment, the first apply without it falls back to the default of 1 Pod once, so do that step with care.
-- **kubeconform without `-strict`.** A misspelled field such as `readinessprobe` passes validation and can end up dropped, leaving the Pod with no readiness probe (Example 6).
-- **Expecting ConfigMap edits to reach environment variables.** They do not until the Pods restart.
-- **Secrets in git.** The manifest in Example 4 is a placeholder. Base64 in a Secret is encoding, not encryption.
+- **A database call in the liveness probe.** A database outage restarts every Pod, and the restarts make it worse. Liveness checks the process. Readiness checks dependencies.
+- **No startup probe on a slow start.** Liveness can kill a Pod that is still loading. The startup budget is `failureThreshold` times `periodSeconds`.
+- **`timeoutSeconds` of 1 on a busy Node process.** A garbage-collection pause can miss a 1 second probe. Three misses restart a healthy Pod. Use 2 to 5 seconds for liveness, and fix event-loop blocking.
+- **Closing the server the moment SIGTERM arrives.** Endpoint removal takes time to reach every node. Keep serving through a short `preStop` sleep, then `server.close()`.
+- **Waits that add up past the grace period.** `preStop` plus the drain delay plus the forced-exit timer must be less than `terminationGracePeriodSeconds`, and that grace includes `preStop`. Otherwise SIGKILL cuts the drain short.
+- **`npm start` as PID 1.** SIGTERM goes to PID 1. Run `node` directly, or use an init such as tini.
+- **A heap bigger than the memory limit.** `--max-old-space-size` above the limit turns a heap error you can log into a silent SIGKILL, exit 137. With no flag, the default heap is only about half the limit.
+- **CPU utilisation on the HPA with no CPU request.** Utilisation is a percentage of the request, so there is nothing to divide by.
+- **`replicas` in the Deployment fighting the HPA.** Every `kubectl apply` resets the count, and the HPA scales it back. The HPA docs say to remove `spec.replicas` once an HPA is enabled. On an existing Deployment, the first apply without it falls back to 1 Pod once, so do that step with care.
+- **kubeconform without `-strict`.** A misspelled field such as `readinessprobe` can pass and then be dropped, leaving the Pod with no readiness probe.
+- **Expecting a ConfigMap edit to reach environment variables.** It does not, until the Pods restart.
+- **Secrets in git.** Base64 in a Secret is encoding, not encryption. The manifest in the example is a placeholder.
 
 ## Best practices
 
-- **Three endpoints, three jobs:** startup and liveness on a cheap `/healthz`; readiness on `/readyz`, which checks critical dependencies and returns 503 from the first moment of shutdown.
-- **Shutdown budget written down:** `preStop` sleep (5 s) + forced-exit timer (20 s) < `terminationGracePeriodSeconds` (30 s); log each step of the drain.
-- **Set the heap from the limit:** `--max-old-space-size` at about 75% of the memory limit, or `--max-old-space-size-percentage=75` on Node ≥ 24.6.0; check the result with `v8.getHeapStatistics().heap_size_limit` at startup.
-- **Memory request = memory limit;** set a CPU request, and add a CPU limit only if you have measured the throttling it causes.
-- **`maxSurge: 1, maxUnavailable: 0`** (or percentages) for services that must not lose capacity during a rollout, plus `minReplicas` ≥ 2 on the HPA.
-- **Validate in CI** with `kubeconform -strict -summary -kubernetes-version <your cluster version>`, plus a server-side dry run against a real cluster before production.
-- **Fixed image tags and named ports;** keep config in ConfigMaps and real secrets in a secret manager.
-- **Let the HPA own the replica count:** no `spec.replicas` in a Deployment that an HPA scales.
+- **Three endpoints.** Startup and liveness use a cheap `/healthz`. Readiness uses `/readyz`, checks critical dependencies, and returns 503 from the first moment of shutdown.
+- **Write the shutdown budget down.** A 5 second `preStop` sleep plus a 20 second forced-exit timer stays under a 30 second `terminationGracePeriodSeconds`. Log each drain step.
+- **Set the heap from the limit.** `--max-old-space-size` at about 75% of the memory limit, or `--max-old-space-size-percentage=75` on Node 24.6.0 and later. Log `v8.getHeapStatistics().heap_size_limit` at startup.
+- **Set memory request equal to memory limit.** Set a CPU request. Add a CPU limit only after you have measured the throttling.
+- **`maxSurge: 1` and `maxUnavailable: 0`** when the service must not lose capacity during a rollout, and `minReplicas` of at least 2 on the HPA.
+- **Validate in CI** with `kubeconform -strict -summary` and your cluster's Kubernetes version, plus a server-side dry run before production.
+- **Pin image tags and name ports.** Config belongs in ConfigMaps. Real secrets belong in a secret manager.
+- **Let the HPA own the replica count.** Leave `spec.replicas` out of a Deployment that an HPA scales.
 
 ## ⭐ Interview lens
 
 > **Q: “Liveness, readiness and startup probes: what does each do, and what should each check in a Node app?”**  
-> A: Startup gates the other two until the app has started. Its budget is `failureThreshold × periodSeconds`. Liveness restarts the container when it fails, so it should check only that the process and event loop respond: a cheap `/healthz` with no dependency calls. Readiness removes the Pod from the Service without restarting it, so it can check critical dependencies, and it must return 503 once shutdown starts. *Trap:* a database check in liveness restarts every Pod during a database blip.
+> A: The kubelet runs three probes. Startup means the process has finished booting. Until it succeeds, liveness and readiness do not run, so a slow start is not killed. Its budget is `failureThreshold` times `periodSeconds`. In this lesson that is 30 failures at 2 seconds, about 60 seconds, on `GET /healthz`. Liveness means the process is stuck. A failure restarts the container, so the check must be only the process and the event loop: a cheap `/healthz` with no database call. This lesson runs it every 10 seconds with a 2 second timeout and 3 failures, so a blocked loop of about 30 seconds gets restarted. Readiness means the Pod should receive traffic. A failure removes it from the Service's endpoints and does not restart it, and the probe keeps running for the Pod's whole life. `/readyz` may check critical dependencies, and it must return 503 as soon as shutdown starts so the Pod leaves the Service. For example, a slow database should fail readiness on every Pod and must not fail liveness, or you restart the whole tier at once. The limit is the default timeout of 1 second. A garbage-collection pause on Node can miss it, and three misses restart a healthy process.
 
 > **Q: “Walk me through what happens to a Pod during a rolling update, and how the Node app should behave.”**  
-> A: The Pod is marked terminating. At the same time, the control plane marks its endpoint not ready, and the kubelet runs `preStop`, then sends SIGTERM to PID 1. The endpoint change takes a moment to reach kube-proxy and the Ingress controller, so the app keeps serving during a short `preStop` sleep. On SIGTERM it flips readiness to 503, calls `server.close()`, closes idle keep-alive sockets, waits for in-flight requests, closes pools and exits 0. A forced-exit timer shorter than `terminationGracePeriodSeconds`, which includes `preStop`, guards against a hung request. With `maxSurge: 1, maxUnavailable: 0`, the old Pod is only stopped after a new one is ready.
+> A: On a template change the Deployment starts a new ReplicaSet and moves Pods within `maxSurge` and `maxUnavailable`. This lesson uses surge 1 and unavailable 0, so it adds one new Pod, waits until readiness passes, then deletes one old Pod, and never goes below the replica count. Deleting a Pod marks it terminating. At the same time the control plane sets the endpoint not ready, and the kubelet runs `preStop`, then sends SIGTERM to PID 1. Endpoint updates take a moment to reach kube-proxy and the Ingress controller, so new connections still arrive. A `preStop` sleep of 5 seconds keeps the app serving normally during that gap. The sleep action is run by the kubelet, so a distroless image does not need a `sleep` binary. On SIGTERM the app sets `/readyz` to 503, calls `server.close()`, closes idle keep-alive sockets, finishes in-flight requests, closes pools, and exits 0. `DRAIN_DELAY_MS` is 0 here so it does not add a second wait on top of `preStop`. A forced-exit timer of 20 seconds fires if something hangs. `terminationGracePeriodSeconds` defaults to 30 and includes `preStop`, so 5 plus 20 stays inside it. After that the runtime sends SIGKILL. For example, with 3 replicas the total goes 3, then 4 while the new Pod starts, then back to 3 after the old one drains. The limit is a readiness check that returns 200 before the database is connected. You then roll healthy Pods out and broken Pods in. Run `node` as PID 1, not `npm start`, or SIGTERM hits the wrong process.
 
 > **Q: “A container has a 512Mi memory limit. How does that interact with the Node heap?”**  
-> A: The limit covers the whole process: heap, Buffers, code and stacks. On Node 24, V8 sizes its default heap from the cgroup limit: 259 MiB under 512 MiB in my test, about half. Set `--max-old-space-size` to about 75% of the limit (384), or `--max-old-space-size-percentage=75` on 24.6+, so the heap uses the memory but leaves room for off-heap use. If the heap setting is above the limit, the kernel OOM-kills the process with SIGKILL (exit 137) before V8 reports anything.
+> A: The memory limit is a cgroup limit on the whole process: the V8 heap, Buffers, compiled code, thread stacks, and native libraries. The scheduler uses the request, which this lesson sets equal to the limit, 512Mi, so the node reserves that much. V8 has a separate ceiling, `heap_size_limit`. On Node 24 it reads the cgroup. `process.constrainedMemory()` returned 536870912 under a 512 MiB limit, and with no flag the heap stopped at 259 MiB, about half, while roughly 200 MiB was still free. Crossing the heap limit aborts with "JavaScript heap out of memory" and exit code 134. Set `--max-old-space-size` to about 75% of the limit, 384 of 512, which measured a heap limit of 387 MiB and still left room off-heap. `--max-old-space-size-percentage=75`, added in v24.6.0, follows the cgroup rather than the host, and the docs say it wins if both flags are set. For example, 384 MiB of heap plus buffers stayed under 512 and still printed V8's fatal error, which you can log. The limit of setting the heap to 4096 under a 512 MiB cgroup is that V8 never hits its own ceiling. The kernel sends SIGKILL, exit 137, which is 128 plus signal 9, with no JavaScript stack. Kubernetes shows that as `OOMKilled`. CPU is different: over a CPU limit you are throttled, not killed.
 
 > **Q: “How does the HPA decide how many Pods to run?”**  
-> A: Every 15 s it reads the metric (CPU from Metrics Server, as a percentage of the request) and computes `ceil(current × actual / target)`. Scale-up is immediate by default, up to 100% or 4 Pods per 15 s, whichever is more. Scale-down waits for a 300 s stabilisation window and uses the highest recommendation in it. It needs CPU requests on the Pods and Metrics Server in the cluster.
+> A: The HorizontalPodAutoscaler controller runs every 15 seconds by default. It reads the metric from `metrics.k8s.io`, usually provided by Metrics Server, which is a separate add-on. CPU utilisation is a percentage of the Pod's CPU request, not of the node's size, so a Deployment with no CPU request cannot be scaled on CPU. The desired count is `ceil(current replicas times current utilisation divided by the target)`. Three Pods at 140% of a 250m request, with a target of 70%, become `ceil(3 × 140 / 70)`, which is 6. Six Pods at 35% become `ceil(6 × 35 / 70)`, which is 3, and only after the scale-down window. Scale-up has no stabilisation window by default and may add 4 Pods or double the current count every 15 seconds, whichever is more. Scale-down waits 300 seconds and uses the highest recommendation in that window, so a short dip does not remove Pods. For example, `minReplicas: 3` keeps enough Pods for `maxUnavailable: 0` to roll one at a time and still survive a node failure. The limit is leaving `spec.replicas` in the Deployment. The next `kubectl apply` resets the count to the file, the HPA fights it back, and removing the field from an existing Deployment can fall back to 1 Pod on the first apply. Let the HPA own the number.
 
 ## Cheat-card
 
-- **Objects:** Pod (containers + IP) ← ReplicaSet ← Deployment ← HPA; Service selects *ready* Pods; Ingress (frozen API; Gateway API recommended) routes to a Service; ConfigMap/Secret feed env vars (restart to pick up changes).
-- **Probe defaults:** period 10 s, timeout 1 s, failureThreshold 3, successThreshold 1; startup gates the others; readiness runs all the time.
-- **Shutdown:** terminating → endpoint ready=false ∥ `preStop` → SIGTERM to PID 1 → app 503 + `server.close()` + drain → exit 0; SIGKILL at `terminationGracePeriodSeconds` (30 s default, includes `preStop`).
-- **`preStop: sleep: { seconds: 5 }`:** stable in 1.34 (beta from 1.30); run by the kubelet, so no binary is needed.
-- **Limits:** CPU over the limit → throttled; memory over the limit → SIGKILL (exit 137, `OOMKilled`).
-- **Heap under a cgroup limit (Node 24.19.0):** default ≈ ½ the limit (259 MiB of 512); `--max-old-space-size=384` → 387 MiB; `--max-old-space-size-percentage=75` (v24.6.0+) → 387 MiB; too large → kernel kill.
-- **HPA v2:** `ceil(current × actual/target)`; 15 s loop; scale-down window 300 s; needs Metrics Server + CPU requests.
-- **Rollout:** `maxSurge`/`maxUnavailable` default 25%; `1/0` = never below `replicas`; new Pods count once ready.
-- **Validate offline:** `kubeconform -strict -summary -kubernetes-version 1.37.1 dir/`; `kubectl apply --dry-run=client` needs a reachable API server even with `--validate=false`; `kubectl label --local -f dir/ k=v -o name` only parses.
-- **Versions used:** Node v24.19.0, Express 5.3.0, kubectl v1.37.1, kubeconform v0.8.0, undici 7.29.0 (bundled), systemd 259.
+- **Objects:** Pod, then ReplicaSet, then Deployment, then HPA. A Service selects ready Pods. Ingress routes to a Service. The Ingress API is frozen. Gateway API is the recommendation. ConfigMap and Secret feed env vars, and a restart is required to pick up changes.
+- **Probes:** startup gates the other two. Liveness restarts. Readiness removes traffic and keeps running. A database check belongs on readiness.
+- **Shutdown:** terminating, endpoint not ready, and `preStop`, then SIGTERM to PID 1, then 503 and `server.close()` and drain, then exit 0. SIGKILL when `terminationGracePeriodSeconds` ends. The default is 30 seconds and includes `preStop`.
+- **This lesson's budget:** `preStop` sleep 5 seconds, forced exit 20 seconds, grace 30 seconds, `DRAIN_DELAY_MS` 0.
+- **Limits:** CPU over the limit is throttled. Memory over the limit is SIGKILL, exit 137, status `OOMKilled`.
+- **Heap on Node 24 under a cgroup:** the default is about half the limit, 259 MiB of 512. `--max-old-space-size=384` measured 387 MiB. A heap above the limit is a kernel kill, not a V8 error.
+- **HPA:** `ceil(current × actual / target)`, a 15 second loop, a 300 second scale-down window, Metrics Server, and CPU requests.
+- **Rollout:** `maxSurge` and `maxUnavailable` default to 25%. `1` and `0` never goes below `replicas`. A new Pod counts once it is ready.
+- **Run `node` as PID 1,** not `npm start`.
+
+## Good to know
+
+- **Probe defaults from the docs:** `initialDelaySeconds` 0, and if a startup probe exists the other delays wait until it succeeds. `periodSeconds` 10, minimum 1. `timeoutSeconds` 1. `successThreshold` 1, and it must be 1 for liveness and startup. `failureThreshold` 3. Startup budget is `failureThreshold` times `periodSeconds`.
+- **`preStop` `sleep`:** stable in Kubernetes 1.34, beta and on by default from 1.30. The kubelet runs it, so the image needs no `sleep` binary. Older clusters use `exec` of `["sleep", "5"]`, which needs the binary.
+- **Heap measurements on Node v24.19.0:** no cgroup limit, on a 15 GiB machine, `process.constrainedMemory()` was 18446744073709552000 and `heap_size_limit` was 2240 MiB.
+- **512 MiB limit, no flag:** `constrainedMemory` 536870912, heap 259 MiB.
+- **1 GiB limit, no flag:** `constrainedMemory` 1073741824, heap 560 MiB.
+- **2 GiB limit, no flag:** `constrainedMemory` 2147483648, heap 1120 MiB.
+- **512 MiB and `--max-old-space-size=384`:** `constrainedMemory` 536870912, heap 387 MiB.
+- **512 MiB and `--max-old-space-size-percentage=75`:** `constrainedMemory` 536870912, heap 387 MiB. The percentage flag was added in v24.6.0 and takes precedence over `--max-old-space-size` when both are set.
+- **512 MiB and `--max-old-space-size=4096`:** `constrainedMemory` 536870912, heap 4099 MiB, then the kernel kills the process.
+- **What those runs printed:** the default heap stopped at 259 MiB with exit 134 while about 200 MiB of the cgroup was still free. `--max-old-space-size=384` reached about 388 MiB RSS 431 and still exited 134 with V8's fatal line. `--max-old-space-size=4096` exited 137 with no message from Node.
+- **Offline checks:** `kubeconform -strict -summary -kubernetes-version 1.37.1`. `kubectl apply --dry-run=client` needs a reachable API server even with `--validate=false`. `kubectl label --local -f dir/ k=v -o name` only parses.
+- **Versions used:** Node v24.19.0, Express 5.3.0, kubectl v1.37.1, kubeconform v0.8.0, undici 7.29.0 bundled, systemd 259. No cluster was available. The kill under a 512 MiB limit was reproduced with `systemd-run`, not with a kubelet.
 
 ---
 

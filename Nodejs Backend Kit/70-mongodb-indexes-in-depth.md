@@ -13,69 +13,58 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+An index is a second sorted structure, a B-tree, that maps a field's value to the document's id so the server can jump to matches instead of reading every document. You add one for the fields a hot query filters or sorts on, in equality, then sort, then range order. It exists so a lookup stays fast as the collection grows. The trade-off is that every insert, update, and delete must maintain that structure, and an index the planner cannot use is pure write cost.
+
 ## Why it matters
 
-[Lesson 68](68-schema-design-amp-data-modeling.md) introduces indexes and the ESR rule in a few paragraphs. In production most MongoDB performance and correctness questions come back to them. A login that takes 300 ms is a collection scan. "Email must be unique, but deleted accounts may reuse it" is a partial unique index. "Delete sessions after 30 minutes" is a TTL index. A page that is fast with 20 results and slow with 2,000 is an in-memory sort. Each of these is a choice of index *type* or *field order* that you can check with one `explain()` call.
+Lesson 68 introduces indexes and the ESR rule in a few paragraphs. In production, slow queries and "this must be unique, except for deleted rows" come back to the index type and the field order. A login that takes hundreds of milliseconds is a collection scan. "Deleted accounts may reuse the email" is a partial unique index. "Delete sessions after 30 minutes" is a TTL index. A page that is fast for 20 rows and slow for 2,000 is an in-memory sort. Each of these is one `explain()` call.
 
-Indexes also cost something. Each one is a second structure that every insert, update and delete has to maintain. Building one on a large collection takes time and locks, and an index the planner cannot use for your query only adds write cost. This lesson measures those trade-offs instead of asserting them.
+Every index is a structure that inserts, updates, and deletes must maintain. Building one on a large collection takes time and brief locks. An index the planner cannot use only adds write cost.
 
 ## The concept, simply
 
-An index is a separate, sorted structure (a B-tree in WiredTiger) of `(key value → record id)` entries for one field or a list of fields. Because the keys are sorted, the server can *seek* to the first matching key and walk forward, instead of opening every document and testing the filter. The same sort order also lets it return results already sorted, with no sort step. Without a usable index, the plan is `COLLSCAN`: read every document.
+An index stores `(key value, record id)` entries, sorted, for one field or a list of fields. Because the keys are sorted, the server seeks the first match and walks forward, instead of opening every document. The same order can return rows already sorted. With no usable index the plan is `COLLSCAN`: read every document.
 
 ![With an index vs without: on the left a collection scan reads and checks every document; on the right a B-tree lookup follows a sorted tree from the root to the matching entry](assets/i41_02_00012497.svg)
 *Figure: a collection scan versus a B-tree lookup. Look at: the left side touching every document, against the right side's single path from root to "hit". In `explain` terms, an indexed point lookup examines 1 key and 1 document (Example 1).*
 
-The index types in this lesson are all variations on that structure:
-
-| Type | Key it stores | What it is for |
+| Type | What it stores | What it is for |
 |---|---|---|
-| Single / compound | Field values, in the order you list them | Equality, ranges and sorts on those fields |
-| Unique | Same, but the server rejects a duplicate key (`E11000`) | Natural keys such as email |
-| Partial | Only documents that match `partialFilterExpression` | Smaller index; "unique among active" rows |
-| Sparse | Only documents that *have* the field | Optional fields (older form of partial) |
+| Single or compound | Field values, in the order you list | Equality, ranges, and sorts on those fields |
+| Unique | The same, and the server rejects a duplicate (`E11000`) | Natural keys such as email |
+| Partial | Only documents that match `partialFilterExpression` | A smaller index, and "unique among active" rows |
+| Sparse | Only documents that have the field | Optional fields. Partial indexes are the newer form |
 | TTL | A date field, plus `expireAfterSeconds` | Background deletion of expired documents |
-| Text | Stemmed words from string fields | `$text` word search with a relevance score |
-| Wildcard | `(path, value)` for every field under a path | Arbitrary or user-defined attribute keys |
-| Hashed | A hash of the value | Equality lookups and hashed shard keys ([lesson 72](72-mongodb-sharding.md)) |
+| Text | Stemmed words from string fields | `$text` search with a relevance score |
+| Wildcard | A path and a value for every field under a path | Attribute keys you do not know in advance |
+| Hashed | A hash of the value | Equality, and hashed shard keys (lesson 72) |
 
 ## How it works
 
-What happens when a `find` reaches the server:
+What a `find` does on the server:
 
-1. The server parses the filter, sort and projection into a query shape.
-2. Starting in 8.0, a limited set of simple queries skips regular planning. In the runs for this lesson, an equality match on `_id` and one on a unique single-field index both ran as an `EXPRESS_IXSCAN` stage (new in version 8.0).
-3. Otherwise the planner lists every index that *can* answer the query. A compound index qualifies if the query constrains a *prefix* of it. A partial index qualifies only if the filter implies its `partialFilterExpression`.
-4. For each candidate it builds index bounds, such as `status: ["paid","paid"], total: [100, inf]`.
-5. If there is more than one candidate, the candidates race for a trial period. The winner is cached in the plan cache for that query shape.
-6. The winning plan runs. `IXSCAN` walks the bounds, `FETCH` loads each document, and `SORT` runs in memory if the index order does not already give the requested sort.
-7. `explain('executionStats')` reports what happened: `totalKeysExamined`, `totalDocsExamined`, `nReturned`, `executionTimeMillis` and the stage tree.
+1. The server parses the filter, the sort, and the projection into a query shape.
+2. The planner lists every index that can answer the query. A compound index qualifies when the query constrains a prefix of it. A partial index qualifies only when the filter implies its `partialFilterExpression`.
+3. For each candidate it builds bounds, such as `status` equal to `paid` and `total` from 100 upward.
+4. If several candidates remain, they race for a short trial. The winner is cached for that query shape.
+5. `IXSCAN` walks the bounds. `FETCH` loads each document. `SORT` runs in memory when the index order is not the requested order.
+6. `explain('executionStats')` reports `totalKeysExamined`, `totalDocsExamined`, `nReturned`, `executionTimeMillis`, and the stage tree.
 
-**Reading `explain`.** The ratio to watch is examined versus returned. A plan with `totalKeysExamined: 21` for 20 returned is close to ideal. `totalKeysExamined: 36000` for 20 returned means the index narrowed the scan, but the server still read 36,000 entries and sorted them to keep 20. A `SORT` stage means the order came from an in-memory sort and not from the index. That sort is bounded by a memory limit (`internalQueryMaxBlockingSortMemoryUsageBytes`, 100 MB by default) and spills to disk when `allowDiskUse` is set.
+**Reading `explain`.** Compare examined with returned. 21 keys for 20 rows is close to ideal. 36,000 keys for 20 rows means the index narrowed the scan and the server still read 36,000 entries to keep 20. A `SORT` stage means the order came from memory, not from the index.
 
-**The ESR rule.** For a compound index, list **E**quality fields first, then the **S**ort field, then **R**ange fields. The reason is the B-tree order. Inside one equality value (`status: 'paid'`) the keys are ordered by the next field. If that next field is the sort field (`createdAt`), walking the keys returns rows already in sort order, and `limit(20)` can stop after 20 keys. The range field (`total`) is tested on the key itself before the document is fetched. If the range field comes second (`{ status, total, createdAt }`), the keys inside `paid` are ordered by `total`, not `createdAt`. The server must read every key with `total >= 100` and sort them in memory. Example 2 measures exactly this.
+**The ESR rule.** List equality fields, then the sort field, then range fields. Inside one equality value such as `status: 'paid'`, the keys are ordered by the next field. If that next field is `createdAt`, walking the keys is already newest-first, and `limit(20)` can stop after about 20 keys. The range, such as `total`, is tested on the key before the document is fetched. If the range field comes before the sort field, the keys inside `paid` are ordered by `total`, and the server must read every key in the range and sort them. Example 2 measures this on 200,000 orders: the equality-sort-range index examined 21 keys with no `SORT`, and the equality-range-sort index examined 36,000 keys and sorted them.
 
-**Prefixes.** A compound index on `{ a, b, c }` can seek on `{ a }`, `{ a, b }` and `{ a, b, c }`. It cannot seek on `{ b }` or `{ c }` alone, because the keys are not sorted by `b` across different `a` values.
+**Prefixes.** An index on `{ a, b, c }` can seek on `{ a }`, `{ a, b }`, and `{ a, b, c }`. It cannot seek on `{ b }` or `{ c }` alone, because `b` is not sorted across different values of `a`.
 
-**Partial vs sparse.** A sparse index leaves out documents that do not have the field. It still includes documents where the field is explicitly `null`. A partial index leaves out documents that do not match a filter expression, so it can do everything sparse does and more. The sparse-index page of the MongoDB docs points to partial indexes when you need more control. Both have the same planner restriction: the server will not use them for a query whose results could include documents the index left out, unless you `hint` it, and then those documents silently go missing (Example 4).
+**Partial versus sparse.** A sparse index omits documents that lack the field, and it still includes documents where the field is explicitly `null`. A partial index omits documents that fail a filter, so it can do what sparse does and more. The planner will not use either index for a query whose results might include documents the index left out, unless you `hint` it, and a hint then silently drops those documents (Examples 4 and 5).
 
-**TTL.** A TTL index is a normal single-field index on a date field (or an array of dates), plus `expireAfterSeconds`. A background thread, the TTL monitor, wakes up every 60 seconds (the `ttlMonitorSleepSecs` server parameter, which reported `60` on the 8.2.6 server used here). It deletes documents whose date plus `expireAfterSeconds` is in the past. Deletion therefore never happens before the deadline, and is up to about a minute late, more under heavy load. A document whose field is missing, or is not a BSON date (a string such as `"2026-10-12T…"`), never expires. On a replica set, only the primary runs the deletes, and they replicate like any other delete.
+**TTL.** A TTL index is a normal index on a date field, or an array of dates, plus `expireAfterSeconds`. A background thread deletes documents whose date plus that delay is in the past. Deletion is not instant. A missing field, or a value that is not a BSON date, such as an ISO string, never expires. On a replica set only the primary deletes, and the deletes replicate like any other delete.
 
-**Text, wildcard, hashed.**
+**Text, wildcard, and hashed.** A text index tokenises and stems words, so "Indexing" and "index" can match, and it supports `$text` with a score. A collection can have only one text index, so every searchable string field goes in that one index. A wildcard index (`'attrs.$**': 1`) stores a path and a value for every field under `attrs`, so `attrs.color` and `attrs.lengthM` are indexed without naming them in advance. A hashed index stores a hash. Equality works, because equal values hash the same. Ranges and sorts do not, because hashing destroys order. A hashed index cannot be unique.
 
-- **Text.** A text index tokenises and stems words ("Indexing" → "index") and supports `$text` with a `textScore`. All of a collection's text fields go into one text index, because a collection can have only one.
-- **Wildcard.** A wildcard index (`'attrs.$**': 1`) stores a `(path, value)` key for every field under `attrs`. So `attrs.color` and `attrs.lengthM` are both indexed, without knowing those field names in advance.
-- **Hashed.** A hashed index stores a hash of the value. Equal values have equal hashes, so equality works. Ranges and sorts do not, because hashing destroys the order. A hashed index cannot be unique either.
-
-**Index builds in 8.x.** The MongoDB 8.x manual ([Index Builds on Populated Collections](https://www.mongodb.com/docs/manual/core/index-creation/)) describes these stages and locks:
-
-1. Take an exclusive `X` lock on the collection, briefly, to set up the build. The setup creates a "side writes" table for writes that arrive during the build and a constraint-violation table.
-2. Downgrade to an intent-exclusive `IX` lock and scan the collection. The `IX` lock is yielded periodically, so reads and writes continue. Keys go to an external sorter, which uses `maxIndexBuildMemoryUsageMegabytes` (200 MB by default on self-hosted deployments) and then temporary files.
-3. On a replica set, wait for the *commit quorum* (all data-bearing voting members by default). Changed in 8.0: the commit quorum now counts members that are *ready* to commit, and the write concern then decides how many must have replicated the commit.
-4. Take a shared `S` lock (writes blocked) only while the remaining side writes are drained.
-5. Take an exclusive `X` lock, briefly, to apply the last side writes, check constraint violations (for example duplicates for a `unique` index) and mark the index ready.
-
-Starting in 7.1, errors found during the scan, other than duplicate-key errors, stop the build immediately instead of at commit. The `indexBuildMinAvailableDiskSpaceMB` parameter can stop a build when disk is low. Example 7 measures the practical effect: inserts on the same collection kept completing during a build on 500,000 documents.
+**Builds.** On a populated collection the build takes a brief exclusive lock to set up, then scans while reads and writes continue, recording writes that arrive during the scan. It blocks writes briefly to drain those side writes, then takes a brief exclusive lock to commit and to reject duplicates if the index is unique. Example 7 shows inserts on the same collection completing during a build of 500,000 documents. The costs that matter are CPU, I/O, and memory, and on a replica set the commit quorum. The lock stages and the memory parameter are under Good to know.
 
 ## Code examples
 
@@ -419,60 +408,65 @@ await client.close();
 
 ## Common mistakes & gotchas
 
-- **Putting the range field before the sort field.** `{ status, total, createdAt }` for "status = X, total ≥ Y, newest first" makes the server sort in memory (Example 2). Use E-S-R.
-- **Reading only the stage name.** `IXSCAN` is not the same as fast. Compare `totalKeysExamined` with `nReturned`, and look for a `SORT` stage.
-- **Expecting TTL to be exact.** The monitor runs every 60 seconds, and deletes can lag further under load. If an expired row must be invisible immediately, also filter on `expiresAt > now` in the query.
-- **Storing the TTL field as a string or a number.** Only BSON dates (or arrays of them) expire. An ISO string never does (Example 3).
-- **Writing a query that does not imply the partial filter.** The partial index is skipped and you get a `COLLSCAN` (Example 4). Repeat the filter condition in the query.
-- **Hinting a sparse or partial index.** Results silently lose the documents the index skipped (Example 5).
-- **Making an optional field `unique` without sparse or partial.** Every document without the field is indexed as `null`, so the second one fails with `E11000 … dup key: { field: null }`.
-- **Trying to add a second text index.** A collection can have one. Put all searchable fields into it, with `weights`.
-- **Using a hashed index for ranges or sorts.** Hashing destroys order, so the range query in Example 6 becomes a `COLLSCAN`.
-- **Building indexes from application start-up on a large collection.** The build is online, but it still reads the whole collection, uses up to `maxIndexBuildMemoryUsageMegabytes` of memory, and briefly takes exclusive locks. Build deliberately, and on a replica set watch the commit quorum.
-- **Leaving unused indexes in place.** Every index is updated on every write. Check `$indexStats` and drop the indexes that show no `accesses`.
+- **Range before sort.** `{ status, total, createdAt }` for "status equals X, total at least Y, newest first" sorts in memory (Example 2). Use equality, sort, range.
+- **Trusting the stage name.** `IXSCAN` is not the same as fast. Compare `totalKeysExamined` with `nReturned`, and look for `SORT`.
+- **Expecting TTL to the second.** The monitor is periodic, and deletes can lag further under load. If an expired row must be invisible immediately, also filter `expiresAt` greater than now.
+- **Storing the TTL field as a string or a number.** Only BSON dates, or arrays of them, expire. An ISO string never does (Example 3).
+- **A query that does not imply the partial filter.** The partial index is skipped and you get a `COLLSCAN` (Example 4). Repeat the filter in the query.
+- **Hinting a sparse or partial index.** Documents the index skipped disappear from the result with no error (Example 5).
+- **`unique` on an optional field with no sparse or partial filter.** Every missing field is indexed as `null`, so the second document fails with `E11000` on `null`.
+- **A second text index.** A collection can have one. Put every searchable field in it, with `weights`.
+- **A hashed index for a range or a sort.** Hashing destroys order, so the range becomes a `COLLSCAN` (Example 6).
+- **Building a large index from application startup.** The build is online, and it still reads the whole collection, uses memory, and takes brief exclusive locks. Build it on purpose.
+- **Leaving unused indexes.** Every index is updated on every write. Check `$indexStats` and drop indexes with no accesses.
 
 ## Best practices
 
-- **Start from the query:** filter, sort, limit. Write the index for it in E-S-R order and confirm with `explain('executionStats')` that keys examined is close to `nReturned` and that there is no `SORT` stage.
-- **Measure on realistic data volume.** On 100 documents every plan looks fine. Generate tens or hundreds of thousands, as these examples do.
-- **Prefer partial indexes to sparse** for new work, and write the filter so that queries repeat it.
-- **Use a partial unique index for soft-deleted rows** (`{ status: 'active' }`) instead of renaming deleted emails.
-- **For TTL, store an explicit `expiresAt` date with `expireAfterSeconds: 0`.** Each document then carries its own deadline, and changing the policy does not require rebuilding the index.
-- **One text index per collection,** with `weights` to rank title matches above body matches. For relevance tuning, fuzzy matching or facets, use a dedicated search engine.
-- **Wildcard indexes for user-defined attributes,** not as a replacement for compound indexes on fields you know in advance and filter and sort on together. (The docs also describe *compound wildcard indexes*, which combine known fields with a wildcard component; they are not shown here.)
-- **Plan index builds:** run them off-peak, check `currentOp` for progress, and on replica sets understand `commitQuorum`.
+- Start from the query: filter, sort, limit. Write the index in equality, sort, range order. Confirm with `explain('executionStats')` that keys examined are close to `nReturned` and that there is no `SORT`.
+- Measure on a realistic volume. On 100 documents every plan looks fine.
+- Prefer partial indexes to sparse for new work, and repeat the filter in the query.
+- For soft-deleted rows, use a partial unique index on `{ status: 'active' }` instead of renaming the email.
+- For TTL, store an explicit `expiresAt` date and set `expireAfterSeconds: 0`. Each document carries its own deadline, and a policy change does not rebuild the index.
+- One text index per collection, with `weights` so a title match outranks a body match. For fuzzy match or facets, use a dedicated search engine.
+- Use a wildcard index for user-defined attributes, not as a stand-in for a compound index on fields you already know and filter together.
+- Plan builds for off-peak, watch `currentOp`, and on a replica set understand the commit quorum.
 
 ## ⭐ Interview lens
 
 > **Q: “Explain the ESR rule with a real example.”**  
-> A: For "paid orders of 100 or more, newest first, 20 per page", the index is `{ status: 1, createdAt: -1, total: 1 }`: equality, then sort, then range. Inside `status: 'paid'` the keys are already ordered by `createdAt`, so the server walks them, tests `total` on the key, and stops after 20. On 200,000 orders that examined 21 keys with no `SORT` stage. `{ status, total, createdAt }` examined 36,000 keys and sorted them in memory to return the same 20. *Trap:* "range before sort narrows the scan, so it is better". It does narrow the scan, but then the server has to sort everything it read.
+> ESR is the field order of a compound index: equality, then sort, then range. Inside one equality value the B-tree is ordered by the next field. If that field is the sort, walking the keys returns rows already in order, and a limit can stop. The range is tested on the key itself. For "paid orders of 100 or more, newest first, 20 per page," the index is `{ status: 1, createdAt: -1, total: 1 }`. On 200,000 orders that plan examined 21 keys and had no `SORT` stage. The index `{ status, total, createdAt }` examined 36,000 keys and sorted them in memory to return the same 20, because inside `paid` the keys are ordered by `total`, not by time. The limit of "put the range first so the scan is narrower" is exactly that measurement: the scan is narrower than a collection scan, and you still sort everything you read.
 
 > **Q: “How do you make email unique, but let deleted accounts keep their old email?”**  
-> A: Use a unique index with `partialFilterExpression: { status: 'active' }`. Deleted rows are not in the index, so they never collide, and a second active row fails with `E11000`. Queries must include `status: 'active'` to use the index, because otherwise their results could include rows the index left out.
+> Use a unique index with `partialFilterExpression: { status: 'active' }`. A partial index contains only documents that match the filter. Deleted rows are not in the index, so they never collide with a new signup, and a second active row with the same email fails with `E11000`. Queries that should use the index must include `status: 'active'`, because the planner will not pick an index whose contents might be missing documents the query could return. For example, `find({ email, status: 'active' })` seeks the index, and `find({ email })` does not. The limit of a hint that forces the partial index is silent data loss: rows the index omitted simply do not appear.
 
 > **Q: “Our TTL index exists but documents stay for a minute after they expire. Bug?”**  
-> A: No. The TTL monitor runs every 60 seconds, so a deletion lands between 0 and about 60 seconds after expiry, later under load, and only on the primary. If an expired document must never be returned, also filter `expiresAt: { $gt: new Date() }`. Also check that the field is a BSON date, because strings never expire.
-
-> **Q: “Does creating an index lock the collection in MongoDB 8?”**  
-> A: Only briefly. The build takes an exclusive lock at the start, then an intent lock that yields so reads and writes continue during the collection scan. Writes during the scan go to a side-writes table. It briefly blocks writes with a shared lock to drain that table, then takes an exclusive lock to commit. In my run, inserts on the same collection kept completing throughout a one-second build on 500,000 documents. The real costs are CPU, I/O and memory, and on a replica set the commit quorum.
+> No. A TTL index is a date field plus `expireAfterSeconds`. A background monitor deletes documents whose date plus that delay is already past. The monitor does not run continuously, so a document can sit past its deadline until the next pass, and longer under load. On a replica set only the primary deletes, and the delete then replicates. If an expired document must never be returned, the query also filters `expiresAt` greater than now. For example, sessions with `expireAfterSeconds: 0` on an `expiresAt` date disappear on the monitor's schedule, not on the exact timestamp. The limit is the type: a string such as `"2026-10-12T…"` is not a BSON date, and it never expires.
 
 > **Q: “When would you use a hashed or wildcard index?”**  
-> A: Hashed: equality lookups on a value whose order does not matter, mainly as a hashed shard key that spreads monotonically increasing values such as ObjectIds. It cannot serve ranges or sorts and cannot be unique. Wildcard: documents with user-defined attribute keys, where you cannot list the fields in advance. The index stores `(path, value)` keys for every field under the path.
+> A hashed index stores a hash of the value. Equal values have equal hashes, so equality lookups work, and order is gone, so ranges and sorts do not. It also cannot be unique. The common use is a hashed shard key, so a monotonic value such as an ObjectId spreads across shards instead of landing on one (lesson 72). A wildcard index stores a path and a value for every field under a prefix, such as `'attrs.$**': 1`, so user-defined keys like `attrs.color` are indexed without listing them. For example, a product with arbitrary attributes can be filtered on any of those keys. The limit is that a wildcard index is not a substitute for a compound index on fields you know and sort together. Those still want an ESR index.
 
 ## Cheat-card
 
-- **Index = sorted B-tree of (key → record id).** No usable index → `COLLSCAN`.
-- **explain:** `explain('executionStats')` → `totalKeysExamined`, `totalDocsExamined`, `nReturned`, `executionTimeMillis`, `SORT` stage = in-memory sort.
-- **EXPRESS_IXSCAN** (new in 8.0): fast path that skips planning; seen here for equality on `_id` and on a unique single-field index.
-- **ESR:** Equality → Sort → Range. Measured: 21 keys and no SORT (E-S-R) vs 36,000 keys plus SORT (E-R-S) for a 20-row page.
-- **Prefix rule:** `{ a, b, c }` serves `a`, `a+b`, `a+b+c`; not `b` alone.
-- **TTL:** `createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 })`; monitor every 60 s; BSON dates only; primary only.
-- **Unique among active:** `{ unique: true, partialFilterExpression: { status: 'active' } }`; queries must include `status: 'active'`.
-- **Sparse:** skips missing fields, indexes explicit `null`; `hint` on it drops documents. Prefer partial.
-- **Text:** one per collection; stemmed; `$text` + `{ $meta: 'textScore' }`.
-- **Wildcard:** `'attrs.$**': 1` → key `{ $_path, attrs.x }`.
-- **Hashed:** equality only; no ranges, no sorts, no `unique`.
-- **Builds (8.x manual):** X lock briefly → IX (yields) scan → S lock to drain side writes → X lock briefly to commit; `maxIndexBuildMemoryUsageMegabytes` 200 MB default; commit quorum on replica sets (changed in 8.0).
+- An index is a sorted B-tree from key to record id. No usable index means `COLLSCAN`.
+- `explain('executionStats')`: keys examined, docs examined, `nReturned`, time, and a `SORT` stage for an in-memory sort.
+- ESR: equality, then sort, then range. Measured: 21 keys and no SORT, versus 36,000 keys plus SORT, for a 20-row page.
+- Prefix: `{ a, b, c }` serves `a`, `a` plus `b`, and all three. It does not serve `b` alone.
+- TTL: a BSON date plus `expireAfterSeconds`. Not instant. Primary only. Strings never expire.
+- Unique among active: `{ unique: true, partialFilterExpression: { status: 'active' } }`. The query must include `status: 'active'`.
+- Sparse skips missing fields and still indexes explicit `null`. A hint can drop documents. Prefer partial.
+- One text index per collection. It is stemmed. Query with `$text` and `$meta: 'textScore'`.
+- Wildcard: `'attrs.$**': 1`. Hashed: equality only, no range, no sort, no unique.
+
+## Good to know
+
+- `EXPRESS_IXSCAN` is new in MongoDB 8.0. It skips regular planning. In these runs it appeared for equality on `_id` and for equality on a unique single-field index.
+- The in-memory sort limit is `internalQueryMaxBlockingSortMemoryUsageBytes`, 100 MB by default. With `allowDiskUse` the sort can spill to disk.
+- The TTL monitor sleep is `ttlMonitorSleepSecs`. It reported 60 on the 8.2.6 server used here, so expiry can be up to about a minute late, more under load.
+- Index build locks, from the MongoDB 8.x manual: a brief exclusive `X` lock to set up a side-writes table, then an intent-exclusive `IX` lock that yields during the scan, then a shared `S` lock while side writes drain, then a brief `X` lock to commit. `maxIndexBuildMemoryUsageMegabytes` defaults to 200 MB on self-hosted deployments.
+- Commit quorum, changed in 8.0: it counts members that are ready to commit, and write concern then decides how many must have replicated the commit.
+- Starting in 7.1, errors found during the scan, other than duplicate-key errors, stop the build immediately instead of at the commit. `indexBuildMinAvailableDiskSpaceMB` can stop a build when disk is low.
+- In the build measurement, inserts on the same collection kept completing during a build on 500,000 documents.
+- Q: Does creating an index lock the collection in MongoDB 8? Only briefly. Reads and writes continue during the scan under the intent lock. Writes that arrive are applied from a side-writes table. A shared lock blocks writes while that table drains, then a brief exclusive lock commits. In this run, inserts kept completing through a build of 500,000 documents. The lasting costs are CPU, I/O, memory, and on a replica set the commit quorum.
 
 ---
 

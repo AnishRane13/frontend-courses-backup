@@ -13,33 +13,41 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+path, os, and URL are the built-ins for file-path strings, facts about the machine, and web addresses: path joins and splits paths without touching the disk, os reports CPUs, memory, and the temp directory, and URL parses an address into parts the same way a browser does. They exist so you do not glue paths with slashes or split query strings by hand, both of which break across operating systems and on hostile input. The trade-off is that path only edits strings, so a joined path can still point outside a folder unless you check the result.
+
 ## Why it matters
 
-Code that hand-builds file paths by gluing strings together with `'/'` is a bug waiting for a Windows machine, a trailing slash, or a `..` in user input. The `path` module exists so you never have to think about those edge cases: it joins, resolves, and dissects paths correctly on every operating system. Alongside it, `os` tells you about the machine you are running on — CPU count, free memory, platform, temp directory — which you need for sizing worker pools, choosing scratch space, and logging diagnostics. And the WHATWG `URL` class parses and builds URLs safely, replacing the error-prone string-splitting that leads to security holes.
+Hand-built paths, strings glued with a slash, break on Windows, on a trailing slash, or on a .. in user input. path joins, resolves, and takes paths apart correctly on every operating system. os tells you about the machine you are on: CPU count, free memory, platform, temp directory. You need those to size worker pools, pick scratch space, and log diagnostics. The WHATWG URL class parses and builds URLs safely. WHATWG is the group whose URL standard browsers implement. It replaces string splitting that leads to security holes.
 
-These three modules are unglamorous but they show up in nearly every backend, and interviewers use them to separate people who understand portability and safe parsing from those who improvise. A single `path.join` in the right place is the difference between code that runs identically on your Mac, your Linux server, and a teammate's Windows box.
+These three show up in almost every backend. One path.join is the difference between code that behaves the same on macOS, Linux, and Windows.
 
 ## The concept, simply
 
-**`path`** manipulates path *strings* — it never touches the disk. `join` concatenates segments with the correct separator and collapses redundant slashes. `resolve` produces an absolute path by walking from right to left until it has one. `basename`, `dirname`, `extname`, and `parse` pull a path apart into its pieces. **`os`** reports facts about the host: `os.cpus()`, `os.freemem()`, `os.platform()`, `os.tmpdir()`, `os.hostname()`. **`URL`** (a global, no import needed) parses a URL string into structured parts — `protocol`, `hostname`, `pathname`, `searchParams` — and lets you build and mutate URLs without manual escaping.
+path manipulates path strings. It never touches the disk. join concatenates segments with the correct separator and collapses extra slashes. resolve produces an absolute path by walking the arguments from right to left until it has one. basename, dirname, extname, and parse pull a path apart.
+
+os reports facts about the host: os.cpus, os.freemem, os.platform, os.tmpdir, os.hostname.
+
+URL is a global. No import is needed. It parses a URL string into protocol, hostname, pathname, and searchParams, and it lets you change a URL without escaping by hand.
 
 ![A file path broken into dirname, basename, name, and ext parts](assets/i19_01_425594bf.svg)
 
-path.parse() decomposes a path into dir, base, name, and ext in one call — no manual string splitting.
+path.parse splits a path into dir, base, name, and ext in one call.
 
 ## How it works (deep)
 
-The key insight about `path` is that it is *platform-aware*. On POSIX systems the separator is `/`; on Windows it is `\` (and both are accepted on input). `path.join('a', 'b')` yields `a/b` on Linux and `a\b` on Windows automatically. If you ever need to force one behaviour regardless of host, `path.posix` and `path.win32` give you the platform-specific variants explicitly — handy when constructing URL-style paths that must always use forward slashes.
+path is platform-aware. On POSIX systems the separator is a forward slash. POSIX means Linux, macOS, and the other Unix-like systems. On Windows the separator is a backslash, and both are accepted on input. path.join('a', 'b') yields a/b on Linux and a\b on Windows. If you must force one behaviour, path.posix and path.win32 are the platform-specific variants. Use path.posix when you are building a URL-style path that must always use forward slashes.
 
-`join` versus `resolve` trips people up. `join` simply concatenates and normalises: `path.join('/a', 'b', '..', 'c')` gives `/a/c`. `resolve` builds an *absolute* path by processing arguments right-to-left, prepending `process.cwd()` only if it has not yet reached an absolute segment: `path.resolve('b', 'c')` gives `/current/working/dir/b/c`, while `path.resolve('/a', 'b')` gives `/a/b` because `/a` is already absolute and short-circuits the walk. Rule of thumb: use `join` to stitch known relative pieces, use `resolve` when you need a guaranteed absolute path.
+join versus resolve is the trip-up. join concatenates and normalises. path.join('/a', 'b', '..', 'c') gives /a/c. resolve builds an absolute path by processing arguments from right to left, and it prepends process.cwd only if it has not yet reached an absolute segment. process.cwd is the process's current working directory. path.resolve('b', 'c') gives the current directory plus /b/c. path.resolve('/a', 'b') gives /a/b, because /a is already absolute and stops the walk. Use join to stitch known relative pieces. Use resolve when you need a guaranteed absolute path.
 
-The `os` module reads from the operating system at call time. `os.cpus()` returns one entry per logical core, which is the canonical way to size a cluster or worker pool. `os.tmpdir()` returns the correct scratch directory for the platform (respecting `TMPDIR`/`TEMP` env vars), so temp files land somewhere writable and auto-cleaned rather than in your project folder. `os.platform()` returns `'linux'`, `'darwin'`, or `'win32'` — useful for platform branches, though you should lean on cross-platform APIs before branching.
+os reads the operating system at call time. os.cpus returns one entry per logical core, which is the usual way to size a cluster or a worker pool. os.tmpdir returns the scratch directory for the platform, honouring TMPDIR or TEMP, so temp files land somewhere writable. os.platform returns linux, darwin, or win32. Prefer a cross-platform API before you branch on that string.
 
-The `URL` class implements the WHATWG URL Standard — the exact same parser browsers use — so its behaviour is precisely specified and consistent. `new URL(str)` throws on an invalid absolute URL, which is a feature: it fails loudly instead of silently mis-parsing. `searchParams` is a live `URLSearchParams` object that handles percent-encoding for you: `url.searchParams.get('q')` returns the decoded value, and `set`/`append` re-encode correctly. The legacy `querystring` module and the old `url.parse()` function still exist but are effectively superseded — `URL` and `URLSearchParams` are the standard, safer choice for new code.
+URL implements the WHATWG URL Standard, the same parser browsers use. new URL(str) throws on an invalid absolute URL, which is useful: it fails loudly instead of mis-parsing. searchParams is a live URLSearchParams object that percent-encodes for you. get returns the decoded value. set and append re-encode. The legacy querystring module and the old url.parse still exist, but they are superseded. URL and URLSearchParams are the choice for new code.
 
-Beyond `join` and `resolve`, a handful of smaller `path` helpers earn their keep once you internalise them. `path.normalize` collapses `.`, `..`, and duplicate separators *without* making the path absolute — it is the string clean-up half of `resolve`. `path.isAbsolute` answers the platform-specific question the right way (on Windows, `C:\x` and `\\server\share` are absolute; a bare `/x` is not). `path.relative(from, to)` computes the `..`-laden hop from one location to another, which is how build tools print tidy relative paths. And two constants matter for cross-platform correctness: `path.sep` is the segment separator (`/` or `\`), while `path.delimiter` is the *list* separator used inside variables like `PATH` (`:` on POSIX, `;` on Windows) — splitting `process.env.PATH` on a hard-coded `':'` is a classic Windows bug.
+Smaller path helpers. path.normalize collapses dot, dot-dot, and duplicate separators without making the path absolute. path.isAbsolute answers the platform question. On Windows, C:\x and \\server\share are absolute, and a bare /x is not. path.relative(from, to) computes the dot-dot hop from one location to another. Two constants matter. path.sep is the segment separator, slash or backslash. path.delimiter is the list separator inside variables such as PATH: a colon on POSIX, a semicolon on Windows. Splitting process.env.PATH on a hard-coded colon is a classic Windows bug.
 
-It helps to see how the two main joiners diverge on identical inputs. The table below assumes a current working directory of `/home/app` on a POSIX host:
+The two joiners diverge on the same inputs. This table assumes the current directory is /home/app on a POSIX host:
 
 | Call | Result | Why |
 | --- | --- | --- |
@@ -135,55 +143,65 @@ new URL('../users', 'https://api.example.com/v2/search').href;
 
 ## Common mistakes & gotchas
 
-- **Concatenating paths with `'/'` or template strings.** It breaks on Windows and mishandles trailing slashes and `..`. Always use `path.join`/`path.resolve`.
-- **Confusing `join` and `resolve`.** `join` just concatenates; `resolve` guarantees an absolute path and short-circuits on the first absolute argument (right-to-left). Reaching for the wrong one gives subtly wrong paths.
-- **Path traversal from user input.** `path.join(uploadDir, req.body.name)` where `name` is `'../../etc/passwd'` escapes your directory. Resolve the full path and verify it still starts with the intended base directory before touching it.
-- **Assuming `__dirname` exists in ES modules.** In ESM there is no `__dirname`/`__filename`. Use `import.meta.dirname`/`import.meta.filename` (Node 20.11+), or derive them from `import.meta.url`.
-- **Using the legacy `url.parse()`.** It is lenient in unsafe ways and predates the WHATWG standard. Prefer `new URL()`, which rejects malformed input.
-- **Manually encoding query strings.** Hand-rolled `encodeURIComponent` concatenation drifts from spec. `URLSearchParams` encodes and decodes correctly, including repeated keys and spaces.
-- **Treating `os.freemem()` as "available" memory.** On Linux free memory excludes reclaimable cache, so it can look alarmingly low while the system is healthy. It is a rough signal, not a capacity planner.
-- **Splitting `PATH` (or any list env var) on a hard-coded `':'`.** Windows separates `PATH` entries with `;`, so `process.env.PATH.split(':')` mangles drive letters like `C:`. Split on `path.delimiter` instead, and join segments with `path.sep`.
-- **Assuming `path.win32` paths behave on POSIX (and vice-versa).** The active `path` API follows the host OS. If you must parse or build the *other* platform's paths — e.g. handling a Windows path on a Linux CI runner — reach for `path.win32.*` or `path.posix.*` explicitly rather than trusting the default.
-- **Forgetting that a WHATWG `URL` needs a base for relative inputs.** `new URL('/v2/users')` throws because it is not absolute; pass a base as the second argument (`new URL('/v2/users', origin)`) or the parse fails.
+- Concatenating paths with a slash or a template string breaks on Windows and mishandles a trailing slash and dot-dot. Use path.join or path.resolve.
+- join concatenates. resolve guarantees an absolute path and stops at the first absolute argument, reading right to left. The wrong one gives a subtly wrong path.
+- path.join(uploadDir, req.body.name) where name is ../../etc/passwd escapes the directory. Resolve the full path and verify it still starts inside the base directory before you touch it.
+- ES modules have no __dirname and no __filename. Use import.meta.dirname and import.meta.filename, or derive them from import.meta.url.
+- url.parse is lenient in unsafe ways and predates the WHATWG standard. Prefer new URL, which rejects malformed input.
+- Hand-rolled encodeURIComponent chains drift from the spec. URLSearchParams encodes and decodes, including repeated keys and spaces.
+- os.freemem is not "available" memory. On Linux, free memory excludes cache the kernel can reclaim, so it can look low while the system is healthy. It is a rough signal, not a capacity plan.
+- Splitting PATH on a hard-coded colon mangles Windows drive letters such as C:. Split on path.delimiter, and join segments with path.sep.
+- The active path API follows the host. To parse a Windows path on a Linux CI runner, call path.win32 or path.posix explicitly.
+- new URL('/v2/users') throws because it is not absolute. Pass a base as the second argument.
 
 ## Best practices
 
-- **Never build a path by hand;** always go through `path.join`/`resolve` so the code is portable by construction.
-- **Anchor file access to `import.meta.dirname`** (or `__dirname` in CommonJS), not `process.cwd()`, so it works no matter where the process is launched.
-- **Validate resolved user paths against a base directory** before reading or writing, to block traversal attacks.
-- **Size pools with `os.cpus().length`** rather than hard-coding a worker count.
-- **Write temp files under `os.tmpdir()`,** never inside your project or CWD.
-- **Use `new URL()` and `URLSearchParams` for all URL work;** let the standard parser handle encoding and validation.
-- **Use `path.posix` explicitly** when you need forward-slash paths regardless of host (e.g. building URL paths on Windows).
+- Never build a path by hand. Use path.join or path.resolve.
+- Anchor file access to import.meta.dirname, or to __dirname in CommonJS, not to process.cwd.
+- Validate a resolved user path against the base directory before you read or write.
+- Size pools from os.cpus().length instead of a hard-coded worker count.
+- Write temp files under os.tmpdir, not inside the project.
+- Use new URL and URLSearchParams for URL work.
+- Use path.posix when you need forward slashes regardless of the host, such as URL paths built on Windows.
 
 ## ⭐ Interview lens
 
 > **Q: Why use `path.join` instead of just writing `dir + '/' + file`?** Portability and correctness. `join` uses the OS-correct separator (`\` on Windows), collapses duplicate slashes, and resolves `.`/`..` segments. String concatenation breaks across platforms and mishandles trailing slashes.
+> Portability and correctness. path.join uses the separator the operating system expects, a backslash on Windows and a forward slash elsewhere, collapses duplicate separators, and normalises dot and dot-dot segments. dir + '/' + file breaks on Windows, and it mishandles a trailing slash on dir. For example, path.join('/uploads', 'a.png') is a safe stitch of two pieces you already trust. The limit is that join does not check the disk and does not jail the result. If the second piece is user input containing .., join will happily walk upward. You still have to resolve and compare against a base directory.
 
 > **Q: What is the difference between `path.join` and `path.resolve`?** `join` concatenates and normalises segments, staying relative if the inputs are relative. `resolve` always produces an absolute path, processing arguments right-to-left and prepending `process.cwd()` only until it hits an absolute segment, which short-circuits the rest.
+> join concatenates and normalises, and it stays relative if the inputs are relative. path.join('a', 'b') is a/b, not an absolute path. resolve always produces an absolute path. It processes arguments from right to left and prepends the current working directory only until it hits an absolute segment, which stops the walk. path.resolve('/a', 'b') is /a/b. path.resolve('/a', '/b') is /b, because the last absolute argument wins. Use join for known relative pieces. Use resolve when a later API requires an absolute path. The limit of resolve is that it depends on process.cwd when nothing in the arguments is absolute, so launching the process from another directory changes the result.
 
 > **Q: How do you prevent a path-traversal attack when joining user input?** Resolve the final absolute path, then confirm it is still inside the intended base directory (e.g. `resolved.startsWith(baseDir + path.sep)`). If it escaped via `..`, reject it. Never trust the raw filename.
+> Resolve the final path to an absolute path, then confirm it is still inside the intended base. A common check is that the resolved path starts with the base directory plus path.sep, so a sibling folder with a similar prefix does not pass. If the user sent .. and the path escaped, reject it. Never open the raw filename. For example, join of an uploads directory with ../../etc/passwd must fail the prefix check before any read. The limit is a sloppy prefix. startsWith(baseDir) without the separator can accept /uploads-evil when the base is /uploads. Include the separator, and resolve both sides so symlinks and dot segments are normalised the same way.
 
 > **Q: How do you get the current file's directory in an ES module?** Use `import.meta.dirname` (Node 20.11+). There is no `__dirname` in ESM; older code derived it from `fileURLToPath(import.meta.url)`.
-
-> **Q: Why prefer the `URL` class over `querystring` or `url.parse()`?** `URL`/`URLSearchParams` implement the WHATWG standard that browsers use, so parsing is consistent and encoding is handled correctly. `url.parse()` is legacy and lenient in unsafe ways; `querystring` is superseded by `URLSearchParams`.
-
-> **Q: How would you decide how many worker processes to spawn?** Base it on `os.cpus().length` — typically one worker per logical core for CPU-bound work — rather than a hard-coded number, so it scales with the host.
+> Use import.meta.dirname. There is no __dirname in an ES module, and there is no __filename either. import.meta.filename is the file, and import.meta.dirname is its folder. Anchor reads and writes to that folder so the path does not depend on the directory the process was started from. Older code built the same value from fileURLToPath of import.meta.url. The limit is CommonJS. In a require-based file you still use __dirname, and import.meta is not available there. Also, import.meta.dirname itself is a newer Node addition, so a very old runtime needs the fileURLToPath form.
 
 ## Cheat-card
 
-- `path.join(...)` = concatenate + normalise; `path.resolve(...)` = force absolute, right-to-left.
-- `basename` / `dirname` / `extname` / `parse` / `format` dissect and rebuild paths.
-- `path` only edits strings — it never hits the disk.
-- ESM: `import.meta.dirname` / `import.meta.filename` (no `__dirname`).
-- `os.cpus().length` sizes pools; `os.tmpdir()` for scratch; `os.platform()` for branches.
-- `new URL(str)` throws on bad input; `url.searchParams` decodes/encodes automatically.
-- Guard user paths: resolve, then check it still starts with the base dir.
-- Legacy `url.parse()` and `querystring` → use `URL` / `URLSearchParams`.
-- `os.availableParallelism()` (v19.4.0/v18.14.0) = CPUs this process may use (affinity + cgroup quota); prefer it over `os.cpus().length` for pool sizes.
-- `os.EOL` = `'\n'` (POSIX) or `'\r\n'` (Windows): use it to write; split input on `/\r?\n/`.
-- `URL.canParse(input, base)` (v19.9.0/v18.17.0) = syntax check only; `URL.parse` (v22.1.0) returns `null` on failure; check `origin`/`protocol` yourself.
-- `URLPattern`: global since v24.0.0, experimental; `:name(regex)`, `*` → group `"0"`, `{ ignoreCase: true }`.
+- path.join concatenates and normalises. path.resolve forces an absolute path, right to left.
+- basename, dirname, extname, parse, and format take paths apart and rebuild them.
+- path only edits strings. It never touches the disk.
+- In ES modules, use import.meta.dirname and import.meta.filename. There is no __dirname.
+- os.cpus().length sizes pools. os.tmpdir is scratch space. os.platform is the branch.
+- new URL throws on a bad absolute URL. searchParams decodes and encodes for you.
+- For user paths: resolve, then check the result still starts with the base directory plus the separator.
+- Prefer URL and URLSearchParams over url.parse and querystring.
+- path.sep joins segments. path.delimiter splits PATH. path.posix and path.win32 force a platform.
+
+## Good to know
+
+- Why prefer the `URL` class over `querystring` or `url.parse()`? URL and URLSearchParams implement the WHATWG standard browsers use, so parsing matches and encoding is handled. url.parse is legacy and lenient in unsafe ways. querystring is superseded by URLSearchParams.
+
+- How would you decide how many worker processes to spawn? Base it on os.cpus().length, typically one worker per logical core for CPU-bound work, rather than a hard-coded number, so it scales with the host.
+
+- import.meta.dirname and import.meta.filename need Node 20.11 or newer. Older code derives the directory from fileURLToPath(import.meta.url).
+- Additional examples: 10 Oct 2026, examples verified on Node v24.19.0.
+- os.availableParallelism() was added in v19.4.0 and v18.14.0.
+- os.EOL was added in v0.7.8. It is a newline on POSIX and a carriage return plus a newline on Windows.
+- `URL.canParse(input[, base])`: added in v19.9.0 and v18.17.0.
+- `URL.parse(input[, base])`: added in v22.1.0.
 
 ---
 
@@ -199,13 +217,11 @@ new URL('../users', 'https://api.example.com/v2/search').href;
 
 ## Additional topics
 
-*Added 10 Oct 2026 · examples verified on Node v24.19.0*
-
 ### `os.availableParallelism()` and `os.EOL`
 
-`os.availableParallelism()` (added in v19.4.0 and v18.14.0) returns an estimate of how many CPUs **this process** can use. It wraps libuv's `uv_available_parallelism()`, which on Linux counts the CPUs in the process's affinity mask and lowers that to the cgroup CPU quota if there is one. `os.cpus().length` counts the logical CPUs of the **machine**. The two differ inside a CPU-limited container or under `taskset`, and a pool sized from `cpus()` there starts more CPU-bound workers than it has CPUs. So where this lesson says to size pools with `os.cpus().length`, prefer `os.availableParallelism()`. Lesson 07's appendix, [`os.availableParallelism()` vs `os.cpus().length`](07-libuv-the-thread-pool.md), shows the affinity and cgroup cases in detail.
+`os.availableParallelism()` returns an estimate of how many CPUs **this process** can use. It wraps libuv's `uv_available_parallelism()`, which on Linux counts the CPUs in the process's affinity mask and lowers that to the cgroup CPU quota if there is one. `os.cpus().length` counts the logical CPUs of the **machine**. The two differ inside a CPU-limited container or under `taskset`, and a pool sized from `cpus()` there starts more CPU-bound workers than it has CPUs. So where this lesson says to size pools with `os.cpus().length`, prefer `os.availableParallelism()`. Lesson 07's appendix, [`os.availableParallelism()` vs `os.cpus().length`](07-libuv-the-thread-pool.md), shows the affinity and cgroup cases in detail.
 
-`os.EOL` (added in v0.7.8) is the line ending of the host OS: `'\n'` on POSIX, `'\r\n'` on Windows. It is a constant string. Node does not translate line endings for you when it reads or writes files.
+`os.EOL` is the line ending of the host OS: `'\n'` on POSIX, `'\r\n'` on Windows. It is a constant string. Node does not translate line endings for you when it reads or writes files.
 
 How it works:
 
@@ -254,7 +270,7 @@ split on /\r?\n/: [ 'id,total', '1,10', '2,20', '' ]
 
 ### `URL.canParse()`
 
-`URL.canParse(input[, base])` (added in v19.9.0 and v18.17.0) runs the same WHATWG URL parser as `new URL()` and returns `true` or `false` instead of throwing. It replaces the `try { new URL(s) } catch {}` pattern when you only need a yes/no answer. Its companion `URL.parse(input[, base])` (added in v22.1.0) returns the `URL` object, or `null` when parsing fails.
+`URL.canParse(input[, base])` runs the same WHATWG URL parser as `new URL()` and returns `true` or `false` instead of throwing. It replaces the `try { new URL(s) } catch {}` pattern when you only need a yes/no answer. Its companion `URL.parse(input[, base])` returns the `URL` object, or `null` when parsing fails.
 
 How it works:
 

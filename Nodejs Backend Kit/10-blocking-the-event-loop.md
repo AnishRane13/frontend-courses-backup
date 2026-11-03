@@ -13,52 +13,48 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Blocking the event loop means one JavaScript callback keeps running so long that Node cannot run anything else. The loop is cooperative. It does not interrupt a callback. Async I/O does not do this, because that callback returns immediately and the wait happens in the kernel or on libuv's thread pool.
+
+This is the usual way a Node service looks fine in a single test and then freezes under load. The trade-off of the single JavaScript thread is that one slow `JSON.parse`, sync hash, or tight loop delays every other request until it returns.
+
+Cooperative means the callback must return before the next one can start. Lag is how late a timer runs compared with when it was due.
+
 ## Why it matters
 
-Node's whole performance model rests on one fragile assumption: **callbacks return quickly**. The event loop is cooperative, not preemptive — it cannot interrupt a callback that is busy. So the instant one callback runs a long synchronous loop, parses a giant JSON string, or hashes a password on the main thread, *the entire process stops serving everyone else*. No other request is handled, no timer fires, no I/O completes, health checks time out, and your p99 latency detonates. One slow function can take down a server that is otherwise 99% idle.
-
-This is the number-one production failure mode for Node services, and the number-one senior-level interview probe: "your service is fast in testing but freezes under load — what happened?" The answer is almost always a blocked event loop. This topic covers what blocks it, how to keep CPU-bound work off the main thread, and how to *measure* loop lag so you catch it before customers do.
+Node's speed assumes callbacks return quickly. One long synchronous stretch stops every other request, timer, and I/O completion. Health checks time out. The tail of latency blows up. A server can be 99 percent idle and still be stuck inside one function. "Fast in a single request, frozen under load" is almost always a blocked loop.
 
 ## The concept, simply
 
-Because all your JavaScript runs on one thread, the event loop can only advance when the current callback *returns control*. A callback that takes 800ms of pure CPU means the loop is frozen for 800ms. Every request that arrives during that window waits in line; a request that would have taken 1ms now takes 801ms. The work is not lost — it is delayed — but the tail latency is catastrophic and the throughput collapses.
+All of your JavaScript runs on one thread. The loop advances only when the current callback returns. A callback that spends 800 milliseconds of CPU freezes the loop for 800 milliseconds. Work is not lost. It is delayed. A request that should have taken 1 millisecond now waits out that whole stretch.
 
 ![Two timelines: a healthy one with many small callbacks flowing, and a blocked one where a single CPU-bound handler stalls all following requests](assets/i07_01_f1d1847e.svg)
 
-A healthy loop turns constantly; one CPU-bound handler stalls every request queued behind it.
-
-The mental test is simple: **"Does this callback do a lot of work without `await`ing or returning?"** If yes, it blocks the loop for the whole duration. Asynchronous I/O (a DB query, an HTTP call, a file read) does *not* block, because it hands off and the callback returns immediately — the loop is free while the OS or thread pool does the waiting.
+The test is: does this callback do a lot of work without hitting an `await` or returning? If yes, it blocks for the whole stretch. A database call, an HTTP call, or an async file read does not block. The callback returns, and the kernel or the thread pool does the waiting.
 
 ## How it works
 
-**What actually blocks.** Anything CPU-bound and synchronous on the main thread:
+**What blocks.** A tight loop, a regex that backtracks without bound (ReDoS), a large `JSON.parse` or `JSON.stringify`, synchronous crypto such as `crypto.pbkdf2Sync` or bcrypt's sync API, `zlib.gzipSync`, and the `*Sync` file calls. `fs.readFileSync` on a large file blocks for the whole read. The async version uses the thread pool. Heavy template rendering, image or PDF work in pure JavaScript, and big sorts do the same.
 
-- **Tight loops** over large arrays; nested loops with big *n*; regex with catastrophic backtracking (ReDoS).
-- **Large `JSON.parse` / `JSON.stringify`** — these are synchronous and scale with payload size; a 50MB body can block for hundreds of milliseconds.
-- **Synchronous crypto and compression** — `crypto.pbkdf2Sync`, `bcrypt`'s sync API, `zlib.gzipSync`.
-- **The `*Sync` filesystem calls** — `fs.readFileSync` on a large file blocks the loop for the whole read, unlike the async version which uses the thread pool.
-- **Heavy template rendering, image/PDF manipulation in pure JS, big sorts.**
+**What does not.** `fs.readFile` hands the read to the pool and returns. A database driver writes to a socket and registers a callback. The loop is free until the response arrives. Blocking is your JavaScript occupying the main thread continuously. Wrapping that loop in a Promise does not move it to another thread.
 
-**Why async I/O does not block.** `fs.readFile` (async) offloads to the libuv thread pool and its callback returns instantly; the loop keeps serving others while a worker thread does the blocking read. A DB driver sends bytes over a socket (kernel-async) and registers a callback — the loop is free until the response arrives. The blocking happens only when *your JavaScript* occupies the main thread continuously.
+**How to stay responsive.**
 
-**How to keep the loop free.** There are four standard strategies:
+1. **A worker thread.** `worker_threads` is a second thread with its own V8 isolate. Run the CPU function there and post the result back.
+2. **A child process or another service.** For heavy or isolated work, spawn a process or push a job onto a queue.
+3. **Chunk and yield.** Split the work and schedule the next piece with `setImmediate`, so I/O runs between chunks. Total time goes up. The server stays responsive.
+4. **Stream.** Parse or compress incrementally so you never chew a huge buffer in one call.
 
-1. **Offload to a Worker thread.** `worker_threads` gives you a real second thread with its own V8 isolate. Run the CPU-bound function there and post the result back — the main loop never stalls. This is the right tool for genuine parallel computation (hashing, parsing, image work).
-2. **Offload to a child process or external service.** For heavyweight or isolatable work, spawn a process (`child_process`) or push the job to a queue/worker pool.
-3. **Chunk the work and yield.** Split a long computation into pieces and schedule the next piece with `setImmediate`, letting the loop service I/O between chunks. This trades total time for responsiveness.
-4. **Stream instead of buffering.** Process data incrementally (streaming JSON parsers, `zlib` streams, line-by-line readers) so you never hold — or synchronously chew through — a huge blob at once.
-
-**Measuring loop lag.** "Lag" is how late a timer fires versus when it was due; rising lag is the earliest signal the loop is falling behind.
+**Lag** is how late a timer fires versus when it was due.
 
 ![A timeline showing a timer's due time and its later actual run time, with the gap labelled as lag, and a note about monitorEventLoopDelay](assets/i07_02_3ff080ab.svg)
 
-Event loop lag is the gap between when a callback was due and when it actually ran — a direct measure of loop health.
-
-The crude way is a self-correcting timer: schedule `setTimeout(fn, N)` and measure how much later than `N` it actually fires. The precise way is `perf_hooks.monitorEventLoopDelay()`, which gives you a high-resolution histogram (mean, p50, p99, max). Watch the **tail** (p99/max), not the mean — a healthy-looking average can hide periodic multi-hundred-millisecond stalls. Alert when p99 lag crosses a budget (say, 50–100ms).
+A crude measure is a self-correcting timer: schedule `setTimeout` for N milliseconds and record how much later it ran. The precise tool is `perf_hooks.monitorEventLoopDelay()`, a histogram with mean, p50, p99, and max. Watch the tail, not the mean. A calm average can hide a stall of hundreds of milliseconds.
 
 ## Code examples
 
-**Example 1 — a blocking handler stalls the whole server.**
+**Example 1. One blocking handler stalls the server.**
 
 javascript
 
@@ -80,7 +76,8 @@ http.createServer((req, res) => {
 // for up to 2 seconds. One handler blocks all of them.
 ```
 
-**Example 2 — measuring lag with a self-correcting timer.**
+
+**Example 2. A self-correcting timer shows lag.**
 
 javascript
 
@@ -96,7 +93,8 @@ setInterval(() => {
 // If some other callback blocks for 400ms, this logs ~400ms of lag.
 ```
 
-**Example 3 — the precise way with perf\_hooks.**
+
+**Example 3. The histogram from `perf_hooks`.**
 
 javascript
 
@@ -117,7 +115,8 @@ setInterval(() => {
 // A healthy idle service shows p99 well under a few ms.
 ```
 
-**Example 4 — offloading CPU work to a Worker thread.**
+
+**Example 4. Move the CPU work to a worker thread.**
 
 javascript
 
@@ -143,59 +142,61 @@ hashOffMainThread('secret').then((hash) => console.log('hashed:', hash));
 // parentPort.postMessage(out.toString('hex'));
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Using `*Sync` APIs on the request path.** `fs.readFileSync`, `crypto.pbkdf2Sync`, `zlib.gzipSync` block the loop for their full duration — fine at startup, disastrous per-request.
-- **Parsing huge payloads synchronously.** `JSON.parse` of a multi-megabyte body is CPU-bound and blocks; use size limits and streaming parsers.
-- **Assuming `Promise` or `async` makes CPU work non-blocking.** Wrapping a synchronous loop in a promise does *not* yield the thread — it still runs to completion on the main thread and blocks.
-- **Regex backtracking (ReDoS).** A pathological pattern on attacker-controlled input can peg the loop for seconds; validate and bound input, prefer safe patterns.
-- **Watching only average lag.** The mean hides periodic stalls; alert on p99/max.
-- **Reaching for the libuv thread pool for CPU work.** The pool is for native I/O-style tasks; your own CPU-bound JS belongs in `worker_threads`.
-- **Chunking with `process.nextTick`.** That does not yield to I/O; use `setImmediate` between chunks.
+- **`*Sync` APIs on the request path.** `fs.readFileSync`, `crypto.pbkdf2Sync`, and `zlib.gzipSync` block for their full duration. Fine at startup. Bad per request.
+- **Parsing a huge body with `JSON.parse`.** It is synchronous and grows with the payload. Limit the size, or stream.
+- **A Promise does not make CPU work non-blocking.** The loop inside `.then` still runs to completion on the main thread.
+- **ReDoS.** A backtracking pattern on attacker-controlled input can peg the loop. Bound the input.
+- **Alerting on average lag.** The mean hides a periodic stall. Use p99 and max.
+- **Putting your JavaScript on the libuv pool.** That pool is for Node's native work. Your CPU-bound JavaScript belongs in `worker_threads`.
+- **Chunking with `process.nextTick`.** That does not yield to I/O. Use `setImmediate`.
 
 ## Best practices
 
-- **Keep per-callback work bounded.** Treat "how long can this callback run?" as a first-class design constraint on the request path.
-- **Offload CPU-bound work to `worker_threads`** (or a child process / job queue) — hashing, image/PDF processing, big parsing.
-- **Prefer async I/O everywhere on the hot path;** reserve `*Sync` calls for startup/CLI scripts.
-- **Stream large data** instead of buffering-then-parsing; enforce request body size limits.
-- **Chunk long loops with `setImmediate`** when offloading is overkill, so I/O still gets serviced.
-- **Instrument loop lag in production** with `monitorEventLoopDelay()`; set a p99 budget and alert on it.
-- **Load-test with concurrency,** not just single-request timing — blocking only shows up when requests compete for the one thread.
+- Treat "how long may this callback run?" as a design limit on the request path.
+- Move hashing, image or PDF work, and big parses to `worker_threads`, a child process, or a queue.
+- Use async I/O on the hot path. Keep `*Sync` for startup and CLIs.
+- Stream large data. Enforce a body size limit.
+- If you chunk a loop, yield with `setImmediate`.
+- Record loop lag in production with `monitorEventLoopDelay()`, and alert on the tail.
+- Load-test with concurrency. A single request will not show the block.
 
 ## ⭐ Interview lens
 
 > **Q: Your Node service is fast in a single-request test but freezes under load. What's the likely cause?**  
-> A blocked event loop: some handler does synchronous CPU-bound work (large `JSON.parse`, sync crypto, a tight loop, a `*Sync` call, or ReDoS). Because the loop is single-threaded and cooperative, that one busy callback delays every other request queued behind it, spiking p99 latency.
+> One handler is doing synchronous CPU work on the main thread: a large `JSON.parse`, sync crypto, a tight loop, a `*Sync` call, or a regex that backtracks. The loop cannot interrupt it, so every other request waits behind that callback and the tail of latency spikes. A single request looks fine because nothing else is waiting. The limit of the guess is a full libuv pool. Four slow `pbkdf2` or file calls can delay other pool work, but they do not freeze JavaScript the way a synchronous loop does. Check both.
 
 > **Q: Does async I/O block the event loop?**  
-> No. Async I/O offloads to the OS kernel (network) or the libuv thread pool (`fs`, crypto) and its callback returns immediately, so the loop stays free. Only synchronous CPU work — or a `*Sync` API — that runs continuously on the main thread blocks it.
+> No. Network I/O registers the socket with the kernel and returns. Async `fs` and async crypto hand the call to the libuv thread pool and return. The loop keeps running other callbacks while that wait happens. What blocks is synchronous CPU, or a `*Sync` API, that stays on the main thread until it finishes. The limit is the callback that runs when the I/O completes. If that callback then parses a huge payload synchronously, the wait was fine and the parse still blocks.
 
 > **Q: How do you run CPU-bound work without blocking the loop?**  
-> Move it off the main thread: `worker_threads` for parallel JS computation, a child process or external job queue for heavier/isolatable work, or chunk the computation and yield with `setImmediate` between pieces. Streaming avoids holding huge buffers in the first place.
+> Move it off the main thread. `worker_threads` gives you another V8 isolate for the JavaScript. A child process or a job queue fits heavier work. If the job is small, split it and schedule the next chunk with `setImmediate` so I/O runs in between. Streaming avoids holding the whole buffer at all. The limit of a brand-new worker per request is startup cost. Creating the isolate can take tens of milliseconds, so a pool of workers beats one worker per task.
 
 > **Q: Does wrapping CPU work in a Promise make it non-blocking?**  
-> No. A promise only affects *scheduling* of the callback, not *where* the code runs. A synchronous loop inside a `.then` still executes to completion on the main thread and blocks the loop just as much.
-
-> **Q: How do you measure event loop lag, and what do you watch?**  
-> Crudely, a self-correcting `setInterval` that reports how much later than expected it fired. Precisely, `perf_hooks.monitorEventLoopDelay()`, which yields a nanosecond histogram (p50/p99/max). Watch the tail (p99/max), not the mean, and alert when it exceeds a budget like 50–100ms.
-
-> **Q: Why offload to `worker_threads` rather than the libuv thread pool for CPU work?**  
-> The libuv pool is reserved for Node's native I/O-style operations (`fs`, crypto, zlib) and you cannot schedule arbitrary JavaScript on it. `worker_threads` give you a real second V8 isolate where your own CPU-bound JavaScript runs in parallel, communicating via message passing or `SharedArrayBuffer`.
+> No. A promise changes when the callback is scheduled, not which thread runs it. A synchronous loop inside `.then`, or before the first `await` in an async function, still runs to completion on the main thread and blocks the loop for the whole stretch. The limit is an `await` that people insert in the middle of the loop and expect to yield. `await` of an already resolved value only queues a microtask. It does not let timers or I/O in until that chain drains.
 
 ## Cheat-card
 
-- **Loop is cooperative:** one long callback stalls every request.
-- **Blocks:** tight loops, big `JSON.parse`, sync crypto/zlib, `*Sync` fs, ReDoS.
-- **Doesn't block:** async I/O (kernel or thread pool) — callback returns instantly.
-- **Fixes:** `worker_threads`, child process/queue, `setImmediate` chunking, streaming.
-- Promise/async does NOT move CPU work off the main thread.
-- CPU work → `worker_threads`, not the libuv pool.
-- **Measure:** `perf_hooks.monitorEventLoopDelay()`; alert on p99/max, not mean.
-- **Pool, not per-task workers:** piscina 5.3.2: `new Piscina({ filename })`, `await pool.run(task)`; set `maxThreads`, `maxQueue`, `idleTimeout`.
-- **Histogram baseline:** on v24.19.0 each `monitorEventLoopDelay` sample includes the `resolution`; subtract it. A stall before the first sample is not recorded.
-- **Profile:** `node --cpu-prof` (stable since v22.4.0) → `.cpuprofile` JSON; self time = sum of `timeDeltas` per `samples` node. 0x 6.0.0 for flame graphs.
-- **clinic.js 13.0.0:** README says not actively maintained (last release 2023-06-28); needs `NO_INSIGHT=1` when run without a TTY, or it exits 0 and does nothing.
+- The loop is cooperative. One long callback stalls every request.
+- Blocks: tight loops, big `JSON.parse`, sync crypto or zlib, `*Sync` files, ReDoS.
+- Does not block: async I/O. The callback returns at once.
+- Fixes: `worker_threads`, a child process or queue, `setImmediate` chunks, streaming.
+- A Promise does not move CPU work off the main thread.
+- Your JavaScript does not go on the libuv pool.
+- Measure with `perf_hooks.monitorEventLoopDelay()`. Alert on p99 and max, not the mean.
+
+## Good to know
+
+- Q: How do you measure event loop lag, and what do you watch? A self-correcting timer reports how late it fired. `perf_hooks.monitorEventLoopDelay()` gives a histogram. Watch p99 and max. On v24.19.0 each sample includes the `resolution` interval, so subtract it. An idle loop with `resolution: 20` showed min 19.12 ms, p50 20.25 ms, and max 21.00 ms.
+- Q: Why `worker_threads` rather than the libuv pool for CPU work? The pool is for Node's native `fs`, crypto, and zlib. You cannot schedule arbitrary JavaScript on it. A worker is another V8 isolate. Pass messages, or share memory with `SharedArrayBuffer`.
+- `new Worker` took 56 to 64 milliseconds to reach `'online'` across 5 runs on this machine. piscina 5.3.2 (`engines` node 20 or newer) keeps workers alive. Defaults from its README: `minThreads` is `os.availableParallelism()`, `maxThreads` is that times 1.5, `maxQueue: 'auto'` is `maxThreads` squared, and the default `idleTimeout` is immediate.
+- Eight CPU jobs inline: one timer more than 500 ms late. Through the pool, worst lateness under 4 ms, and the jobs finished 2 to 3.5 times sooner, including the time to start 4 workers.
+- `--cpu-prof` was added in v12.0.0 and is stable since v22.4.0 and v20.16.0. Default sample interval is 1000 microseconds. `--cpu-prof-interval` was added in v12.2.0. In the sample profile, `slowParse` had `hitCount` 114, all on line 4.
+- 0x 6.0.0 was released 2025-07-07. Its README lists Node 20 and above. The headless run wrote a 492 KB HTML flame graph.
+- clinic.js 13.0.0, last release 2023-06-28, last GitHub push 2024-09-19. The README says it is not actively maintained. Without a TTY and without `NO_INSIGHT=1` it can exit 0 and never run the script, because insight 0.11.1 returns a promise and clinic wraps it with `promisify` (`DEP0174`). `npm audit` of clinic 13.0.0 plus 0x 6.0.0 plus piscina 5.3.2 reported 24 vulnerabilities, 2 critical and 4 high, and clinic was the only direct dependency flagged.
+- A 300 ms block in the same synchronous turn as `monitorEventLoopDelay().enable()` showed max 10.1 ms (not recorded) in trial 1 and 304 ms in trial 2. `compare.js` waits 50 ms after `enable()` for that reason.
 
 ---
 
@@ -208,29 +209,25 @@ hashOffMainThread('secret').then((hash) => console.log('hashed:', hash));
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### Worker pools with piscina
 
-**What it is.** Example 4 above starts a new `Worker` for every task. That costs a fresh V8 isolate, a module load and time every time: on this machine `new Worker(...)` took 56–64 ms to reach `'online'` (5 runs). Nothing limits how many workers run at once either. A **worker pool** keeps a fixed set of `worker_threads` alive, puts incoming tasks in a queue, and hands each task to the next idle worker. **piscina** (version 5.3.2, `engines: node >=20.x`) is a widely used pool. It has three parts:
+Example 4 starts a new `Worker` per task. That pays for a fresh isolate and a module load every time, and nothing caps how many run at once. A worker pool keeps a fixed set of threads, queues tasks, and hands each task to the next idle worker. piscina is that pool. Three parts: a pool on the main thread (`new Piscina({ filename })`), a worker file whose export is the function that runs the task, and `pool.run(task)`, which structured-clones the task to an idle worker and returns a promise. If the function throws, the promise rejects.
 
-- a **pool object** on the main thread (`new Piscina({ filename })`) that owns the workers and the task queue;
-- a **worker file** whose default export (or `module.exports`) is the function that runs each task;
-- **`pool.run(task)`**, which structured-clones `task` to an idle worker and returns a promise for the function's return value. If the function throws, the promise rejects.
+Without a pool you either block the loop or pay startup on every request, with no backpressure. With a pool, the main thread only posts messages and tracks promises.
 
-**Why it exists.** Without a pool you either block the loop (inline work) or pay the worker startup cost on every request, with no backpressure. With a pool, the main thread only does `postMessage` and promise bookkeeping, so its timers and sockets keep being served while N cores do the CPU work.
+1. The constructor starts `minThreads` workers. The README defaults are in Good to know.
+2. `pool.run(task)` queues the task. When a worker is idle, piscina posts it, by default using `Atomics` to signal faster.
+3. The worker calls your function and posts the result back. piscina resolves the promise on the main thread.
+4. If every worker is busy, tasks wait. The queue is unbounded unless you set `maxQueue`. `idleTimeout` is how long an idle worker lives. Set it if workers keep exiting and starting.
+5. `pool.close()` waits for running tasks, then stops the threads. `pool.destroy()` stops them immediately and rejects queued tasks.
 
-How it works:
-
-1. The constructor starts `minThreads` workers. The README gives the defaults as `minThreads` = `os.availableParallelism()` and `maxThreads` = `os.availableParallelism() * 1.5` (see lesson 07 for why that function is used instead of `os.cpus().length`).
-2. `pool.run(task)` puts the task in the queue. When a worker is idle, piscina posts the task to it (by default using `Atomics` for faster signalling).
-3. The worker calls your exported function with the task and posts the result back. piscina resolves the promise on the main thread.
-4. If all workers are busy, tasks wait in the queue (unbounded by default; `maxQueue` caps it, and `'auto'` sets it to `maxThreads²`). `idleTimeout` controls how long an idle worker lives. The README says the default is "immediate", so set it explicitly if workers keep being torn down and restarted.
-5. `pool.close()` waits for running tasks and stops the threads. `pool.destroy()` stops them at once and rejects pending tasks.
-
-**Example — the same 8 CPU-bound jobs, inline vs piscina, with the main loop's timer lateness measured.**
+**Example. The same 8 CPU-bound jobs, inline versus piscina, with timer lateness.**
 
 javascript
 
@@ -239,6 +236,7 @@ javascript
 function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
 module.exports = (n) => fib(n);
 ```
+
 
 javascript
 
@@ -289,23 +287,22 @@ async function measure(label, work) {
 //   piscina 5.3.2 | threads: 4 | completed: 8
 ```
 
-Inline, one timer fired more than 500 ms late, so every request arriving in that half-second would have waited that long. Through the pool, the worst lateness was under 4 ms, and the jobs finished 2–3.5× sooner because four cores shared them. The pool's wall time includes starting its 4 workers.
+Inline, one timer was more than 500 milliseconds late, so every request in that half-second would have waited. Through the pool, the worst lateness was under 4 milliseconds, and the jobs finished 2 to 3.5 times sooner because four cores shared them. That wall time includes starting the 4 workers.
 
 ### Profiling CPU hotspots: `--cpu-prof`, 0x and clinic.js
 
-**What it is.** Measuring lag tells you *that* the loop is blocked. A CPU profile tells you *which function* is blocking it. V8's sampling profiler interrupts the main thread at a fixed interval (1000 µs by default), records the JavaScript stack, and builds a call tree. Functions that show up in many samples are where the time goes.
+Lag tells you that the loop blocked. A CPU profile tells you which function did it. V8's sampling profiler interrupts the main thread at a fixed interval, 1000 microseconds by default, records the JavaScript stack, and builds a call tree. Functions in many samples are where the time went.
 
-How it works:
+1. `node --cpu-prof app.js` starts the profiler at launch and writes `CPU.<date>.<time>.<pid>.<tid>.<seq>.cpuprofile` on exit. `--cpu-prof-dir` and `--cpu-prof-name` pick the path. `--cpu-prof-interval` is the sample interval in microseconds.
+2. The file is JSON: `nodes`, `startTime`, `endTime`, `samples`, and `timeDeltas`. Each node has a `callFrame` (`functionName`, `url`, 0-based `lineNumber`), a `hitCount`, `positionTicks`, and `children`. `samples[i]` is the node on top of the stack for `timeDeltas[i]` microseconds. Sum those per function for self time.
+3. Read it with a script, as below, or open it in a profile viewer.
 
-1. **`node --cpu-prof app.js`** (added in v12.0.0, stable since v22.4.0 and v20.16.0) starts the profiler at startup and writes `CPU.<date>.<time>.<pid>.<tid>.<seq>.cpuprofile` when the process exits. `--cpu-prof-dir` picks the folder, `--cpu-prof-name` the file name, and `--cpu-prof-interval` the sampling interval in µs (added in v12.2.0).
-2. The file is JSON with `nodes`, `startTime`, `endTime`, `samples` and `timeDeltas`. Each node has a `callFrame` (`functionName`, `url`, 0-based `lineNumber`), a `hitCount`, `positionTicks` (per-line hits) and `children`. `samples[i]` is the id of the node on top of the stack for `timeDeltas[i]` µs. Adding those up per function gives its **self time**.
-3. You can read the file with a script, as below, or load it into a profile viewer such as Chrome DevTools.
+> ⚠️ Unverified: loading the `.cpuprofile` into Chrome DevTools or VS Code. This session was headless. Only the JSON was parsed.
 
-> ⚠️ Unverified: loading the `.cpuprofile` into Chrome DevTools or VS Code. It was not done here (headless session); only the JSON was parsed.
-4. **0x** (version 6.0.0, released 2025-07-07; its README lists Node v20 and above) wraps your command, collects V8's tick log, and writes a self-contained **flame graph** HTML file. It works headless; it opens a browser only with `--open`.
-5. **clinic.js** (version 13.0.0) bundles `doctor` (event-loop delay, CPU and memory heuristics), `flame` (built on 0x), `bubbleprof` and `heapprofiler`. Its README now says it is **not actively maintained**. See the evidence below before you rely on it.
+4. 0x wraps your command, collects V8's tick log, and writes a flame-graph HTML file. It stays headless unless you pass `--open`.
+5. clinic.js bundles `doctor`, `flame` (built on 0x), `bubbleprof`, and `heapprofiler`. The README says it is not actively maintained.
 
-**Example — run `--cpu-prof` and read the top functions.**
+**Example. Run `--cpu-prof` and read the top functions.**
 
 javascript
 
@@ -320,6 +317,7 @@ function cheapSum(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; 
 
 console.log(slowParse(60000), cheapSum(1e6));
 ```
+
 
 javascript
 
@@ -346,6 +344,7 @@ console.log(`${prof.samples.length} samples, ${(total / 1000).toFixed(0)} ms pro
   console.log(`${(us / 1000).toFixed(1).padStart(8)} ms ${(100 * us / total).toFixed(1).padStart(5)}%  ${k}`));
 ```
 
+
 bash
 
 ```
@@ -363,9 +362,9 @@ $ node top-functions.js prof/*.cpuprofile
      2.2 ms   1.3%  compileForInternalLoader realm:383
 ```
 
-The `slowParse` node in that file was `{"functionName":"slowParse", … "lineNumber":1, …}, "hitCount":114, "positionTicks":[{"line":4,"ticks":114}]`. All 114 samples landed on line 4, the `JSON.parse(JSON.stringify(…))` line. `(program)` is time in native code outside JavaScript, and `(garbage collector)` is GC (heavy here because each round trip allocates new objects). Sample counts and milliseconds change from run to run, and so does the order of the small entries (`(program)` and `(garbage collector)` swapped between two runs). `slowParse` was first by a wide margin every time.
+The `slowParse` node was `hitCount` 114, and all 114 `positionTicks` were on line 4, the `JSON.parse(JSON.stringify(...))` line. `(program)` is native code outside JavaScript. `(garbage collector)` is GC, heavy here because each round allocates. Sample counts move between runs, and the small entries swapped order once. `slowParse` was first by a wide margin every time.
 
-**Example — 0x flame graph, headless.**
+**Example. A 0x flame graph, headless.**
 
 bash
 
@@ -383,11 +382,11 @@ isolate-0x1a308000-114654-114654-v8.log.preprocess-ready
 meta.json
 ```
 
-(The terminal control codes 0x uses to redraw its status line were removed from this output. The `isolate-…-v8.log` file is V8's tick log, which 0x turns into stacks. On this machine `/tmp` is mounted `noexec`, so the `0x` bin shim could not run directly and `node node_modules/0x/cmd.js` was used. `npx 0x` works where scripts can execute.) The 492 KB HTML file includes the `slowParse` frames. In the graph, width is the share of samples, so the widest bar near the top of the stacks is your hotspot.
+Terminal control codes 0x uses to redraw its status line were removed from this output. The `isolate-…-v8.log` file is V8's tick log. On this machine `/tmp` is mounted `noexec`, so the `0x` bin shim could not run directly and `node node_modules/0x/cmd.js` was used. `npx 0x` works where scripts can execute. The HTML file includes the `slowParse` frames. Width is the share of samples. The widest bar near the top of the stacks is the hotspot.
 
-> ⚠️ Unverified: what the flame graph looks like on screen. The HTML file was generated and grepped for `slowParse`, but it was not opened in a browser (headless session).
+> ⚠️ Unverified: what the flame graph looks like on screen. The HTML was generated and searched for `slowParse`. It was not opened in a browser.
 
-**Example — clinic.js: maintenance status and what happens on Node 24.**
+**Example. clinic.js on Node 24, and whether it is maintained.**
 
 javascript
 
@@ -399,6 +398,7 @@ const end = Date.now() + 3000;
   if (Date.now() < end) setTimeout(round, 5);
 })();
 ```
+
 
 bash
 
@@ -424,29 +424,29 @@ $ grep -o '"issues":{"delay":"[a-z]*","cpu":"[a-z]*"' .clinic/*.clinic-doctor.ht
 "issues":{"delay":"performance","cpu":"performance"
 ```
 
-What the evidence shows (checked 7 Oct 2026):
+Checked 7 Oct 2026. The last release, 13.0.0, was 2023-06-28. A 2026 `time.modified` value is registry metadata, not a release. The GitHub repo clinicjs/node-clinic is not archived. Its last push was 2024-09-19. The README says Clinic.js is not being actively maintained, and that because it is tied to Node internals it may not work or the results may not be accurate.
 
-- **Releases:** the last release, 13.0.0, came out on 2023-06-28. The 2026 `time.modified` value is registry metadata, not a release. The GitHub repo (clinicjs/node-clinic) is not archived, but its last push was 2024-09-19.
-- **README:** "Clinic.js is not being actively maintained. Due to its strong ties to Node.js internals, it may not work or the results you get may not be accurate."
-- **First run with a fresh `HOME`:** without a TTY, the anonymous-usage prompt is the problem. clinic wraps `insight.askPermission` in `promisify`, but insight 0.11.1's `askPermission` returns a promise and never calls a callback (that is the `DEP0174` warning). So the wrapped promise never settles, the loop runs empty, and clinic **exits 0 without running your script**. Setting `NO_INSIGHT=1`, an environment variable checked in clinic's `bin.js`, skips the prompt.
-- **With `NO_INSIGHT=1`:** `clinic doctor` and `clinic flame` both produced HTML reports on Node v24.19.0, and doctor flagged event-loop delay and CPU. A shorter script (`hot.js`, about 150 ms) instead gave "Profile data collected seems to be empty, report may not be generated".
-- **Dependencies:** `npm audit` in a project with clinic 13.0.0, 0x 6.0.0 and piscina 5.3.2 reported 24 vulnerabilities (2 critical, 4 high). `clinic` was the only direct dependency flagged, through packages such as `request`, `form-data`, `tmp` and `d3-color`.
+On a fresh `HOME` with no TTY, the anonymous-usage prompt hangs. clinic wraps `insight.askPermission` in `promisify`, but insight 0.11.1's `askPermission` returns a promise and never calls a callback (`DEP0174`). The wrapped promise never settles, the loop goes empty, and clinic exits 0 without running your script. `NO_INSIGHT=1` is checked in clinic's `bin.js` and skips the prompt.
 
-**Recommendation.** Use `--cpu-prof` first: it is built in, stable and scriptable. Use 0x when you want a flame graph. Treat clinic as optional: install it only in a throwaway or dev-only setting, run it with `NO_INSIGHT=1`, and check its findings against `--cpu-prof` or `monitorEventLoopDelay`.
+With `NO_INSIGHT=1`, `clinic doctor` and `clinic flame` both wrote HTML on Node v24.19.0, and doctor flagged event-loop delay and CPU. A shorter script, `hot.js`, about 150 milliseconds, instead said the profile data looked empty and the report might not be generated.
+
+`npm audit` in a project with those three packages reported 24 vulnerabilities, 2 critical and 4 high. clinic was the only direct dependency flagged, through packages such as `request`, `form-data`, `tmp`, and `d3-color`.
+
+Use `--cpu-prof` first. It is built in and scriptable. Use 0x when you want the flame graph. Treat clinic as optional, dev-only, with `NO_INSIGHT=1`, and check it against `--cpu-prof` or `monitorEventLoopDelay`.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **Starting a `new Worker` per request.** Each one costs isolate startup and nothing limits the count. Use a pool (piscina) and size it from `os.availableParallelism()`.
-- **Sending huge objects to workers.** `pool.run(task)` structured-clones `task`, and the clone runs on the main thread. Pass `transferList` for `ArrayBuffer`s, or send a file path or id instead of the data.
-- **Moving async I/O into workers.** The piscina README notes that `fs`, crypto and zlib are already parallel through libuv. Workers help with *synchronous JavaScript* CPU work.
-- **Leaving the queue unbounded.** With the default `maxQueue`, a traffic spike queues tasks in memory without limit. Set `maxQueue` and reject or shed load when `pool.queueSize` is high.
-- **Reading `monitorEventLoopDelay` values as pure lateness.** On v24.19.0 every sample includes the `resolution` interval: an idle loop with `resolution: 20` showed min 19.12 ms, p50 20.25 ms and max 21.00 ms. Subtract the resolution, or compare with the idle baseline.
-- **Trusting a profile of a 100 ms script.** At 1 sample/ms that is about 100 samples. Profile long enough (or under load) to get thousands.
-- **Running clinic in CI without `NO_INSIGHT=1`.** On a fresh `HOME` it exits 0 and does nothing, so the step "passes".
+- **A new `Worker` per request.** You pay isolate startup, and nothing limits the count. Use a pool sized from `os.availableParallelism()`.
+- **Sending a huge object to a worker.** `pool.run(task)` structured-clones `task` on the main thread. Pass a `transferList` for `ArrayBuffer`s, or send a path or an id.
+- **Moving async I/O into workers.** `fs`, crypto, and zlib are already parallel through libuv. Workers help with synchronous JavaScript.
+- **An unbounded queue.** The default `maxQueue` will hold a traffic spike in memory with no limit. Set `maxQueue` and shed load when `pool.queueSize` is high.
+- **Reading `monitorEventLoopDelay` as pure lateness.** On v24.19.0 every sample includes the `resolution`. Subtract it, or compare with an idle baseline. The idle numbers are in Good to know.
+- **Profiling a 100 millisecond script.** At 1 sample per millisecond that is about 100 samples. Profile long enough, or under load, to get thousands.
+- **clinic in CI without `NO_INSIGHT=1`.** On a fresh `HOME` it exits 0 and does nothing, so the step looks green.
 
 ### Edge case worked through: a stall right after `enable()` is invisible
 
-`monitorEventLoopDelay()` samples with a libuv timer. A stall that starts in the same synchronous run as `h.enable()`, before the histogram's timer has fired once, is **not recorded at all**:
+`monitorEventLoopDelay()` samples with a libuv timer. A stall that starts in the same synchronous run as `h.enable()`, before that timer has fired once, is not recorded.
 
 javascript
 
@@ -481,12 +481,12 @@ setTimeout(() => {
 //   block 50 ms after enable()     samples=14 min=10.1ms max=304.3ms
 ```
 
-The same 300 ms block shows as max 10.1 ms (that is, nothing) in trial 1 and as 304 ms in trial 2. This is why `compare.js` waits 50 ms after `enable()`. It also means a monitor enabled in the same tick as a slow synchronous startup step (loading config, building a cache) will not report that step. Measure startup separately, for example with `performance.now()` around it or with `--cpu-prof`.
+The same 300 millisecond block shows as max 10.1 milliseconds in trial 1 and as 304 milliseconds in trial 2. That is why `compare.js` waits 50 milliseconds after `enable()`. A monitor enabled in the same turn as a slow startup step will not report that step. Time startup with `performance.now()`, or use `--cpu-prof`.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “You moved a CPU-heavy function into `worker_threads` and p99 got better but throughput got worse. What would you check?”**  
-> A: Check whether a worker is started per task. Isolate startup adds tens of ms per call (about 60 ms measured here), so use a pool such as piscina with a fixed `maxThreads` and a set `idleTimeout`. Check how much data is cloned per task (the clone happens on the main thread). And check that the pool is not larger than `os.availableParallelism()`, so threads are not fighting over the cgroup's CPU quota. Measure loop delay and the pool's `waitTime`/`runTime` before and after.
+> Check whether you start a worker per task. Isolate startup was about 60 milliseconds here, so a pool with a fixed `maxThreads` and an explicit `idleTimeout` is the fix. Check how much data you clone per task. The clone runs on the main thread. And check that the pool is not larger than `os.availableParallelism()`, or the threads fight over the cgroup quota. Compare loop delay and the pool's `waitTime` and `runTime` before and after. The limit is assuming "off the main thread" is free. Startup and cloning can cost more than the CPU work you moved.
 
 > **Q: “How do you find what is blocking the event loop in production-like conditions?”**  
-> A: First confirm it with `monitorEventLoopDelay` (p99/max, minus the resolution) or ELU. Then capture a CPU profile under load with `node --cpu-prof` (or the inspector) and rank functions by self time, using the `samples`/`timeDeltas` arrays or DevTools. Use 0x for a flame graph. clinic.js still runs on Node 24 with `NO_INSIGHT=1`, but it has been unmaintained since 2023, so check what it finds with the built-in tools.
+> First confirm the stall with `monitorEventLoopDelay`, p99 and max, minus the resolution, or with event-loop utilization. Then take a CPU profile under load with `node --cpu-prof` and rank functions by self time from `samples` and `timeDeltas`. 0x turns that into a flame graph. clinic.js still runs on Node 24 with `NO_INSIGHT=1`, but it has been unmaintained since 2023, so check whatever it reports against the built-in tools. The limit is a profile of a tiny script. A hundred samples will not show a rare stall. Profile under the load that reproduces it.

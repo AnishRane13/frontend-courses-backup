@@ -13,28 +13,34 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+AbortController and AbortSignal are a pair of objects for cancellation: the controller is the only one that can call abort, and the signal is the read-only object you pass into fetch, file reads, timers, and other async APIs so they can stop themselves. They exist because a promise has no cancel method, so a closed browser tab or a deadline would otherwise leave the work running. The trade-off is that abort only stops work that is still pending, and the error you get is not the same shape for fetch as it is for Node's own APIs.
+
 ## Why it matters
 
-A promise has no `cancel()` method. Once you call `fetch()`, start a `readFile()` or spawn a child process, the work runs until it finishes on its own, even if nobody wants the result any more. Lesson 18 makes the same point about `Promise.race` and `Promise.all`: the losing branches keep running.
+A promise has no cancel method. Once you call fetch, start a readFile, or spawn a child process, the work runs until it finishes, even if nobody wants the result. Lesson 18 makes the same point about Promise.race and Promise.all: the losing branches keep running.
 
-On a server that costs real resources. A user closes the browser tab, but your handler still runs five database queries, holds a pooled connection, and builds a response that is written to a dead socket. A request to a slow upstream service has no deadline, so one stuck dependency piles up open sockets until the process runs out of file descriptors. During shutdown, timers and child processes that nobody can stop keep the process alive past the orchestrator's grace period.
+On a server that wastes real resources. The user closes the tab, but the handler still runs five database queries, holds a pooled connection, and writes a response to a dead socket. A call with no deadline piles up open sockets until the process runs out of file descriptors. During shutdown, timers and child processes that nobody can stop keep the process alive past the grace period.
 
-Node's answer is one standard object pair, `AbortController` and `AbortSignal`, taken from the web platform (the WHATWG DOM spec). Almost every async API in Node core accepts the signal as an option: `fetch`, `http.request`, `fs/promises`, `timers/promises`, `events.once`, `stream.pipeline`, `child_process`. Learn the pattern once and you can cancel all of them the same way.
+Node's answer is one pair of objects, AbortController and AbortSignal, taken from the web platform, the WHATWG DOM spec. WHATWG is the group that writes the living standards browsers follow. Almost every async API in Node core accepts the signal as an option: fetch, http.request, fs and fs/promises, timers/promises, events.once, stream.pipeline, and child_process. Learn the pattern once and you cancel all of them the same way.
 
 ## The concept, simply
 
-Cancellation is split into two objects so that the code that *decides* to cancel is separate from the code that *does* the work.
+Cancellation is split in two so the code that decides to cancel is separate from the code that does the work.
 
-- **`AbortController`** is the trigger. It has one property, `signal`, and one method, `abort(reason)`. Whoever holds the controller can cancel.
-- **`AbortSignal`** is the read-only half you pass to the operations. It is an `EventTarget` with:
-  - `signal.aborted`: `false` until `abort()` is called, then `true` forever;
-  - `signal.reason`: `undefined` until abort, then the value passed to `abort(reason)`, or a `DOMException` named `AbortError` if no reason was given;
-  - `signal.throwIfAborted()`: throws `signal.reason` if the signal is aborted, otherwise does nothing (added in v17.3.0);
-  - an `'abort'` event, dispatched once, synchronously inside the `abort()` call.
+AbortController is the trigger. It has one property, signal, and one method, abort(reason). Whoever holds the controller can cancel.
 
-A signal goes from "not aborted" to "aborted" once and never goes back. A second `abort()` call does nothing. Two static helpers create signals with no controller: `AbortSignal.timeout(ms)` aborts itself after `ms` milliseconds (added in v17.3.0), and `AbortSignal.any([s1, s2])` aborts as soon as any input signal aborts (added in v20.3.0). `AbortSignal.abort(reason)` returns a signal that is already aborted (added in v15.12.0). `AbortController` itself was added in v15.0.0 and stopped being experimental in v15.4.0. The optional `reason` argument was added in v17.2.0.
+AbortSignal is the read-only half you pass to the operations. It is an EventTarget, an object you can listen on. It has:
 
-Because a signal is a plain object, one controller can be passed to many operations at once. One `abort()` call stops all of them:
+- aborted, which is false until abort is called and then true forever.
+- reason, which is undefined until abort, then the value you passed, or a DOMException named AbortError if you passed no reason.
+- throwIfAborted, which throws signal.reason if the signal is already aborted, and otherwise does nothing.
+- an abort event, dispatched once, synchronously inside the abort call.
+
+A signal goes from not aborted to aborted once and never goes back. A second abort call does nothing. Three static helpers create signals with no controller of your own. AbortSignal.timeout(ms) aborts itself after that many milliseconds. AbortSignal.any takes several signals and aborts as soon as any of them aborts. AbortSignal.abort(reason) returns a signal that is already aborted.
+
+Because a signal is a plain object, one controller can be passed to many operations. One abort call stops all of them.
 
 text
 
@@ -55,23 +61,23 @@ text
 
 ## How it works
 
-1. **You create a controller** and pass `controller.signal` to one or more operations, usually as `{ signal }` in their options object.
-2. **Each operation checks the signal when it starts.** If `signal.aborted` is already `true`, it fails right away without doing any I/O. If not, it registers an `'abort'` listener on the signal.
-3. **Something calls `controller.abort(reason)`**: a user action, a deadline (`AbortSignal.timeout`), a client disconnect, or a shutdown hook. The signal sets `aborted = true`, stores `reason`, and dispatches `'abort'` to its listeners before `abort()` returns.
-4. **Each listener stops its own work.** `fetch` and `http.request` destroy the socket. `fs/promises.readFile` stops between chunk reads. `timers/promises.setTimeout` clears its timer. `pipeline` destroys every stream in the chain. `spawn` sends the child `killSignal` (default `'SIGTERM'`).
-5. **The operation reports the abort as an error.** A promise rejects, a callback receives an `err`, or an emitter emits `'error'`. The error's shape depends on the API (see below).
-6. **Operations that already finished are not affected.** Abort only stops work that is still pending. A well-written operation also removes its `'abort'` listener when it finishes normally, so a long-lived signal does not collect listeners.
+1. You create a controller and pass controller.signal into one or more operations, usually as signal in their options object.
+2. Each operation checks the signal when it starts. If aborted is already true, it fails immediately and does no I/O. I/O means input and output. If not, it registers an abort listener.
+3. Something calls abort(reason): a user action, a deadline from AbortSignal.timeout, a client disconnect, or a shutdown hook. The signal sets aborted to true, stores the reason, and dispatches abort to its listeners before abort returns.
+4. Each listener stops its own work. fetch and http.request destroy the socket. fs/promises.readFile stops between chunk reads. timers/promises.setTimeout clears its timer. pipeline destroys every stream in the chain. spawn sends the child its killSignal, which defaults to SIGTERM.
+5. The operation reports the abort as an error. A promise rejects, a callback receives an err, or an emitter emits error. The shape depends on the API.
+6. Work that has already finished is not affected. Abort only stops work that is still pending. A careful operation also removes its abort listener when it finishes normally, so a long-lived signal does not collect listeners.
 
-**The error you get depends on the API.** This is the most common source of confusion. On Node v24.19.0:
+The error you get depends on the API. On Node v24.19.0:
 
-- **`fetch`** (built on undici 7.29.0) rejects with **`signal.reason` itself**. With no reason that is a `DOMException` with `name === 'AbortError'` and numeric `code === 20`. With `AbortSignal.timeout` it is a `DOMException` with `name === 'TimeoutError'` and `code === 23`. With `abort(new Error('x'))` it is your `Error`. With `abort('text')` it is the string.
-- **Node core APIs** (`timers/promises`, `fs/promises`, `fs` callbacks, `events.once`, `stream.pipeline`, `http.request`, `child_process`) reject with **Node's own `AbortError`**: `err.name === 'AbortError'`, `err.code === 'ABORT_ERR'` (a string), `err instanceof Error` is `true`, `err instanceof DOMException` is `false`, and `err.cause` holds `signal.reason`. This holds even for `AbortSignal.timeout`, so these APIs never give you `'TimeoutError'` as `err.name`; you find it in `err.cause.name`.
+- fetch, built on undici 7.29.0, rejects with signal.reason itself. With no reason that is a DOMException named AbortError with numeric code 20. With AbortSignal.timeout it is a DOMException named TimeoutError with code 23. With abort(new Error('x')) it is your Error. With abort('text') it is the string.
+- Node core APIs, meaning timers/promises, fs/promises, fs callbacks, events.once, stream.pipeline, http.request, and child_process, reject with Node's own AbortError. err.name is AbortError, err.code is the string ABORT_ERR, it is an Error and not a DOMException, and err.cause holds signal.reason. This holds even for AbortSignal.timeout, so these APIs never put TimeoutError in err.name. You find it on err.cause.name.
 
-So the reliable test "was this an abort?" is not `err.name`. It is `signal.aborted`, checked on the signal you passed. `signal.reason` then tells you *why*.
+So the reliable test "was this an abort?" is not err.name. It is signal.aborted on the signal you passed. signal.reason then tells you why.
 
-**Listener cleanup.** An `AbortSignal` is an `EventTarget`, so listeners stay attached until they run or are removed. A signal that lives for the whole process (a shutdown signal, for example) and is passed to thousands of short operations will hold a closure for each one unless each operation removes its listener when it finishes. `{ once: true }` removes the listener after it runs, but it does not remove a listener that never runs. You still need `removeEventListener` on the success path, or `events.addAbortListener(signal, listener)` (added in v20.5.0, stable since v24.0.0), which returns a `Disposable` whose `[Symbol.dispose]()` removes the listener.
+Listener cleanup. An AbortSignal is an EventTarget, so listeners stay until they run or you remove them. A signal that lives for the whole process, such as a shutdown signal, and is passed to thousands of short operations, will hold a closure for each one unless each operation removes its listener when it finishes. once: true removes the listener after it runs. It does not remove a listener that never runs. You still need removeEventListener on the success path, or events.addAbortListener, which returns a Disposable whose Symbol.dispose removes the listener. A Disposable is an object with a dispose method you can call, including with the using syntax.
 
-**Detecting a client disconnect in Express.** On Express 5.2.1 with Node v24.19.0, listen to `res.on('close')` and check `res.writableEnded`. `'close'` on the response fires both when the response finished and when the connection died first. `res.writableEnded` is `true` only if your code called `res.end()` (which `res.send`/`res.json` do), so `!res.writableEnded` inside the handler means "the client left before we answered". Do not use `req.on('close')`: the request stream (`http.IncomingMessage`) emits `'close'` when the request has been completed, meaning its *body* has been consumed, not when the socket closes (changed in v16.0.0). So after `express.json()` reads a POST body it fires right away, while the client is still waiting (Example 9 shows this).
+Detecting a client disconnect in Express. On Express 5.2.1 with Node v24.19.0, listen to res.on('close') and check res.writableEnded. close on the response fires both when the response finished and when the connection died first. writableEnded is true only if your code called res.end, which res.send and res.json do. So not writableEnded inside that handler means the client left before you answered. Do not use req.on('close'). The request stream, an http.IncomingMessage, emits close when the request body has been consumed, not when the socket closes. After express.json reads a POST body it fires right away, while the client is still waiting.
 
 ## Code examples
 
@@ -584,55 +590,63 @@ for (const reason of [undefined, 'timeout!', null, 0, new Error('real error')]) 
 
 ## Common mistakes & gotchas
 
-- **Testing `err.name === 'AbortError'` to detect cancellation.** It works for Node core APIs, but `fetch` rejects with the reason itself, so after `abort(new Error('x'))` the name is `'Error'`, and after `AbortSignal.timeout` it is `'TimeoutError'`. Check `signal.aborted` on the signal you passed instead.
-- **Expecting `err.code` to be the same everywhere.** Node's `AbortError` has `code === 'ABORT_ERR'` (a string). A `DOMException` has a legacy numeric `code`: `20` for `AbortError`, `23` for `TimeoutError`.
-- **Expecting `TimeoutError` from core APIs.** With `AbortSignal.timeout`, `timers/promises`, `fs/promises`, `events.once`, `pipeline`, `http.request` and `child_process` all reject with `name === 'AbortError'`. The `TimeoutError` is in `err.cause`.
-- **Aborting with a string or `null`.** `abort('stop')` stores a string as the reason. `fetch` rejects with that string, which has no stack and no `.message`. Pass an `Error` (or nothing).
-- **Adding an `'abort'` listener to a signal that is already aborted.** `'abort'` is dispatched once. A listener added afterwards never runs, so the operation hangs forever. Check `signal.aborted` (or call `signal.throwIfAborted()`) first, or use `events.addAbortListener`, which calls the listener for an already-aborted signal.
-- **Forgetting to remove the listener on success.** `{ once: true }` only removes a listener after it runs. On a long-lived signal, listeners from finished operations accumulate with no warning (Example 6).
-- **Using `req.on('close')` in Express to detect a disconnect.** It fires once the request body has been read, which for a POST is before you respond. Use `res.on('close')` with `!res.writableEnded`.
-- **Waiting with `events.once(req, 'close')` on an aborted request.** `events.once` rejects on `'error'`, and an aborted `http.request` emits `'error'` before `'close'`.
-- **Assuming abort undoes work.** Abort stops pending I/O. A database write the server already committed stays committed. Cancellation saves resources; it is not a rollback.
+- err.name === 'AbortError' works for Node core APIs, but fetch rejects with the reason itself. After abort(new Error('x')) the name is Error, and after AbortSignal.timeout it is TimeoutError. Check signal.aborted on the signal you passed.
+- err.code is not the same everywhere. Node's AbortError has the string ABORT_ERR. A DOMException has a legacy numeric code: 20 for AbortError, 23 for TimeoutError.
+- With AbortSignal.timeout, timers/promises, fs/promises, events.once, pipeline, http.request, and child_process all reject with name AbortError. The TimeoutError is on err.cause.
+- abort('stop') stores a string. fetch rejects with that string, which has no stack and no message. Pass an Error, or pass nothing.
+- An abort listener added after the signal is already aborted never runs, because the event is dispatched once. The operation then hangs. Check signal.aborted or call throwIfAborted first, or use events.addAbortListener, which calls the listener for an already-aborted signal.
+- once: true only removes a listener after it runs. On a long-lived signal, listeners from finished operations pile up.
+- req.on('close') in Express fires once the request body has been read, which for a POST is before you respond. Use res.on('close') with not writableEnded.
+- events.once(req, 'close') on an aborted request rejects, because events.once rejects on error, and an aborted http.request emits error before close.
+- Abort stops pending I/O. A database write the server already committed stays committed. Cancellation is not a rollback.
 
 ## Best practices
 
-- **Accept `{ signal }` in every async function you write** that does I/O or waits, and pass it down to every call inside. A signal that stops at the first layer cancels nothing below it.
-- **Use `AbortSignal.timeout(ms)` for deadlines** instead of racing against a hand-made timer. It aborts the underlying work, and its timer does not keep the process alive.
-- **Combine reasons with `AbortSignal.any`**: a request deadline plus a client-disconnect signal plus a process-shutdown signal, passed as one signal.
-- **Abort with an `Error` that says why** (`new Error('client disconnected')`), so logs and `err.cause` carry a message and a stack.
-- **Decide "cancelled or failed?" with `signal.aborted`**, then read `signal.reason` for the cause. Do not log a cancellation as a server error.
-- **Clean up listeners** with `removeEventListener` on the success path, or with the `Disposable` from `events.addAbortListener`.
-- **Abort the losers after `Promise.race` / `Promise.any`** in a `finally` block, with one controller shared by all branches.
+- Accept signal in every async function you write that does I/O or waits, and pass it down. A signal that stops at the first layer cancels nothing below it.
+- Use AbortSignal.timeout for deadlines instead of racing a hand-made timer. It aborts the underlying work, and its timer does not keep the process alive.
+- Combine reasons with AbortSignal.any: a deadline, a client disconnect, and a shutdown signal, passed as one signal.
+- Abort with an Error that says why, so logs and err.cause carry a message and a stack.
+- Decide cancelled or failed with signal.aborted, then read signal.reason. Do not log a cancellation as a server error.
+- Remove listeners on the success path, or use the Disposable from events.addAbortListener.
+- After Promise.race or Promise.any, abort the shared controller in finally so the losers stop.
 
 ## ⭐ Interview lens
 
 > **Q: “Why are there two objects, `AbortController` and `AbortSignal`, instead of one?”**  
-> A: They separate the right to cancel from the ability to observe cancellation. The controller has `abort()`; the signal only has `aborted`, `reason`, `throwIfAborted()` and the `'abort'` event. You give the signal to any number of operations and keep the controller, so a library you pass the signal to cannot cancel your other work. *Trap:* the signal is read-only; there is no `signal.abort()` instance method (only the static `AbortSignal.abort()` factory).
+> They split the right to cancel from the ability to watch cancellation. The controller has abort. The signal only has aborted, reason, throwIfAborted, and the abort event. You pass the signal to any number of operations and you keep the controller, so a library that receives the signal cannot cancel your other work. There is no signal.abort instance method. AbortSignal.abort is a separate factory that returns an already-aborted signal. For example, a request handler creates one controller, passes its signal into the database call and the upstream fetch, and calls abort when the client leaves. The limit is that the signal is cooperative. An API that never reads the signal will not stop, and abort does not undo work that already finished.
 
 > **Q: “How do you put a 2-second deadline on a `fetch` and also let the user cancel it?”**  
-> A: `fetch(url, { signal: AbortSignal.any([userController.signal, AbortSignal.timeout(2000)]) })`. `any` aborts when either input aborts and copies that input's reason, so a `TimeoutError` `DOMException` tells you it was the deadline and your own reason tells you it was the user.
+> Pass one signal built with AbortSignal.any of two inputs: the user's controller.signal, and AbortSignal.timeout(2000). fetch(url, { signal: that }) aborts when either input aborts, and any copies that input's reason onto the combined signal. A TimeoutError DOMException means the deadline won. Your own Error means the user cancelled. fetch rejects with that reason itself, not with a wrapper. The limit is the shape if you use a Node core API instead of fetch. timers or fs reject with Node's AbortError and put the reason on err.cause, so the same deadline shows up as name AbortError with cause.name TimeoutError.
 
 > **Q: “A client closes the browser tab during a slow Express 5 request. How does the handler find out?”**  
-> A: `res.on('close', () => { if (!res.writableEnded) controller.abort(...) })`, with the controller's signal passed to every slow call in the handler. `req.on('close')` is wrong: it fires once the request body is consumed, which for a POST is before the response. *Trap:* `'close'` on `res` also fires after a normal response, so the `writableEnded` check is required.
+> Listen on the response, not the request. res.on('close', () => { if (!res.writableEnded) controller.abort(...) }), and pass that controller's signal into every slow call in the handler. close on the response fires both when you finished the response and when the connection died first. writableEnded is true only after your code ended the response, so the check tells those apart. req.on('close') is the wrong event: on the incoming message it means the body has been consumed, which for a POST is before you respond. The limit is that abort does not roll back a write you already committed. It only stops work that is still pending.
 
 > **Q: “`Promise.race` returned the fastest of three requests. What happens to the other two?”**  
-> A: They keep running; promises cannot be cancelled. To stop them, pass one shared signal to all three and call `controller.abort()` in a `finally` after the race settles. The loser requests then close their sockets and reject, and `race` has already attached handlers, so no unhandled rejection appears.
-
-> **Q: “What does `timers/promises` reject with when you abort it with `new Error('stop')`?”**  
-> A: Node's `AbortError`: `name 'AbortError'`, `code 'ABORT_ERR'`, an `Error` but not a `DOMException`, with your `Error` in `err.cause`. `fetch` with the same signal would reject with your `Error` itself.
+> They keep running. A promise cannot be cancelled, and race only chooses which result you observe. To stop the losers, pass one shared signal into all three requests and call controller.abort in a finally after the race settles. The losers then close their sockets and reject. race has already attached handlers, so those rejections are not unhandled. The limit is any API that ignores the signal. Aborting the controller does nothing for a call you forgot to pass the signal into, and it does not undo a side effect that already happened.
 
 ## Cheat-card
 
-- **Create:** `const ac = new AbortController(); op({ signal: ac.signal }); ac.abort(new Error('why'));`
-- **Signal state:** `aborted` (bool, one-way), `reason` (any; default `DOMException` `AbortError`), `throwIfAborted()`, `'abort'` event fired synchronously inside `abort()`.
-- **Factories:** `AbortSignal.timeout(ms)` (v17.3.0, `TimeoutError`, does not hold the process open), `AbortSignal.any([...])` (v20.3.0), `AbortSignal.abort(reason)` (already aborted).
-- **Core APIs with `{ signal }`:** `fetch`, `http.request`, `fs.readFile` / `fs/promises`, `timers/promises`, `events.once`, `stream.pipeline`, `spawn` / `exec` / `execFile` / `fork`.
-- **Errors:** `fetch` → `signal.reason` as is. Node core → `AbortError`, `code 'ABORT_ERR'`, reason in `err.cause`.
-- **Detect cancel:** `signal.aborted`, not `err.name`.
-- **Own functions:** check first → work → on abort undo + `reject(signal.reason)` → on success remove the listener.
-- **Already aborted:** `addEventListener('abort')` never fires; `events.addAbortListener` (v20.5.0, stable v24.0.0) does.
-- **Express disconnect:** `res.on('close')` + `!res.writableEnded`; not `req.on('close')`.
-- **Race:** abort the shared controller in `finally` to stop the losers.
+- Create a controller, pass its signal, and call abort with an Error that says why.
+- aborted flips once and stays true. reason defaults to a DOMException named AbortError. abort fires synchronously inside abort().
+- Factories: AbortSignal.timeout(ms), AbortSignal.any of several signals, and AbortSignal.abort for an already-aborted signal.
+- Core options that take signal: fetch, http.request, fs.readFile and fs/promises, timers/promises, events.once, stream.pipeline, and spawn, exec, execFile, and fork.
+- fetch rejects with signal.reason as it is. Node core rejects with AbortError, code ABORT_ERR, and the reason on err.cause.
+- Detect a cancel with signal.aborted, not with err.name.
+- In your own function: check first, do the work, on abort undo and reject with signal.reason, and on success remove the listener.
+- Express disconnect: res close, and only abort when writableEnded is false. Not req close.
+- After a race, abort the shared controller in finally.
+
+## Good to know
+
+- “What does `timers/promises` reject with when you abort it with `new Error('stop')`?” Node's AbortError: name AbortError, code ABORT_ERR, an Error but not a DOMException, with your Error on err.cause. fetch with the same signal rejects with your Error itself.
+
+- AbortController was added in v15.0.0 and stopped being experimental in v15.4.0.
+- The optional reason argument to abort was added in v17.2.0.
+- AbortSignal.throwIfAborted and AbortSignal.timeout were added in v17.3.0.
+- AbortSignal.abort, which returns an already-aborted signal, was added in v15.12.0.
+- AbortSignal.any was added in v20.3.0.
+- events.addAbortListener was added in v20.5.0 and is stable since v24.0.0.
+- req close meaning "the body has been consumed" is the behaviour since v16.0.0.
 
 ---
 

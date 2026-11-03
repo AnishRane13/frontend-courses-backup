@@ -13,46 +13,43 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A callback is a function you hand to Node now so Node can run it later, after slow work such as a file read finishes, instead of freezing the one JavaScript thread while it waits. Node does this so that one thread can keep serving other connections: it starts the slow job, returns immediately, and runs your function on a later turn of the event loop, the loop that runs queued work once the current stack of calls is empty. The trade-off is that the callback runs on a fresh empty stack, so a thrown error cannot reach the caller, and several steps that depend on each other end up nested.
+
 ## Why it matters
 
-Node.js is single-threaded for your JavaScript, yet it powers servers that juggle thousands of simultaneous connections. It pulls that off by never blocking the one thread on slow work — reading a file, querying a database, calling another service. Instead of freezing until the result is ready, Node takes a function from you, walks away to do the slow work elsewhere, and calls your function back when the answer arrives. That function is a **callback**, and it is the original, foundational async pattern in Node. Promises and `async/await` are built on top of it.
+Node runs your JavaScript on one thread and still serves many connections, because it does not wait on slow work. You pass a function. Node starts the file read, the database query, or the call to another service, and runs that function when the answer is ready. That function is a callback. Promises and async/await sit on top of this pattern.
 
-You cannot really understand Node without understanding callbacks. Every higher-level abstraction — the entire streams system, the `EventEmitter`, most of the classic `fs` and `net` APIs, and countless npm packages written before 2016 — speaks callbacks. When you debug a stack trace that jumps out of nowhere, or wrap an old library so it returns a promise, you are working directly with this pattern. Interviewers reach for it constantly because it exposes whether you actually understand the event loop or just memorised `await`.
+You meet callbacks in streams, in EventEmitter, in the classic fs and net APIs, and in packages written before 2016. A stack trace that shows up from nowhere, or an old library you wrap so it returns a promise, is this pattern.
 
 ## The concept, simply
 
-A callback is just a function you pass to another function, to be invoked *later*, when some work finishes. Synchronous callbacks (like the function you give `Array.map`) run immediately. The interesting ones are **asynchronous** callbacks: you hand them over now, your code keeps running, and Node invokes them on a future turn of the event loop once the awaited event happens.
+A callback is a function you pass to another function so it can run later, when some work finishes. A synchronous callback, such as the function you give Array.map, runs immediately. An asynchronous callback is handed over now. Your code keeps running, and Node runs it on a future turn of the event loop once the event happens.
 
-Node standardised a convention called the **error-first callback** (sometimes "node-style" or "errback"): the callback's first parameter is an error, and the actual result comes after it. If the operation failed, the first argument is an `Error` and the rest are undefined; if it succeeded, the first argument is `null` and the data follows. This single convention makes thousands of unrelated APIs feel consistent.
+Node's convention is the error-first callback, also called node-style or an errback. The first parameter is the error. The result comes after it. On failure the first argument is an Error and the rest are undefined. On success the first argument is null and the data follows.
 
 ![Diagram of an error-first callback: caller passes a callback, the async op runs off the stack, then cb(err, data) is invoked with either the error path or the success path](assets/i13_01_a8b892c3.svg)
 
-In an error-first callback the failure branch is always checked first; only then is the data used.
+Check the error first. Use the data only after that.
 
 ## How it works
 
-When you call `fs.readFile('a.txt', cb)`, Node does not read the file on your thread. It registers the request with the operating system (via the libuv thread pool for file I/O) and returns immediately — the very next line of your code runs before the file is read. Your callback is parked. When the read completes, libuv places your callback on a queue, and once the current call stack is empty the event loop picks it up and runs it. This is why a `console.log` after the `readFile` call prints *before* the callback fires.
+fs.readFile does not read the file on your thread. It registers the request with the operating system through libuv, the library Node uses to do file and network work off your JavaScript thread, and then returns immediately. The next line of your code runs before the file is read. When the read finishes, libuv queues your callback. The event loop runs it once the current call stack is empty. That is why a console.log placed after readFile prints before the callback.
 
-The critical consequence: a callback runs on a **fresh, empty call stack**, disconnected from the code that scheduled it. The function that called `readFile` has long since returned. That is why you cannot wrap an async callback in a `try/catch` and expect to catch its error — by the time the callback throws, the `try` block is gone from the stack. The error-first convention exists precisely because `throw` is useless here: errors must be passed *as data* into the callback instead.
+The callback runs on a fresh, empty call stack. The function that called readFile has already returned. A try/catch around that call cannot catch a throw inside the callback, because the try block is gone. The error-first convention exists because throw cannot reach the caller. The error has to be passed in as data.
 
-Because each async step schedules the next one only from inside its own callback, sequencing several dependent operations means nesting callbacks inside callbacks. Each level must independently check its own error argument. This is where the pattern's ergonomics break down — the code drifts to the right and error handling is duplicated at every level.
+Each next step can be scheduled only from inside the previous callback. Dependent steps nest, and each level checks its own error. The code drifts right. That shape is called callback hell.
 
-There's a subtle timing distinction worth internalising. Not all deferrals are equal: `process.nextTick(cb)` runs your callback *before* the event loop continues to the next phase — effectively at the front of the queue, even ahead of promise microtasks — whereas `setImmediate(cb)` runs it on the next loop iteration's check phase, and `setTimeout(cb, 0)` runs it in the timers phase. For merely making a synchronous path asynchronous, `setImmediate` is the safest default because `nextTick` can starve the event loop if you schedule it recursively. The takeaway for callbacks specifically: when you need to defer to avoid releasing Zalgo, prefer `setImmediate` unless you have a concrete reason to jump the queue.
+Not every deferral runs at the same time. process.nextTick runs your callback before the event loop moves on, even ahead of promise microtasks. A microtask is a small job, such as a promise callback, that runs before the next timer or I/O callback. I/O means input and output, such as disk and network. setImmediate runs on the next loop iteration, in the check phase. setTimeout with a delay of 0 runs in the timers phase, after a clamp of at least 1 millisecond. To make a synchronous path asynchronous without jumping the queue, prefer setImmediate. Recursive nextTick can starve the loop, meaning other work never gets a turn.
 
-The three ways to defer a callback differ in *when* on the loop they run, and confusing them causes ordering bugs that only appear under load:
+Promise then and queueMicrotask run after nextTick and before the next phase. They drain fully, so scheduling them recursively can also starve the loop. setImmediate and setTimeout with a delay of 0 run one callback per iteration, so they give the loop a chance to continue.
 
-| Primitive | Runs | Drains | Starvation risk |
-| --- | --- | --- | --- |
-| `process.nextTick(cb)` | Before the loop advances, ahead of promise microtasks | Fully, after each operation | High — recursive scheduling blocks the loop |
-| Promise `.then` / `queueMicrotask` | After nextTick, before the next phase | Fully, before any macrotask | High if scheduled recursively |
-| `setImmediate(cb)` | Next iteration, in the check phase | One per iteration | Low — yields between iterations |
-| `setTimeout(cb, 0)` | Timers phase, after a ≥1ms clamp | One per iteration | Low |
-
-One more mechanic behind file-system callbacks explains a lot of otherwise-baffling throughput ceilings. Network sockets use the operating system's own event notification, so thousands can be in flight at once. File I/O and a few CPU-bound operations (`crypto.pbkdf2`, `zlib`, DNS `lookup`) cannot be done that way, so libuv runs them on a small pool of worker threads whose default size is only **four** (`UV_THREADPOOL_SIZE`). Fire off five concurrent `fs.readFile` calls and the fifth callback waits for a worker to free up, even though your JavaScript looks fully parallel. Knowing which of your callbacks share that pool tells you which ones can actually overlap and which merely queue.
+Network sockets use the operating system's event notification, so thousands can be in flight at once. File I/O, and a few CPU-heavy jobs such as crypto.pbkdf2, zlib, and DNS lookup, cannot. libuv runs those on a pool of worker threads. The default size is four, set by UV_THREADPOOL_SIZE. Five concurrent fs.readFile calls means the fifth callback waits for a free worker.
 
 ![Four callbacks nested inside one another, each indented further right, forming a pyramid shape known as callback hell](assets/i13_02_38a50215.svg)
 
-Dependent async steps nest, each repeating its own error check — the pyramid of doom.
+Dependent steps nest, and each one repeats its own error check.
 
 ## Code examples
 
@@ -133,53 +130,53 @@ function loadAll(ids, done) {
 
 ## Common mistakes & gotchas
 
-- **Wrapping an async callback in try/catch.** The `try` block has already unwound by the time the callback runs, so it catches nothing. Handle the `err` argument instead.
-- **Forgetting to `return` after handling the error.** Without the early return, execution falls through and runs the success path with undefined data — often crashing on `JSON.parse(undefined)` or a null dereference.
-- **Calling the callback more than once.** Firing `cb` on error and then again on success (or in a loop) causes duplicated downstream work and double responses. Guard with a `finished` flag or return after each call.
-- **Releasing Zalgo — a callback that is sometimes sync, sometimes async.** If `loadUser` called `cb` synchronously for the validation error but asynchronously for the DB path, callers get inconsistent ordering and subtle bugs. Always defer synchronous callbacks with `setImmediate` or `process.nextTick`.
-- **Swallowing errors.** An empty `if (err) {}` or an ignored first argument hides real failures. At minimum log and stop.
-- **Losing `this`.** Passing a method as a bare callback (`emitter.on('x', obj.handle)`) detaches `this`. Use an arrow wrapper or `.bind()`.
-- **Assuming `fs` callbacks run in parallel.** They share libuv's four-thread pool by default, so heavy concurrent file, crypto, or zlib work serialises behind it. Raise `UV_THREADPOOL_SIZE` (set it before the first pool use) or throttle the work if throughput plateaus.
+- Wrapping an async callback in try/catch catches nothing. The try block has already finished. Handle the err argument.
+- Forgetting to return after the error lets the success path run on undefined data, often crashing on JSON.parse or a null property.
+- Calling the callback more than once duplicates later work. Return after the call, or guard it with a finished flag.
+- A callback that is sometimes synchronous and sometimes asynchronous, called releasing Zalgo, makes order unpredictable. Defer the synchronous path with setImmediate.
+- An empty err check swallows a real failure. At least log it and stop.
+- Passing a method as a bare callback loses this. Wrap it in an arrow function or use bind.
+- fs callbacks share the default pool of four threads, so heavy file, crypto, or zlib work queues behind it. Set UV_THREADPOOL_SIZE before the pool is first used, or throttle the work.
 
 ## Best practices
 
-- Follow the error-first convention rigidly in every callback you author — first arg is the error, and only the error.
-- Handle the error branch first and `return` immediately, so the happy path reads linearly below it.
-- Keep callbacks async-only: never invoke a callback synchronously; defer with `setImmediate` to avoid Zalgo.
-- Name your callback functions instead of deeply nesting anonymous ones — flatter code and better stack traces.
-- For anything beyond one or two steps, promote to promises with `util.promisify` or use the promise-based core APIs (`fs.promises`) rather than hand-nesting.
-- Never call a callback twice; enforce it with a guard flag when the control flow makes it possible.
+- In every callback you write, the first argument is the error, and only the error.
+- Handle that branch first and return immediately.
+- Never call a callback synchronously. Defer with setImmediate so the API is always asynchronous.
+- Name callback functions instead of nesting anonymous ones, so stack traces stay readable.
+- Past one or two steps, use util.promisify or the promise APIs such as fs.promises.
+- Never call a callback twice.
 
 ## ⭐ Interview lens
 
 > **Q: What is an error-first callback and why did Node adopt it?**  
-> Because an async callback runs on a fresh stack, `throw` cannot reach the original caller. Passing the error as the first argument gives every async API a uniform, throw-free way to report failure, so callers always check the same place.
+> An error-first callback is a function Node runs later whose first argument is the error, and whose later arguments are the result. Node adopted it because that function runs on a fresh, empty call stack, after the function that started the work has already returned. A throw inside the callback cannot reach the original caller, and a try/catch around the original call is already gone. Passing the error as data gives every async API the same shape: an Error on failure, or null and then the data on success. With fs.readFile you check err, return if it is set, and only then use the file text. The limit is that every nested step must do that check itself. If you forget the return, the success path runs on undefined data.
 
 > **Q: Why does `console.log` after `fs.readFile` print before the file contents?**  
-> `readFile` offloads the work and returns immediately; the callback is queued and only runs after the current synchronous code finishes and the stack empties. This is the event loop deferring the callback to a later tick.
+> fs.readFile does not read the file on your JavaScript thread. It hands the read to libuv, the library that does file work on a small pool of worker threads, and returns immediately, so the console.log on the next line runs while the file is still being read. Your callback is queued and runs only after the current stack is empty and the event loop reaches it. That is the same reason a log after the call appears first. The limit is that "queued" is not "parallel without limit". File reads share a default pool of four workers, so a fifth read waits even though the calls look simultaneous.
 
 > **Q: Can a `try/catch` catch an error thrown inside an async callback?**  
-> No. The `try` block has already returned by the time the callback fires on a new stack. The thrown error escapes as an uncaught exception. This is the core reason errors are passed as data, not thrown.
+> No. By the time the callback runs, the try block that wrapped the original call has already returned, and the callback starts on a new stack. A throw inside it becomes an uncaught exception, which can take down the process. That is why Node passes the error as the first argument instead of throwing. You handle it with if (err) return, not with try/catch around readFile. The limit of that rule is the synchronous case: a throw that happens before the function returns, still on the same stack, can be caught. The async callback itself cannot.
 
 > **Q: What is "callback hell" and what actually causes it?**  
-> Deeply nested callbacks caused by sequencing dependent async steps — each step can only schedule the next from inside its own callback. The trap: it isn't just ugly, it also duplicates error handling at every level and makes early exit awkward.
-
-> **Q: What is "releasing Zalgo"? (trap)**  
-> Writing a function that invokes its callback synchronously on one path and asynchronously on another. Callers can't reason about ordering, leading to race-like bugs. Fix by always deferring the synchronous path with `setImmediate` or `process.nextTick`.
-
-> **Q: How do you convert a callback API into a promise?**  
-> Wrap it with `util.promisify(fn)` (which relies on the error-first convention), or construct a `new Promise` and call `resolve(data)` / `reject(err)` from inside the callback.
+> Callback hell is deeply nested callbacks. It happens when each async step needs the previous step's result, so the next call can be scheduled only from inside the previous callback. Every level also repeats its own error check, and an early exit means remembering to return at each level. A user lookup that then loads orders and then loads items is the usual picture: three functions indented inside each other. The limit is that the nesting is a sequencing problem, not just a style problem. util.promisify or async/await flattens the shape, but the steps are still ordered if each one needs the last result.
 
 ## Cheat-card
 
-- **Shape:** `(err, data) => {}` — error first, always.
-- **Runs:** later, on an empty stack, via the event loop.
-- **Errors:** passed as arg #1, never thrown — `try/catch` won't catch them.
-- **Rule:** handle `err`, then `return`; never call `cb` twice.
-- **Zalgo:** keep callbacks always-async; defer sync paths with `setImmediate`.
-- **Escape hatch:** `util.promisify` / `fs.promises` to move up to promises.
-- **Back to callbacks:** `util.callbackify(asyncFn)` → `(…args, cb)`; a falsy rejection arrives as an `Error` with `code ERR_FALSY_VALUE_REJECTION` and the value in `err.reason`.
-- **Cancel a callback API:** pass `{ signal }` in the options (`fs.readFile`, `exec`, `execFile`); the callback gets `AbortError`, `code ABORT_ERR`.
+- Shape: err first, then data. On success err is null.
+- Runs later, on an empty stack, through the event loop.
+- try/catch cannot catch a throw inside the callback. Check err and return.
+- Never call the callback twice. Defer a synchronous path with setImmediate.
+- Past a couple of steps, use util.promisify or fs.promises.
+- File, crypto, zlib, and DNS lookup callbacks share the default pool of four threads.
+
+## Good to know
+
+- What is "releasing Zalgo"? (trap) It means the callback runs immediately on one path and later on another, so callers cannot reason about order. Always defer the synchronous path with setImmediate or process.nextTick.
+
+- How do you convert a callback API into a promise? Use util.promisify on an error-first function, or build a Promise and call resolve with the data or reject with the error from inside the callback.
+- Additional examples: 7 Oct 2026, examples verified on Node v24.19.0.
+- `util.callbackify(fn)`: added in v8.2.0.
 
 ---
 
@@ -194,11 +191,9 @@ function loadAll(ids, done) {
 
 ## Additional topics
 
-*Added 7 Oct 2026 · examples verified on Node v24.19.0*
-
 ### `util.callbackify`: from a promise back to a callback
 
-`util.callbackify(fn)` (added in v8.2.0) is the reverse of `util.promisify`. It takes a function that returns a promise (usually an `async` function) and returns a new function that takes the same arguments plus an error-first callback at the end. You need it when an older API expects a callback (a plugin hook, a test framework, a library that calls `cb(err, value)`) and the code you want to plug in is written with `async`/`await`. Without it you would write the same `.then(v => cb(null, v), e => cb(e))` adapter by hand each time, and the hand-written version usually gets the edge cases below wrong.
+`util.callbackify(fn)` is the reverse of `util.promisify`. It takes a function that returns a promise (usually an `async` function) and returns a new function that takes the same arguments plus an error-first callback at the end. You need it when an older API expects a callback (a plugin hook, a test framework, a library that calls `cb(err, value)`) and the code you want to plug in is written with `async`/`await`. Without it you would write the same `.then(v => cb(null, v), e => cb(e))` adapter by hand each time, and the hand-written version usually gets the edge cases below wrong.
 
 How it works:
 

@@ -13,37 +13,39 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A Readable is a source of chunks, and a Writable is the sink you write those chunks into. Files, HTTP requests, and HTTP responses are these two objects. The stream starts paused, and it starts pushing as soon as you attach a `data` listener, call `pipe`, or call `resume`. The trade-off is easy to miss. If you are not ready when it starts flowing, chunks disappear, and if you ignore `write` returning false, the buffer grows without an error.
+
 ## Why it matters
 
-Readable and Writable are the two halves of every data movement in Node. The request coming into your server is a Readable; the response going out is a Writable. The file you read is a Readable; the file you write is a Writable. Duplex and Transform — the subjects of the next topic — are literally built by combining these two. If you are shaky on how a Readable delivers data and how a Writable accepts it, everything above them (piping, compression, HTTP bodies) is guesswork.
+Readable and Writable are the two halves of data moving through Node. The request coming in is a Readable. The response going out is a Writable. A file you read is a Readable. A file you write is a Writable. Duplex and Transform, next lesson, are built by combining these two.
 
-The part that trips people up, and the part interviewers probe, is that a Readable can operate in two completely different **modes** — paused and flowing — and choosing the wrong one, or accidentally switching between them, causes two of the most common stream bugs in production: silently lost data, and memory blowups from ignored backpressure. Getting this right is the difference between a service that streams a million-row export cleanly and one that OOMs at row 200,000.
+The trap is that a Readable has two modes, paused and flowing. The wrong mode, or an accidental switch, causes the two production bugs interviewers ask about: data that vanishes, and memory that blows up because backpressure was ignored.
 
 ## The concept, simply
 
-A **Readable** is a faucet. A **Writable** is a drain. Your job is to get water from the faucet to the drain without overflowing the sink in between — that sink is the internal buffer, and not overflowing it is backpressure.
+A Readable is a faucet. A Writable is a drain. The sink between them is the internal buffer, and not overflowing it is backpressure.
 
-The subtlety is entirely on the Readable side, because a faucet can deliver water two ways. In **paused mode** (also called pull mode), the data sits in the stream's buffer and nothing happens until *you* call `read()` to pull a chunk. You are in control of the pace. In **flowing mode** (push mode), the stream fires `'data'` events at you as fast as the source can produce, and you must keep up or handle backpressure yourself.
+In paused mode, also called pull mode, data sits in the buffer until you call `read()`. You set the pace. In flowing mode, also called push mode, the stream fires `data` events as fast as the source can produce, and you have to keep up.
 
 ![Two Readable modes side by side: paused mode where you pull with read on the readable event, and flowing mode where data is pushed to you via data events](assets/i24_01_c085ea4d.svg)
 
-In paused mode you pull chunks by calling read(); in flowing mode chunks are pushed to you through data events until you pause or the source ends.
 
-A brand-new Readable starts **paused**. It switches to **flowing** the moment you do any of three things: attach a `'data'` listener, call `.pipe()`, or call `.resume()`. It switches back to paused if you call `.pause()` (and, when piped, whenever the destination signals backpressure). The single most important practical rule follows from this: **attaching a `'data'` listener starts the flow immediately.** If you attach it and then do async setup before you are ready to handle chunks, the chunks that arrive in the meantime are gone.
+A new Readable starts paused. It switches to flowing when you attach a `data` listener, call `pipe`, or call `resume`. It switches back when you call `pause`, and, when it is piped, when the destination signals backpressure. Attaching a `data` listener starts the flow immediately. If you then `await` setup before you can handle chunks, the chunks that arrive in the gap are gone.
 
 ## How it works
 
-**Reading, in detail.** A Readable pulls from its underlying source (a file descriptor, a socket) into its internal buffer via an internal `_read()` method. It keeps pulling until the buffered amount reaches the `highWaterMark` (default 64 KB for files), then stops asking for more. In paused mode, each `read(n)` you call removes up to `n` bytes from that buffer and returns them (or `null` if not enough is buffered yet); as the buffer drains below the mark, the stream resumes pulling from the source. In flowing mode the same buffering happens, but the stream automatically drains its buffer by emitting `'data'` events — which is exactly why flowing mode without piping is dangerous: there is no automatic pause if your `'data'` handler is slower than the source.
+A Readable pulls from its source, a file or a socket, into an internal buffer through `_read`. It pulls until the buffer reaches `highWaterMark`, 64 KB for a file, then it stops asking. In paused mode, `read(n)` takes up to `n` bytes, or returns `null` if not enough is buffered yet. As the buffer drops under the mark, the stream pulls again. In flowing mode the same buffer drains itself by emitting `data`. Nothing pauses it for you if your handler is slower than the source, unless you piped it.
 
-**Writing, in detail.** A Writable exposes `write(chunk)`, which appends to its own internal buffer and asks the underlying resource to consume it via `_write()`. The return value is the backpressure signal: `true` means the buffered bytes are below the `highWaterMark` (default 64 KiB since Node 22, 16 KiB before — changed in v22; check `writable.writableHighWaterMark`) — keep going; `false` means you are at or over it — stop, and wait for the `'drain'` event before writing more. Ignoring a `false` return does not error; it just keeps piling data into the buffer, and memory grows without bound. That is the classic slow-disk / fast-source memory leak.
+A Writable's `write(chunk)` appends to its buffer and asks the resource to take it through `_write`. The return value is the signal. `true` means you are under `highWaterMark`. `false` means stop and wait for `drain`. Ignoring `false` does not throw. The buffer grows without a bound. That is the slow disk and fast source leak.
 
 ![A Writable stream's internal buffer shown as a tank with a highWaterMark line: write returns true below the line and false at or above it, requiring a wait for the drain event](assets/i24_02_e1ea38ee.svg)
 
-write() returns true while buffered bytes are below the highWaterMark and false once they reach it; on false you must wait for drain before writing again.
 
-**Ending.** You signal a Writable is done with `end([finalChunk])`. Once all buffered data is flushed to the underlying resource, it emits `'finish'`. After the resource itself is released it emits `'close'`. On a Readable, exhaustion is signalled by `'end'`. These are distinct events for distinct streams, and confusing `'end'` (readable is done producing) with `'finish'` (writable is done consuming) is a common interview slip.
+You finish a Writable with `end`, optionally with a last chunk. When the buffer has been flushed, it emits `finish`. When the resource is released, it emits `close`. A Readable that is exhausted emits `end`. `end` means the source is done producing. `finish` means the sink is done consuming.
 
-**Async iteration.** Modern Node lets you consume a Readable with `for await...of`. This is paused-mode consumption in disguise — the loop pulls one chunk, awaits your body, then pulls the next — so backpressure is automatic and you get clean `try/catch` error handling. It is the most readable way to consume a stream when you need per-chunk logic.
+`for await` of a Readable is paused mode in disguise. The loop pulls one chunk, waits for your body, then pulls the next. Backpressure is automatic, and errors land in `try/catch`.
 
 ## Code examples
 
@@ -145,58 +147,49 @@ log.end();
 
 ## Common mistakes & gotchas
 
-- **Attaching `'data'` too early.** It flips the stream to flowing immediately. If you then `await` something before processing, chunks emitted during the await are lost. Attach the listener only when you are ready to handle chunks, or use `for await`.
-- **Ignoring the return value of `write()`.** If it returns `false` and you keep writing, the Writable's buffer grows without bound — unbounded memory, not an error. Wait for `'drain'`.
-- **Mixing paused and flowing consumption.** Calling `read()` while also having a `'data'` listener, or piping a stream you are also manually reading, leads to data going to one consumer and not the other.
-- **Confusing `'end'` with `'finish'`.** `'end'` = a Readable has no more data to give. `'finish'` = a Writable has flushed everything you gave it. Different streams, different meanings.
-- **Forgetting to call the `_write` callback** in a custom Writable. Until you call `cb()`, the stream thinks the chunk is still being processed and applies backpressure forever — the pipeline silently stalls.
-- **Calling `push()` after `push(null)`** in a custom Readable, or pushing faster than `_read` is called — both throw or leak.
+- **Attaching `data` too early.** It flips the stream to flowing immediately. An `await` before you handle chunks drops what arrives in the gap. Attach the listener when you are ready, or use `for await`.
+- **Ignoring `write()` returning false.** The buffer grows without an error. Wait for `drain`.
+- **Mixing paused and flowing.** `read()` plus a `data` listener, or piping a stream you are also reading, sends data to one consumer.
+- **Confusing `end` with `finish`.** `end` means a Readable has nothing left. `finish` means a Writable has flushed what you gave it.
+- **Never calling the `_write` callback.** The stream thinks the chunk is still in progress and stalls.
+- **`push` after `push(null)`**, or pushing faster than `_read` is called. Both throw or leak.
 
 ## Best practices
 
-- **Prefer `for await...of`** for consuming a Readable when you need custom per-chunk logic — it gives you automatic backpressure and normal `try/catch`.
-- **Prefer `pipeline()`** when you are just moving data from a Readable to a Writable (or through Transforms) — do not hand-roll the drain loop unless you are learning or have a special case.
-- **When building a custom stream, use the constructor options** (`read`, `write`, `transform` functions) or subclass and implement the `_`-prefixed methods — and always call the provided callback.
-- **Set `objectMode: true`** when your stream carries JS values rather than bytes, and remember the highWaterMark then counts objects, not bytes.
-- **Use `Readable.from(iterable)`** to turn an array, generator, or async iterator into a stream instead of implementing `_read` by hand.
+- **Prefer `for await`** when you need per-chunk logic. You get backpressure and `try/catch`.
+- **Prefer `pipeline()`** when you are moving bytes from a Readable to a Writable. Do not hand-roll the drain loop unless you are learning it.
+- **Custom streams:** pass `read` or `write` in the constructor, or implement the underscore methods, and always call the callback.
+- **`objectMode: true`** when the stream carries values rather than bytes. `highWaterMark` then counts objects.
+- **`Readable.from(iterable)`** turns an array, a generator, or an async iterator into a stream.
 
 ## ⭐ Interview lens
 
 > **Q: What are the two modes of a Readable stream, and what triggers each?**  
-> Paused (pull) and flowing (push). A new stream starts paused. It goes flowing when you add a `'data'` listener, call `.pipe()`, or call `.resume()`; it returns to paused on `.pause()` or, when piped, when the destination applies backpressure. In paused mode you pull with `read()`; in flowing mode chunks arrive via `'data'` events.
+> A: A Readable starts paused, which means nothing comes out until you pull. Flowing mode pushes chunks at you. Three calls switch it to flowing: adding a `data` listener, calling `pipe`, or calling `resume`. `pause` switches it back, and so does a piped destination that is applying backpressure. In paused mode you call `read`, often after a `readable` event. In flowing mode each chunk is a `data` event. `for await` is paused mode with the pull hidden in the loop, so the source waits while your body runs. The limit is the moment you attach `data`. The flow starts in that turn, not when you feel ready.
 
 > **Q: You attach a `'data'` handler but some chunks seem to vanish. Why?** (Trap.)  
-> Attaching `'data'` switches the stream to flowing mode *immediately*. If there is any asynchronous gap between attaching the listener and actually being ready — or if a second consumer is added later — chunks emitted in that window are dropped because flowing mode does not wait. Fix: use `for await`, or don't start the flow until ready.
+> A: Attaching `data` switches the Readable to flowing mode immediately, in that same turn. If you then `await` real work before the handler can use the chunk, or if a second consumer shows up later, the chunks emitted in the gap are delivered to nobody and they are gone. Flowing mode does not store them for a listener that was not there. Use `for await`, which pulls the next chunk only after you finish the current one, or attach `data` only when you can handle it. The limit is that this failure is silent. There is no error event. The count is just short.
 
 > **Q: What does `stream.write()` returning `false` mean, and what should you do?**  
-> The Writable's internal buffer has reached the highWaterMark — backpressure. Stop calling `write()` and wait for the `'drain'` event before resuming. Ignoring it doesn't throw; it just grows memory unboundedly.
+> A: `write` returning false means the Writable's internal buffer has reached its `highWaterMark`. That is backpressure. Stop calling `write` and wait for the `drain` event, which fires when the buffer has dropped back under the mark, then continue. `pipeline` and `pipe` run that loop for you. The limit is that ignoring the boolean does not throw. The bytes queue in memory, and the process grows until it is killed, which you will not see in a test where the sink is as fast as the source.
 
 > **Q: Difference between the `'end'` and `'finish'` events?**  
-> `'end'` fires on a Readable when there is no more data to read. `'finish'` fires on a Writable after `end()` is called and all buffered data has been flushed to the underlying resource. `'close'` then fires when the underlying descriptor/socket is released.
-
-> **Q: In a custom Writable's `_write(chunk, enc, cb)`, what happens if you never call `cb`?**  
-> The stream believes the chunk is still being processed, so it never requests the next one and applies backpressure indefinitely — the pipeline stalls silently with no error. You must call `cb()` on success or `cb(err)` on failure.
-
-> **Q: How do you signal the end of data from inside a custom Readable?**  
-> Call `this.push(null)`. Every earlier `push(chunk)` emits data; `push(null)` marks EOF and eventually triggers the `'end'` event downstream.
+> A: `end` fires on a Readable when the source has no more data to give you. `finish` fires on a Writable after you called `end` and every buffered chunk has been flushed to the file, socket, or other resource. They are different objects and different moments. `close` comes after that, when the underlying descriptor or socket is released. A stream that is destroyed early can emit `close` and neither `end` nor `finish`. The limit of waiting only for `end` is that case: the wait never completes. `stream.finished` reports it as `ERR_STREAM_PREMATURE_CLOSE`.
 
 ## Cheat-card
 
-- **Readable** = source (faucet). Starts **paused**; goes **flowing** on `data` listener / `pipe()` / `resume()`.
-- **Paused**: pull with `read()` on `'readable'`. **Flowing**: pushed via `'data'`.
-- **Writable** = sink (drain). `write()` → `false` means buffer ≥ highWaterMark; wait for `'drain'`.
-- **End signals**: Readable emits `'end'`; Writable `end()` → `'finish'` → `'close'`.
-- **Build**: custom Readable `push(chunk)` / `push(null)`; custom Writable `_write(chunk,enc,cb)` — *always call cb*.
-- **Consume**: `for await...of` for logic; `pipeline()` to just move bytes. `objectMode` for records.
-- **`destroy(err)`**: sets `destroyed` / `errored` at once → `'error'` → `'close'`; queued writes fail with `ERR_STREAM_DESTROYED`. To finish normally, use `end()`.
-- **`finished(s, cb)`**: one callback for end, finish, error or premature close (`ERR_STREAM_PREMATURE_CLOSE`); returns a cleanup function. Promise form: `{ cleanup: true }`.
-- **`_final(cb)`**: runs after `end()` and the last `_write()`, before `'finish'`; flush leftovers there.
-- **`cork()` / `uncork()`**: batch writes into one `_writev()` call; uncork in `process.nextTick`; one `uncork()` per `cork()`.
-- **Operators**: `map` / `filter` / `take` / `toArray` (Stability 1 – Experimental in the v24 docs); `map(fn, { concurrency })` keeps input order.
-- **Web streams**: `fetch` bodies are `ReadableStream`s; wrap with `Readable.fromWeb()`. See lesson 39.
+- **Readable:** a source. Starts paused. Goes flowing on a `data` listener, `pipe()`, or `resume()`.
+- **Paused:** pull with `read()` on `readable`. **Flowing:** chunks arrive on `data`.
+- **Writable:** a sink. `write()` returning false means the buffer is at `highWaterMark`. Wait for `drain`.
+- **End signals:** a Readable emits `end`. A Writable's `end()` leads to `finish`, then `close`.
+- **Build:** `push(chunk)` and `push(null)` on a custom Readable. `_write(chunk, enc, cb)` on a custom Writable, and always call `cb`.
+- **Consume:** `for await` when you have per-chunk logic. `pipeline()` when you are moving bytes. `objectMode` for records.
 
----
+## Good to know
 
+- In a custom Writable, if `_write(chunk, enc, cb)` never calls `cb`, the stream believes the chunk is still in progress, never asks for the next one, and the pipeline stalls with no error. Call `cb()` on success or `cb(err)` on failure.
+- Signal the end of a custom Readable with `this.push(null)`. Earlier `push(chunk)` calls emit data. `push(null)` is EOF and leads to `end` downstream.
+- `destroy(err)` was added in v8.0.0 and is a no-op on an already destroyed stream since v14.0.0. `errored` and `closed` were added in v18.0.0. `finished` was added in v10.0.0, the promise form in v15.0.0. `_final` was added in v8.0.0. `cork` and `uncork` were added in v0.11.2. `map` and `filter` were added in v17.4.0 and v16.14.0. `take` and `toArray` were added in v17.5.0 and v16.15.0, and in the v24 docs they are still Stability 1, Experimental. `Readable.fromWeb` was added in v17.0.0 and marked stable in v24.0.0.
 ## Learn More
 
 - [Stream | Node.js Documentation nodejs.org](https://nodejs.org/api/stream.html)

@@ -13,15 +13,19 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A performance checklist is a short list of the usual reasons a Node service is slow, each with a number you can measure before you change anything. You split one request into waits: the event loop, a new connection, a pool queue, extra database round trips, building the JSON, and bytes on the wire. You shrink the part that is actually large. The trade-off is that a change which sounds faster, such as compressing every response or raising the pool size, can add time on your workload.
+
 ## Why it matters
 
-Most slow Node services are slow for a small set of reasons that repeat from project to project: the event loop is blocked, connections are opened again for every request, responses are bigger than they need to be, the same data is fetched again and again, requests wait for a database connection, one page runs a hundred queries, or logging eats CPU. Each of these can be checked in a few minutes with a short script, and each has a known fix.
+Most slow Node services are slow for a small set of reasons that repeat: the event loop is blocked, connections are opened again for every request, responses are bigger than they need to be, the same data is fetched again and again, requests wait for a database connection, one page runs a hundred queries, or logging eats CPU. Each of these can be checked in a few minutes with a short script, and each has a known fix.
 
-The trap is fixing things by feel. A change that sounds faster (compress everything, raise the pool size, switch loggers) can make no difference or make things worse on your workload. This checklist gives, for each item, **what to measure**, **a small check you can run** (with the real output from this machine), **the usual fix**, and **the kit lesson that covers it in depth**. Measure first, change one thing, measure again ([lesson 109](109-load-testing-and-profiling.md) shows that loop with a load generator).
+The trap is fixing things by feel. Compressing everything, raising the pool size, or switching loggers can make no difference, or can make your workload slower. This checklist gives, for each item, what to measure, a small check you can run, the usual fix, and the kit lesson that covers it. Measure first, change one thing, measure again. Lesson [109](109-load-testing-and-profiling.md) shows that loop with a load generator.
 
 ## The concept, simply
 
-Think of a request's time as a sum of parts:
+Think of a request's time as a sum of parts. You find which part is large for your requests and shrink that one. A part that is already small is not worth touching.
 
 text
 
@@ -34,7 +38,7 @@ request time ≈ wait for the event loop        (item 1: event-loop delay)
              + bytes on the wire ÷ bandwidth   (items 3, 7: compression, payload size)
 ```
 
-Tuning means finding which part is large for *your* requests and shrinking that one. A part that is already small is not worth touching. The checks below each isolate one part, so you can see its size directly instead of guessing from total latency.
+The checks below each isolate one part, so you can see its size directly instead of guessing from total latency.
 
 ## How it works
 
@@ -49,7 +53,7 @@ The checklist, in the order worth checking:
 7. **Payload size.** Measure response bytes and `JSON.stringify` time. Select only the needed columns and paginate (lessons 65 and 32).
 8. **Logging cost.** Measure time per log line with your logger and destination. Keep disabled levels cheap and avoid `util.inspect`-style formatting on hot paths (lesson 90).
 
-**How the checks were run.** Every number below comes from running the script shown, on one laptop: Intel Core i5-1135G7 (4 cores, 8 threads), 15 GB RAM, Ubuntu 26.04, Node v24.19.0. PostgreSQL and Redis ran on the same machine, so database "round trips" are loopback round trips, much shorter than across a real network. Other jobs (other people's builds and servers) were loading the machine at the same time: the 1-minute load average was between 4 and 8 during these runs. Timings moved a lot from run to run (the N+1 check below ranged from 20 to 58 ms within one output), so compare numbers only within one output block, and treat them as sizes, not benchmarks.
+Every number below comes from the script shown, on one laptop, with PostgreSQL and Redis on the same machine. A database round trip here is a loopback trip, much shorter than a real network. Timings moved from run to run, so compare numbers only inside one output, and treat them as sizes, not benchmarks. The machine and the load average are in Good to know.
 
 **What each item's fields mean.** *Measure* is the number to look at. *Check* is a script you can run on your own app or machine. *Fix* is the usual change. *In depth* points to the kit lesson with the mechanism and more examples.
 
@@ -57,7 +61,7 @@ The checklist, in the order worth checking:
 
 **Example 1 — event-loop delay.**
 
-*Measure:* p99 and max of the event-loop delay histogram, not the mean. While one callback runs synchronously, every other request, timer and socket on that process waits. `perf_hooks.monitorEventLoopDelay()` (added in v11.10.0) samples a timer at a fixed `resolution` and records how late it fired. A loop that is blocked now and then shows a fine median and a bad tail.
+*Measure:* p99 and max of the event-loop delay histogram, not the mean. While one callback runs synchronously, every other request, timer, and socket on that process waits. `perf_hooks.monitorEventLoopDelay()` samples a timer at a fixed `resolution` and records how late it fired. A loop that is blocked now and then shows a fine median and a bad tail.
 
 ![Timeline of a timer that was due at time t but actually ran later because the loop was busy; the lag is actual minus due, and monitorEventLoopDelay reports p50 and p99 of that lag](assets/i07_02_3ff080ab.svg)
 *Figure: Measuring event-loop lag. Look at: "LAG = actual − due" and the note to watch the tail (p99), not the mean.*
@@ -247,7 +251,7 @@ $ node compress.js
 
 - With `Accept-Encoding: gzip, br`, `compression` 1.8.2 chose Brotli (`br`; Brotli support was added in 1.8.0, and its default quality is 4 in the middleware source) and cut 113,571 bytes to 4,930. With gzip only it sent 11,248 bytes.
 - The response under the 1 kb `threshold` was sent uncompressed, but `Vary: Accept-Encoding` was still set so caches keep the variants apart.
-- Time per request (measured by the client, 200 sequential requests on loopback) went from 1.22 ms to 3.42 ms with gzip and 4.46 ms with Brotli. A rerun on a quieter machine gave 1.11, 1.52 and 2.12 ms: smaller numbers, same order. See Example 9 for when that trade pays.
+- Time per request, 200 sequential requests on loopback, went from 1.22 ms to 3.42 ms with gzip and 4.46 ms with Brotli. See Example 9 for when that trade pays. The quieter rerun is in Good to know.
 
 *Fix:* compress large text responses (JSON, HTML, CSS, JS); leave small responses and already-compressed formats (images, video, zip) alone. If a reverse proxy or CDN in front of Node compresses, do it there and not twice. For static assets, compress once at build time instead of on every request.
 
@@ -595,7 +599,7 @@ text
 }
 ```
 
-- **Writing JSON costs about 4–8 µs per line** here, whether it comes from `console.log(JSON.stringify(…))` or pino. pino's line is longer (it adds `pid` and `hostname`), so it wrote 16.7 MB against 12.4 MB. In the run shown, the three pino destinations were within the run-to-run spread of each other and of `console.log(JSON)`. A second full run, on a quieter machine (load average 4.1), gave `pino()` 445–510 ms and `sync:false` 435–454 ms against 505–586 ms for `console.log(JSON)`, with `sync:true` at 542–585 ms. So the gap between them is small and changes between runs; measure with your own destination.
+- Writing JSON costs about 4 to 8 microseconds per line here, whether it comes from `console.log(JSON.stringify(…))` or pino. pino's line is longer, because it adds `pid` and `hostname`, so it wrote 16.7 MB against 12.4 MB. In the run shown, the three pino destinations sat inside the run-to-run spread of each other and of `console.log(JSON)`. The gap is small and changes between runs. Measure with your own destination. The quieter rerun is in Good to know.
 - **`console.log(object)` was the slowest** (about 1.0–1.1 s): it formats with `util.inspect` and writes multi-line, non-JSON output that log tools cannot parse.
 - **A disabled level is nearly free:** 100,000 `debug` calls with `level: 'info'` took 8–9 ms, because pino checks the level before serialising.
 
@@ -650,16 +654,16 @@ The transfer rows are arithmetic from the measured byte counts, not measurements
 ## ⭐ Interview lens
 
 > **Q: “p50 latency is fine but p99 is ten times worse. Where do you look first?”**  
-> A: Something affects only some requests. Check event-loop delay p99: a periodic synchronous job (a large `JSON.stringify`, a sync crypto call, a regex) blocks every request that arrives during it. Then check pool `waitingCount` (bursts that exceed the pool queue), cache misses (the slow path behind a cache), and GC pauses. Measure each one; do not guess from the mean. *Trap:* averages hide this. A 40 ms block every 200 ms left the median lag at 0.1 ms.
+> A: Something is hitting only some requests, so the median stays fine and the tail does not. I start with event-loop delay, the p99 and the max from `monitorEventLoopDelay`, not the mean. In Example 1 a 40 ms synchronous block every 200 ms left p50 at 0.1 ms and pushed p99 to 38.7 ms and max to 39.2 ms, because most samples fall between the blocks. A large `JSON.stringify`, a sync crypto call, or a regex on a timer does that to every request that arrives while it runs. Next I look at pool `waitingCount`. Time spent waiting for a connection looks like a slow query, but the database is idle. Then cache misses, which are the slow path behind a fast hit, and GC pauses. I measure each one. The limit of the average is exactly this bug. It hides a periodic block.
 
 > **Q: “How do you size a database connection pool?”**  
-> A: Start from concurrency: the pool needs about as many connections as queries you want in flight at once, and requests beyond that wait (`waitingCount`). Then apply the global limit: instances × pool size must stay under the database's `max_connections`, leaving room for admin and migration connections. More connections than the database can run in parallel do not make anything faster. Measure acquire time under load. In the check here, 20 × 50 ms queries took 500 ms with `max: 2` and 100 ms with `max: 10`.
+> A: A pool keeps a fixed number of open database connections. A request borrows one, runs its queries, and returns it. When all are busy, the next request waits, and `pool.waitingCount` is how many are queued. Size the pool for how many queries you want in flight at once, then apply the global limit. Instances times pool size must stay under the database's `max_connections`. PostgreSQL's default is "typically 100", and you still need room for admin and migration connections. More connections than the database has cores to run them does not make queries faster. Example 5 sent 20 queries that each sleep 50 ms. With `max: 2` the total was 509 ms, peak `waitingCount` was 18, and the last acquire waited 458 ms. With `max: 10` the total was 104 ms and the acquire wait max was 54 ms. The limit is a slow query. Raising the pool only moves the queue into the database. Fix the query, and always release the client in a `finally`, or one leaked client per error empties the pool.
 
 > **Q: “What is the N+1 problem and how do you detect it?”**  
-> A: Loading a list with one query and then each row's related data with one query per row: 1 + N round trips. Detect it by counting queries per request (query logging, a wrapper around the driver, or APM spans). Fix with a JOIN or one batched `WHERE id = ANY($1)` query, or the ORM's eager-loading option; in GraphQL, DataLoader. Here: 101 queries and about 30 ms against 1–2 queries and about 1 ms, all on loopback.
+> A: N+1 means one query to load a list, then one more query per row for the related data. Each query is a round trip, so the time grows with the number of rows. You detect it by counting queries per request: turn on query logging, wrap `pool.query`, or look at APM spans. Example 6 listed 100 posts with the author's name. The loop ran 101 queries and the seven runs took 20.2 to 58.3 ms, median 33.1 ms. One JOIN was 1 query and about 1.1 ms. Two queries, the posts plus `WHERE id = ANY($1)`, were about 1.2 ms. These are loopback trips. At 1 ms of network latency per query, the 100 extra queries alone would add about 100 ms. That last figure is arithmetic, not a measurement. ORMs can do the same thing with nicer syntax. Prisma `include`, Drizzle relational queries, Sequelize `include`, and TypeORM `relations` batch it, and in GraphQL you use DataLoader. The limit is trusting the ORM without counting. Turn the log on and see how many queries actually leave.
 
 > **Q: “Should a Node API always enable gzip?”**  
-> A: Not always. Compression costs CPU per response and saves bytes. It pays on slow links and large text responses, but not for small responses (the middleware skips those under its 1 kb threshold) or on fast internal links, where it can add latency. If a proxy or CDN in front already compresses, do it there. Measure bytes and server time and decide per route.
+> A: No. Compression spends CPU on the server to send fewer bytes. In Example 3, `compression` 1.8.2 turned 113,571 bytes of JSON into 4,930 bytes of Brotli, or 11,248 bytes of gzip, and the time per request went from 1.22 ms to 4.46 ms for Brotli and 3.42 ms for gzip. A response under the 1 kb threshold was left uncompressed, but `Vary: Accept-Encoding` was still set. Example 9 does the arithmetic. On loopback or a 1 gigabit link, the byte saving is smaller than the extra CPU, so the client gets the body later. On a 10 megabit link, 113,571 bytes is about 90.9 ms and 4,930 bytes is about 3.9 ms, so compression wins even after about 3 ms of CPU. Those transfer rows are calculated from the byte counts, not measured, and they ignore TCP slow start. If a proxy or CDN in front of Node already compresses, do it there, not twice. Compress large text. Leave images, video, and zip alone.
 
 ## Cheat-card
 
@@ -671,7 +675,14 @@ The transfer rows are arithmetic from the measured byte counts, not measurements
 - **N+1:** count queries per request; JOIN or `= ANY($1)` batch (lessons 76–79).
 - **Payload:** select only needed columns, paginate; `JSON.stringify` of 10 MB blocked about 40 ms here (lesson 65).
 - **Logging:** ~4–8 µs per JSON line here; `console.log(obj)` slowest; disabled pino levels nearly free (lesson 90).
-- **Method:** same script, several runs, report the spread, state the machine and its load.
+- **Method:** same script, several runs, report the spread, and state the machine and its load.
+
+## Good to know
+
+- Checks ran on an Intel Core i5-1135G7, 4 cores and 8 threads, 15 GB RAM, Ubuntu 26.04, Node v24.19.0. The 1-minute load average was between 4 and 8. `monitorEventLoopDelay` was added in v11.10.0.
+- Quieter compression rerun: 1.11 ms plain, 1.52 ms gzip, 2.12 ms Brotli, same order as 1.22, 3.42, and 4.46 ms.
+- Quieter logging rerun at load average 4.1: `pino()` 445 to 510 ms, `sync:false` 435 to 454 ms, `console.log(JSON)` 505 to 586 ms, `sync:true` 542 to 585 ms, for 100,000 lines.
+- N+1 spread inside one output: 20.2 to 58.3 ms across 7 runs, median 33.1 ms. JOIN median 1.1 ms (0.8 to 1.1). Batched `ANY` median 1.2 ms (1.1 to 2.0).
 
 ---
 

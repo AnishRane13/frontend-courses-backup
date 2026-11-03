@@ -13,27 +13,33 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Caching with Redis means the app looks up a key in an in-memory store first, and only hits the database on a miss, then stores the result with an expiry. It exists because a hot read can be answered in microseconds instead of making the database do the same query for every request, and because cluster workers do not share memory. The trade-off is staleness and failure mode: a popular key can expire and send every waiter to the database at once, and if you treat Redis as the only copy of the data, a flush loses it.
+
 ## Why it matters
 
-The fastest query is the one you never run. Every time your API can answer from a fast in-memory store instead of hitting the primary database, you save tens of milliseconds, cut database load, and buy headroom to serve more traffic on the same hardware. Under real load, **caching is frequently the single highest-leverage performance change you can make** — a well-placed cache in front of a hot, read-heavy endpoint can turn a p99 of 400 ms into 5 ms and drop database CPU by half.
+The fastest query is the one you never run. Answering from a fast in-memory store saves tens of milliseconds, cuts database load, and lets the same hardware serve more traffic. Under real load, a cache in front of a hot, read-heavy endpoint is often the highest-leverage performance change you can make.
 
-**Redis** is the default tool for this in the Node world. It's an in-memory data store that reads and writes in microseconds, speaks a simple protocol, and offers exactly the primitives caching needs: key/value with per-key expiry (TTL), atomic counters, pub/sub, and data structures (hashes, sorted sets, lists). It's also the standard place to keep the *shared* state that cluster workers and multiple containers can't hold in local memory — sessions, rate-limit counters, distributed locks. In interviews, caching is where the questions get sharp: anyone can call "cache it," but the real signal is understanding **invalidation** — famously "one of the two hard things in computer science" — and the failure modes (stampede, penetration, avalanche) that separate a cache that helps from one that takes down your database at 3 a.m.
+Redis is the usual store in the Node world. It keeps data in memory, reads and writes in microseconds, and gives you key-value with a per-key expiry called a TTL, atomic counters, pub/sub, and structures such as hashes, sorted sets, and lists. It is also where shared state lives when cluster workers and containers cannot keep it in local memory: sessions, rate-limit counters, and distributed locks. Interviews get sharp on invalidation, and on stampede, penetration, and avalanche.
 
 ## The concept, simply
 
-A cache is a small, fast store that holds copies of data that's expensive to compute or fetch, keyed so you can look it up quickly. The core question is always **where does the data live and how does it stay correct**. The dominant read pattern is **cache-aside** (a.k.a. lazy loading): your app checks the cache first; on a *hit* it returns immediately; on a *miss* it reads the database, stores the result in the cache (with a TTL), and returns it. The cache fills itself on demand — only data that's actually requested gets cached.
+A cache holds copies of data that is expensive to compute or fetch, under a key you can look up quickly. The question is where the data lives and how it stays correct.
+
+**Cache-aside**, also called lazy loading, is the usual read path. The app checks the cache. On a hit it returns immediately. On a miss it reads the database, stores the result with a TTL, and returns it. Only data that is actually requested gets cached.
 
 ![Flow of a cache-aside read where the app checks Redis first returns on a hit and on a miss queries the database then back-fills the cache with a TTL](assets/i61_01_cd28d2f3.svg)
 
 Cache-aside: check Redis, return on hit; on a miss read the DB, write the value back with a TTL, and return it. On writes, update the DB then invalidate the key.
 
-The other half is **writes and invalidation** — keeping the cache from serving stale data after the underlying record changes. The common strategies:
+Writes have three strategies.
 
-- **Write-through:** write to cache and DB together on every write. Cache is always fresh, but writes are slower and you cache data nobody may read.
-- **Write-around:** write only to the DB; let the cache fill on the next read. Good for write-heavy data, but the first read after a write is a miss.
-- **Write-back:** write to cache now, flush to DB later. Fastest writes, but you can lose data if the cache dies before flushing — rarely used for durable data.
+- **Write-through** writes the cache and the database together. The cache stays fresh. Writes are slower, and you cache data nobody may read.
+- **Write-around** writes only the database and lets the next read fill the cache. It fits write-heavy data. The first read after a write is a miss.
+- **Write-back** writes the cache now and flushes to the database later. Writes are fastest. You can lose data if the cache dies before the flush. Rarely used for durable data.
 
-Most APIs use **cache-aside for reads + explicit invalidation on writes**: after you update the database, you *delete* the cache key (rather than trying to update it), so the next read repopulates fresh. Layered on top, a **TTL** on every key acts as a safety net — even if an invalidation is missed, the stale entry self-heals when it expires.
+Most APIs use cache-aside for reads and delete the key on write, so the next read refills from the database. A TTL on every key is the safety net when an invalidation is missed.
 
 ![Top row compares write-through write-back and write-around strategies bottom row shows cache stampede penetration and avalanche failures with fixes](assets/i61_02_859a7119.svg)
 
@@ -41,17 +47,17 @@ Write strategies (top) and the three cache failure modes under load (bottom): st
 
 ## How it works
 
-In Node you talk to Redis through a client — **`ioredis`** (feature-rich, cluster-aware) or the official **`redis`** (node-redis v4+) package. Both are promise-based and maintain a persistent TCP connection (you create the client once at startup and reuse it — never per request). You mostly use a handful of commands: `GET`/`SET`, `SET key val EX seconds` (set with expiry), `DEL` (invalidate), `INCR` (atomic counter for rate limiting), `EXPIRE`, and for grouped data `HSET`/`HGETALL`. Values are strings/bytes, so objects are stored as `JSON.stringify` and parsed on read.
+In Node you use a client such as `ioredis`, which is cluster-aware, or the official `redis` package, node-redis v4 and later. Both are promise-based and keep a TCP connection. Create the client once at startup and reuse it. The commands you use most are `GET` and `SET`, `SET key value EX seconds`, `DEL`, `INCR` for an atomic counter, `EXPIRE`, and `HSET` and `HGETALL` for grouped fields. Values are strings or bytes, so objects are stored with `JSON.stringify` and parsed on read.
 
-**TTL and eviction.** Every cache key should expire. TTL bounds staleness and stops the cache growing without limit. Redis also enforces a memory cap via `maxmemory` + an eviction policy — for a pure cache you typically set `allkeys-lru` (evict least-recently-used keys when full), so Redis behaves like a proper bounded cache rather than filling up and rejecting writes.
+Every cache key should expire. The TTL bounds staleness and stops unbounded growth. Redis also enforces `maxmemory` plus an eviction policy. For a pure cache, `allkeys-lru` evicts the least recently used keys when full, so Redis stays a bounded cache instead of filling up and rejecting writes.
 
-Now the three failure modes the diagram names — this is the depth interviewers probe:
+Three failure modes:
 
-- **Cache stampede (thundering herd):** a very popular key expires, and in the microsecond it's gone, thousands of concurrent requests all miss simultaneously and hit the database at once — potentially overwhelming it. Fixes: a short *lock* so only one request recomputes while others wait or serve stale; *early/probabilistic refresh* (recompute just before expiry); or serve-stale-while-revalidate.
-- **Cache penetration:** requests for keys that *don't exist* (e.g. random product IDs from a scraper) always miss the cache and always hit the DB, because there's nothing to cache. Fix: cache the negative result (store a short-TTL "null" marker), and/or use a Bloom filter to reject unknown keys.
-- **Cache avalanche:** many keys are given the *same* TTL (e.g. warmed at boot with 1-hour expiry) and all expire at the same instant, causing a coordinated flood of misses. Fix: add *jitter* — randomize each TTL by, say, ±10% so expirations spread out.
+- **Cache stampede**, also called a thundering herd. A popular key expires and thousands of requests miss at once and hit the database together. Fixes: a short lock so only one request recomputes while others wait or serve stale, an early or probabilistic refresh just before expiry, or serve-stale-while-revalidate.
+- **Cache penetration.** Requests for keys that do not exist, such as random product ids from a scraper, always miss and always hit the database, because there is nothing to store. Fix: cache a short-TTL null marker, or use a Bloom filter to reject unknown keys.
+- **Cache avalanche.** Many keys get the same TTL, for example everything warmed at boot for one hour, and they expire together. Fix: add jitter, a random spread such as plus or minus 10%, so expirations do not line up.
 
-**Sessions and shared state.** Beyond caching query results, Redis is the standard session store. In a clustered or multi-container deployment, workers don't share memory, so an in-process session map breaks the moment a user's next request lands on a different worker (see the cluster topic). Storing sessions in Redis — via `connect-redis` for `express-session`, keyed by session ID with a TTL — makes any worker able to serve any user. The same logic makes Redis the home for rate-limit counters (`INCR` + `EXPIRE`) and distributed locks.
+Redis is also the session store. With cluster or several containers, an in-process session map breaks when the next request lands on another worker. `connect-redis` with `express-session` keeps the session in Redis, keyed by session id, with a TTL. The same pattern holds rate-limit counters, `INCR` plus `EXPIRE`, and distributed locks.
 
 ## Code examples
 
@@ -188,61 +194,61 @@ app.use(session({
 
 ## Common mistakes & gotchas
 
-- **Caching without a TTL.** Keys live forever, memory fills, and any missed invalidation serves stale data indefinitely. Always set an expiry.
-- **Updating the cache instead of invalidating it.** Trying to keep the cached copy in sync with every write is error-prone (concurrent writes, partial updates). The robust default is delete-on-write and let the next read refill.
-- **Identical TTLs → avalanche.** Warming many keys with the same expiry makes them all die at once. Add jitter.
-- **No stampede protection on hot keys.** A single expiring hot key can unleash a thundering herd on the DB. Use a lock, early refresh, or stale-while-revalidate.
-- **Ignoring cache penetration.** Lookups for non-existent keys bypass the cache entirely. Cache negatives (short TTL) or filter with a Bloom filter.
-- **Creating a Redis client per request.** Connection setup is expensive; create one client at startup and reuse it. Per-request clients exhaust connections.
-- **Treating the cache as a system of record.** Redis (as a cache) can evict or be flushed; never store the only copy of durable data in it. The DB is the source of truth.
-- **Not handling Redis being down.** If Redis is unreachable, your app should degrade to hitting the DB, not throw 500s. Wrap cache reads so a cache error falls through to the source.
-- **Large `KEYS` scans in production.** `KEYS *` blocks Redis (single-threaded). Use `SCAN`, or better, structure keys so you can delete by known key, not by scanning.
+- **No TTL.** Keys live forever, memory fills, and a missed invalidation serves stale data forever.
+- **Updating the cached copy on every write.** Concurrent and partial writes leave it inconsistent. Delete the key and let the next read refill.
+- **Identical TTLs.** Keys warmed together die together. Add jitter.
+- **No stampede protection on a hot key.** One expiry can flood the database. Use a lock, early refresh, or stale-while-revalidate.
+- **Ignoring penetration.** Lookups for missing keys skip the cache. Cache a short-lived null, or filter with a Bloom filter.
+- **A Redis client per request.** Create one client at startup. Per-request clients exhaust connections.
+- **Treating the cache as the system of record.** Redis can evict or be flushed. The database holds the only durable copy.
+- **500s when Redis is down.** A cache error should fall through to the database.
+- **`KEYS *` in production.** It blocks single-threaded Redis. Use `SCAN`, or delete keys you already know.
 
 ## Best practices
 
-- **Default to cache-aside + delete-on-write + TTL.** It's simple, robust, and covers most read-heavy APIs.
-- **Always expire keys, and jitter TTLs** to prevent synchronized expiry.
-- **Set `maxmemory` + `allkeys-lru`** so Redis behaves as a bounded cache and evicts cold data instead of failing writes.
-- **Protect hot keys** with a rebuild lock or early refresh; cache negatives to stop penetration.
-- **Use one shared client** (ioredis/node-redis) created at startup; enable reconnection and command timeouts.
-- **Fail open.** On a cache error, fall back to the database so a Redis blip doesn't become an outage.
-- **Namespace and version keys** (`user:v2:42`) so you can invalidate a whole shape by bumping the version.
-- **Store shared state (sessions, rate limits, locks) in Redis** so it survives across cluster workers and containers.
-- **Only cache what's hot and read-heavy.** Caching rarely-read data wastes memory; measure hit rate and evict cold entries.
+- **Cache-aside, delete on write, and a TTL.** That covers most read-heavy APIs.
+- **Expire every key, and jitter the TTLs.**
+- **Set `maxmemory` and `allkeys-lru`.**
+- **Protect hot keys** with a rebuild lock or early refresh. Cache negatives to stop penetration.
+- **One shared client**, created at startup, with reconnect and command timeouts.
+- **Fail open.** On a cache error, use the database.
+- **Namespace and version keys**, such as `user:v2:42`, so a shape change is a version bump.
+- **Put sessions, rate limits, and locks in Redis** so they work across workers and containers.
+- **Cache what is hot and read-heavy.** Measure hit rate.
 
 ## ⭐ Interview lens
 
 > **Q: Explain the cache-aside pattern.**  
-> A: The app checks the cache first. On a hit it returns the cached value; on a miss it reads the database, writes the result into the cache with a TTL, and returns it. Writes update the DB and then delete (invalidate) the key so the next read refills. The cache lazily fills with only the data actually requested.
+> A: Cache-aside, also called lazy loading, means the application owns the cache. On a read it checks Redis first. A hit returns that value. A miss reads the database, writes the result with `SET` and a TTL, an expiry in seconds, and returns it. The cache fills only with keys that were actually requested. On a write you update the database first, then `DEL` the key, so the next read refills from the source of truth instead of you trying to patch the cached copy. A TTL is the safety net when a delete is missed. For example, `GET user:42` returns the JSON string on a hit, and on a miss you load the row, `SET user:42 <json> EX 60`, and respond. The limit is a key that many requests miss at the same instant, which is a stampede, and data you never read, which write-through would store and cache-aside will not. The database stays the system of record, because Redis may evict.
 
 > **Q: What's a cache stampede and how do you prevent it?**  
-> A: A hot key expires and thousands of concurrent requests all miss at once, flooding the database. Prevent it with a short lock so only one request rebuilds the value while others wait or serve stale, with probabilistic early refresh before expiry, or with stale-while-revalidate. (Interviewers love this because "just cache it" candidates miss it.)
+> A: A stampede, or thundering herd, happens when a very popular key expires and thousands of concurrent requests all miss in that moment and run the database query together. That can overwhelm the database that the cache was supposed to protect. You prevent it by letting one request rebuild the value. A short lock makes the others wait or serve a stale copy. Probabilistic early refresh recomputes just before expiry. Stale-while-revalidate serves the old value while one request refreshes. For example, a product page cached for 60 seconds can, at second 60, turn into thousands of identical SQL queries unless one of those guards is in place. The limit is mixing this up with the other two failures. Penetration is keys that never exist, so there is nothing to cache until you store a null. Avalanche is many keys expiring together because they share a TTL. Jitter fixes avalanche. A lock does not.
 
 > **Q: On a write, do you update the cache or delete it? Why?**  
-> A: Usually delete (invalidate). Updating the cached copy on every write is fragile under concurrent/partial writes and can leave the cache inconsistent with the DB. Deleting the key means the next read repopulates from the source of truth — simpler and safer. A TTL backs it up in case an invalidation is missed.
+> A: Usually delete. After the database write succeeds, `DEL` the key. The next read is a miss, loads the new row, and stores it with a TTL. Updating the cached object on every write is fragile: two requests can write different fields, one can fail after it updated Redis and before it updated the database, and the cache then disagrees with the source of truth. Deleting is smaller and lets the database stay in charge. Write-through, writing both together, keeps the cache fresh at the cost of slower writes and caching data nobody reads. Write-back, cache first and database later, is fast and can lose the write if Redis dies. For example, a profile update saves the row, deletes `user:42`, and does not try to merge JSON in the cache. The limit is a missed delete. The TTL is what eventually heals that stale entry, which is why every key should expire, with jitter so they do not expire together.
 
 > **Q: Why store sessions in Redis instead of in memory?**  
-> A: With cluster or multiple containers, workers don't share memory, so an in-process session is invisible when the user's next request lands on a different worker — they appear logged out. Redis is a shared store any worker can read, keyed by session ID with a TTL. (Same reasoning applies to rate-limit counters and distributed locks.)
-
-> **Q: Cache penetration vs avalanche vs stampede?**  
-> A: Penetration = requests for keys that never exist always miss and hit the DB (fix: cache the null / Bloom filter). Avalanche = many keys expire at the same instant causing a flood (fix: jitter TTLs). Stampede = one hot key expires and many concurrent requests rebuild it at once (fix: lock / early refresh). Distinct problems, distinct fixes.
-
-> **Q: What happens to your app if Redis goes down?**  
-> A: It should degrade gracefully — cache reads fail open and fall through to the database, maybe slower but still correct. If your app 500s when Redis is unreachable, the cache became a single point of failure. Wrap cache access so errors don't propagate as request failures.
+> A: Cluster workers and separate containers do not share memory. An in-process session map is invisible when the user's next request is round-robined onto another worker, so they look logged out. Redis is one store every process can read. `connect-redis` plugs into `express-session`, the key is the session id, and a TTL expires abandoned sessions. The cookie stays `httpOnly`. The same reason puts rate-limit counters in Redis, `INCR` plus `EXPIRE`, and distributed locks, `SET key token NX PX`, released by a compare-and-delete so you do not unlock someone else's lock. For example, worker A can log the user in and worker B can read that session on the next click. The limit is treating Redis as durable storage. As a cache it can evict or go down. The app should fail open to the database for cached reads, and a session store needs a plan for Redis being unreachable so you do not 500 every request. Create one client at startup, not one per request.
 
 ## Cheat-card
 
-- **Cache-aside:** check cache → hit returns; miss → read DB, `SET … EX`, return.
-- **On write:** update DB then `DEL` key (invalidate); TTL is the safety net.
-- Write strategies: **through** (fresh, slow) / **around** (write-heavy) / **back** (fast, risky).
-- Three failures: **stampede** (lock/early refresh), **penetration** (cache null/Bloom), **avalanche** (jitter TTLs).
-- Redis clients: `ioredis`/`redis` — **one shared client**, never per request.
-- `maxmemory` + `allkeys-lru`; DB is source of truth; **fail open** if Redis is down.
-- Redis also holds **shared state**: sessions, rate limits (`INCR`+`EXPIRE`), locks (`SET key <token> NX PX`, release with a Lua compare-and-delete).
-- **In-process LRU:** `Map` keeps insertion order → on `get`, `delete` + `set` to refresh; evict `map.keys().next().value`. Or `lru-cache` v11: `new LRUCache({ max, ttl, maxSize, sizeCalculation, fetchMethod })`. Per process, always bounded.
-- **HTTP caching:** `max-age` (all caches) / `s-maxage` (shared only); `no-cache` = store but revalidate; `no-store` = never store; `stale-while-revalidate` / `stale-if-error` (RFC 5861); ETag + `If-None-Match` → 304. CDN behaviour is vendor-specific.
-- **Redis Cluster:** slot = CRC16(key) mod 16384; `{tag}` hashes only the tag; `MOVED` = slot lives elsewhere (update map), `ASK` = mid-migration (one-off `ASKING`); multi-key ops across slots → `CROSSSLOT`.
-- **Sentinel:** quorum decides "objectively down"; a majority of Sentinels must elect the leader that promotes a replica; clients ask Sentinel for the master address (ioredis `sentinels` + `name`).
+- **Cache-aside:** check the cache, return on a hit. On a miss, read the database, `SET` with `EX`, return.
+- **On write:** update the database, then `DEL` the key. The TTL is the safety net.
+- **Write-through** stays fresh and is slower. **Write-around** fits write-heavy data. **Write-back** is fast and can lose data.
+- **Stampede:** a lock, early refresh, or stale-while-revalidate. **Penetration:** cache a null or use a Bloom filter. **Avalanche:** jitter the TTLs.
+- **One shared client**, `ioredis` or `redis`, never one per request.
+- `maxmemory` plus `allkeys-lru`. The database is the source of truth. Fail open if Redis is down.
+- Redis also holds sessions, rate limits (`INCR` and `EXPIRE`), and locks (`SET key token NX PX`, release with a compare-and-delete).
+
+## Good to know
+
+- **Penetration versus avalanche versus stampede:** penetration is keys that never exist, so every lookup hits the database, fixed by caching null or a Bloom filter. Avalanche is many keys expiring at once, fixed by jitter. Stampede is one hot key expiring under concurrency, fixed by a lock or early refresh.
+- **If Redis goes down,** cache reads should fall through to the database. If the app returns 500 whenever Redis is unreachable, the cache has become a single point of failure.
+- **A hot endpoint in this lesson's picture** can turn a p99 of 400 ms into 5 ms and drop database CPU by half.
+- **In-process LRU:** a `Map` keeps insertion order, so on `get` you `delete` and `set` to refresh, and you evict `map.keys().next().value`. `lru-cache` v11 is `new LRUCache({ max, ttl, maxSize, sizeCalculation, fetchMethod })`. It is per process and must stay bounded.
+- **HTTP caching:** `max-age` applies to all caches, `s-maxage` to shared caches only. `no-cache` means store but revalidate. `no-store` means never store. `stale-while-revalidate` and `stale-if-error` are RFC 5861. An ETag with `If-None-Match` can return 304. CDN behaviour is vendor-specific.
+- **Redis Cluster:** the slot is CRC16 of the key, modulo 16384. A `{tag}` hashes only the tag. `MOVED` means the slot lives elsewhere and you update the map. `ASK` means a migration in progress and a one-off `ASKING`. Multi-key commands across slots return `CROSSSLOT`.
+- **Sentinel:** a quorum marks the primary objectively down. A majority of Sentinels must elect the leader that promotes a replica. Clients ask Sentinel for the master address. In ioredis that is `sentinels` plus `name`.
 
 ---
 

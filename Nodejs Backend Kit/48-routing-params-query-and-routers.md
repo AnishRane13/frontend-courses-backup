@@ -13,31 +13,35 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A route in Express is an HTTP method, a path pattern, and a handler function. When a request arrives, Express walks the routes from top to bottom and runs the first handler that matches and then responds. The path can name a piece of the URL, such as :id, and the question mark part of the URL arrives separately as the query string. Routing exists so each URL maps to one piece of your code. The trade-off is that a broad pattern registered too early swallows a more specific URL, and nothing warns you.
+
 ## Why it matters
 
-Routing is how a server decides *which piece of your code answers a given URL*. Every REST API is, at bottom, a routing table: `GET /users` lists users, `POST /users` creates one, `GET /users/:id` fetches one, `DELETE /users/:id` removes it. Get routing right and your API reads like a map of your domain; get it wrong and you end up with a tangle of conflicting paths, parameters that read the wrong value, and a `server.js` that is two thousand lines long. Interviewers lean on routing because it reveals whether you can structure an application, not just make one endpoint respond.
+Routing is how the server decides which function answers a URL. A REST API is a routing table. `GET /users` lists users, `POST /users` creates one, `GET /users/:id` fetches one, and `DELETE /users/:id` removes it. Get this right and the API reads like a map of the domain. Get it wrong and paths conflict, a parameter reads the wrong value, and `server.js` grows past a thousand lines. Interviewers use routing to see whether you can structure an application, not just answer one URL.
 
-This topic covers the four things you will use constantly: defining routes for HTTP methods, reading dynamic *route parameters* (`:id`), reading the *query string* (`?sort=asc`), and — the part that separates toy apps from real ones — splitting routes into modular **Routers** so a growing codebase stays navigable. Mastering these turns "I can write an endpoint" into "I can architect an API."
+You will use four tools constantly: one route per HTTP method, route parameters such as `:id`, the query string such as `?sort=asc`, and Routers so a growing API is not one file.
 
 ## The concept, simply
 
-A route in Express is a triple: an **HTTP method**, a **path pattern**, and one or more **handler functions**. You register one with `app.get(path, handler)`, `app.post(...)`, `app.put`, `app.patch`, `app.delete`, and so on — one method per verb, plus `app.all()` for every method. The path pattern can be a literal string (`'/health'`) or contain named parameters marked with a colon (`'/users/:id'`). When a request matches, Express calls the handler.
+A route is a triple: an HTTP method, a path pattern, and one or more handler functions. You register one with `app.get`, `app.post`, `app.put`, `app.patch`, or `app.delete`. `app.all()` matches every method. The path can be a literal such as `'/health'`, or it can contain named parameters marked with a colon, such as `'/users/:id'`. When a request matches, Express calls the handler.
 
-Two sources of variable data ride along with a request. **Route parameters** are parts of the path itself: in `/users/:id`, the `:id` segment captures whatever is in that position, so `/users/42` gives you `req.params.id === '42'`. The **query string** is the part after the `?`: in `/users?sort=asc&page=2`, Express parses it into `req.query` as `{ sort: 'asc', page: '2' }`. Params identify *which* resource; query usually *filters, sorts, or paginates* a collection.
+Two kinds of variable data ride along. Route parameters are parts of the path. In `/users/:id`, the `:id` segment captures that position, so `/users/42` gives `req.params.id === '42'`. The query string is the part after `?`. In `/users?sort=asc&page=2`, Express parses it into `req.query` as `{ sort: 'asc', page: '2' }`. A parameter names which resource. A query usually filters, sorts, or paginates a collection.
 
 ![Diagram breaking a route into method path and handler and showing that colon id becomes req.params.id while question-mark sort becomes req.query.sort](assets/i32_01_1d9139e2.svg)
 
-A route is method + path + handler; the :id segment lands in req.params, the ?sort part lands in req.query.
+A route is method plus path plus handler. The `:id` segment lands in `req.params`. The `?sort` part lands in `req.query`.
 
-As an app grows you do not want every route in one file. A **Router** is a mini, mountable Express app: you create it with `express.Router()`, attach routes to it, and mount it under a base path with `app.use('/api/users', usersRouter)`. Inside the router, paths are written relative to that base, so `router.get('/:id')` answers `GET /api/users/:id`. This is how real projects keep a hundred endpoints organised.
+As the app grows, you do not put every route in one file. A Router is a mini Express app you can mount. Create it with `express.Router()`, attach routes, and mount it with `app.use('/api/users', usersRouter)`. Inside the router, paths are relative to that base, so `router.get('/:id')` answers `GET /api/users/:id`.
 
 ## How it works
 
-Under the hood the router is an ordered list, and Express matches routes **top to bottom, first match wins for that step**. When a request arrives, Express compares its method and path against each route in registration order. The *first* route whose handler responds (without calling `next()`) ends processing. This ordering has a concrete consequence: a more specific route must be registered *before* a more general one that would also match, or the general one shadows it. `/users/new` must come before `/users/:id`, otherwise `:id` greedily captures the string `"new"`.
+The router is an ordered list. Express matches top to bottom, and the first handler that responds, without calling `next()`, ends the request. A more specific route must be registered before a more general one that would also match. `/users/new` must come before `/users/:id`, or `:id` captures the string `"new"`.
 
-Path patterns are compiled into regular expressions by a library (`path-to-regexp`). A segment like `:id` becomes a capture group; its matched text is stored under that name in `req.params`. Note two important facts: **route params are always strings** (`'42'`, never `42` — you convert with `Number()` yourself), and they are captured per-segment, so `:id` matches one path segment and stops at the next `/`. Express 5 upgraded this matcher, changing some advanced syntax — notably how optional segments and unnamed wildcards are written — but named `:param` routing is unchanged.
+Path patterns are compiled into regular expressions by path-to-regexp. A segment like `:id` becomes a capture group, and the matched text is stored under that name in `req.params`. Two facts matter. Route params are always strings, so you get `'42'`, never the number `42`, and you convert with `Number()` yourself. And `:id` matches one path segment. It stops at the next `/`. Express 5 changed some advanced syntax, especially optional segments and unnamed wildcards. Named `:param` routing is unchanged.
 
-The query string is parsed separately from the path. Express reads everything after the `?`, decodes it, and builds `req.query`. Repeated keys produce arrays (`?tag=a&tag=b` → `{ tag: ['a', 'b'] }`), which is a source of surprises — a value you expect to be a string can arrive as an array if a client sends the key twice. Bracket syntax depends on the version (changed in v5): Express 4 defaults to the `qs`-based `"extended"` parser, so `?a[b]=c` becomes the nested object `{ a: { b: 'c' } }`; Express 5 defaults to the `"simple"` parser (Node's `querystring`), so the same URL gives a flat key `{ 'a[b]': 'c' }`. Opt back in with `app.set('query parser', 'extended')` only if you need nested objects. Everything in `req.query` is also a string (or array/object of strings); there is no type coercion.
+The query string is parsed separately. Express reads everything after `?`, decodes it, and builds `req.query`. A repeated key becomes an array, so `?tag=a&tag=b` is `{ tag: ['a', 'b'] }`. A value you expect to be a string can arrive as an array. Bracket syntax depends on the version. Express 4 defaults to the `qs` parser named `"extended"`, so `?a[b]=c` becomes `{ a: { b: 'c' } }`. Express 5 defaults to the `"simple"` parser, which is Node's `querystring`, so the same URL is a flat key `{ 'a[b]': 'c' }`. Opt back in with `app.set('query parser', 'extended')` only if you need nested objects. Values in `req.query` are strings, or arrays or objects of strings. Express does not coerce types.
 
 javascript
 
@@ -55,9 +59,9 @@ app.get('/search', (req, res) => res.json(req.query));
 
 ![Diagram showing a main app mounting a usersRouter at slash api slash users and an ordersRouter at slash api slash orders with relative paths inside each router resolving to full URLs](assets/i32_02_bfe22857.svg)
 
-A Router is a mini-app mounted at a base path; routes inside it are written relative to that base and Express joins them.
+A Router is a mini-app mounted at a base path. Routes inside it are written relative to that base, and Express joins them.
 
-When you mount a router with `app.use('/api/users', usersRouter)`, Express treats the router itself as one middleware entry keyed to that base path. A request to `/api/users/42` matches the mount, Express strips the base (`/api/users`) and passes the remainder (`/42`) into the router, which then does its own top-to-bottom matching against `/:id`. Routers can be nested and can carry their own middleware (`router.use(...)`), so cross-cutting concerns like "authenticate every admin route" attach cleanly to a subtree instead of the whole app.
+`app.use('/api/users', usersRouter)` puts the router in the stack as one middleware entry for that base path. A request to `/api/users/42` matches the mount. Express strips `/api/users` and passes `/42` into the router, which then matches `/:id`. Routers can be nested, and `router.use(...)` adds middleware for that subtree only. "Authenticate every admin route" belongs on the admin router, not on the whole app.
 
 ## Code examples
 
@@ -140,56 +144,52 @@ app.route('/books/:id')
 
 ## Common mistakes & gotchas
 
-- **Registering `:id` before a literal sibling.** `/users/:id` placed above `/users/me` swallows `/users/me` — `req.params.id` becomes `"me"`. Specific routes first.
-- **Treating params as numbers.** `req.params.id` is always a string. `req.params.id === 42` is `false`; convert with `Number()` and validate.
-- **Assuming a query value is a string.** A duplicated key (`?tag=a&tag=b`) yields an array, and bracket syntax yields objects when the `"extended"` query parser is active (the Express 4 default; opt-in via `app.set('query parser', 'extended')` in Express 5). Defensive code checks the type before using it.
-- **Confusing `req.params` with `req.query`.** Params come from the path pattern; query comes from after the `?`. Reaching into the wrong one returns `undefined`.
-- **Duplicate route definitions.** Defining the same method+path twice: the first that responds wins, the second is dead code — no error is thrown, so it hides quietly.
-- **Porting Express 4 wildcard/regex paths to 5 unchanged.** The matcher changed; unnamed wildcards and optional markers were rewritten. Named `:param` routes are safe, but exotic patterns need review.
+- **Registering `:id` before a literal sibling.** `/users/:id` above `/users/me` makes `req.params.id` the string `"me"`. Put the specific route first.
+- **Treating params as numbers.** `req.params.id` is always a string. `req.params.id === 42` is false. Convert with `Number()` and validate.
+- **Assuming a query value is a string.** A duplicated key yields an array. Bracket syntax yields objects when the `"extended"` parser is on. That is the Express 4 default. In Express 5 you opt in with `app.set('query parser', 'extended')`. Check the type before you use the value.
+- **Confusing `req.params` and `req.query`.** Params come from the path pattern. Query comes from after `?`. The wrong one is `undefined`.
+- **Defining the same method and path twice.** The first handler that responds wins. The second is dead code, and Express does not throw.
+- **Copying Express 4 wildcard or regex paths onto Express 5.** The matcher changed. Named `:param` routes are safe. Exotic patterns need review.
 
 ## Best practices
 
-- **One Router per resource** (`users`, `orders`, `products`) in its own file under a `routes/` folder, each mounted at `/api/<resource>`.
-- **Order routes specific → generic** within a file, and keep the mount base path in `app.use` so the router's internal paths stay short and relative.
-- **Validate and coerce params and query at the boundary** (a small middleware or a schema library like `zod`/`joi`) so handlers receive clean, typed data.
-- **Use `app.route()` or method chaining** when several verbs share one path, to keep the path defined once.
-- **Keep handlers thin** — parse the request, call a service/controller function, send the response. Business logic does not belong inside the route callback.
-- **Use `express.Router({ mergeParams: true })`** when a nested router needs params from its parent's mount path.
+- One Router per resource, in its own file under `routes/`, mounted at `/api/<resource>`.
+- Order routes from specific to generic, and keep the base path in `app.use` so the router paths stay short.
+- Validate and coerce params and query at the edge, with a small middleware or a schema library such as Zod or Joi, so handlers see clean values.
+- Use `app.route()` when several verbs share one path, so the path is written once.
+- Keep handlers thin. Read the request, call a service, send the response. Business rules do not belong in the route callback.
+- Pass `{ mergeParams: true }` to a nested router that needs a parameter from the parent's mount path.
 
 ## ⭐ Interview lens
 
 > **Q: "What is the difference between `req.params` and `req.query`?"**  
-> A: `req.params` holds named segments from the path pattern (`/users/:id` → `req.params.id`) and identifies a specific resource. `req.query` holds the parsed query string after the `?` and typically filters, sorts, or paginates. Both arrive as strings — Express does no type coercion.
+> A: `req.params` holds named pieces of the path pattern. `/users/:id` put against `/users/42` gives `req.params.id` of `'42'`. That identifies one resource. `req.query` is the query string after `?`, parsed into an object. `/users?sort=asc&page=2` gives `{ sort: 'asc', page: '2' }`, which usually filters, sorts, or paginates a list. Express fills both before your handler runs. It does not turn them into numbers or booleans. A repeated query key becomes an array, so check the type. The limit is mixing them up. Reading `req.query.id` on a path that only has `:id` gives `undefined`.
 
 > **Q: "Why does route order matter?"**  
-> A: Express matches top to bottom and the first matching handler that responds wins. A dynamic route like `/users/:id` will also match `/users/me`, so if it is registered first it shadows the literal route. You register specific paths before generic ones.
+> A: Express walks routes from top to bottom, and the first matching handler that sends a response wins. A pattern like `/users/:id` also matches `/users/me`, because `:id` is any one segment. If that pattern is registered first, the literal route never runs and `req.params.id` is the string `"me"`. Register the literal `/users/me` before `/users/:id`. The same rule covers `/users/new` before `/users/:id`. Express does not warn you. The second route is simply never reached. The limit of "first match wins" is that a later route still runs if the earlier one calls `next()` instead of responding.
 
 > **Q: "What is `express.Router()` and why use it?"**  
-> A: A Router is a standalone, mountable middleware/route group — a mini Express app. You attach routes and router-level middleware to it and mount it under a base path with `app.use('/api/users', router)`. It keeps large apps modular: one router per resource, each in its own file.
-
-> **Q: "A user hits `GET /users/me` but your handler returns the wrong record. Why?"**  
-> A: Almost certainly a route-ordering bug — `/users/:id` was registered before `/users/me`, so `:id` captured the literal string `"me"`. Move the specific route above the dynamic one.
+> A: `express.Router()` builds a small mountable app. You attach routes and middleware to it, export it, and mount it with `app.use('/api/users', router)`. Express strips the base path and matches the router's own paths against what is left, so `router.get('/:id')` answers `GET /api/users/:id`. Middleware on that router, via `router.use`, runs only for URLs under the mount. That is how a large API stays one file per resource. The limit is that each router builds its own `req.params`. A child mounted at `/users/:userId/posts` does not see `userId` unless you created it with `mergeParams: true`.
 
 > **Q (trap): "`req.params.id` for `/users/42` — is it the number 42?"**  
-> A: No, it is the string `"42"`. Route params (and query values) are always strings; comparing with `=== 42` fails. Convert and validate explicitly.
-
-> **Q: "How would you attach authentication to only the admin routes?"**  
-> A: Put those routes in their own Router and register the auth middleware on that router with `router.use(authMiddleware)` (or as the second argument on the mount). It applies to the whole subtree without touching unrelated routes.
+> A: No. It is the string `"42"`. Express captures the text of the segment and does not coerce it. `req.params.id === 42` is false, and so is a numeric comparison against `req.query.page`. Query values are strings too, or an array of strings when the key is repeated. `?active=false` is the string `"false"`, which is truthy if you use it as a boolean. Convert with `Number()` or a schema, then reject values that do not convert. The limit of a bare `Number('me')` is `NaN`, so validate before you use the number.
 
 ## Cheat-card
 
-- Route = **method** + **path** + **handler(s)**: `app.get('/users/:id', fn)`.
-- `req.params` = path segments (`:id`); `req.query` = after `?`. Both are **strings**.
-- Matching is **top-to-bottom, first responder wins** → specific before generic.
-- `express.Router()` = mountable mini-app; `app.use('/base', router)` joins paths.
-- Router paths are **relative** to the mount base.
+- A route is a method, a path, and a handler: `app.get('/users/:id', fn)`.
+- `req.params` is the `:id` segment. `req.query` is the part after `?`. Both are strings.
+- Matching is top to bottom, and the first handler that responds wins. Specific paths go before generic ones.
+- `express.Router()` is a mountable mini-app. `app.use('/base', router)` joins the paths. Paths inside the router are relative to that base.
 - `app.route('/path')` chains `.get().put().delete()` on one path.
-- `mergeParams: true` to read parent params in a nested router.
-- Express 5 changed the path matcher — audit wildcard/regex paths on upgrade.
-- **Optional parameter (Express 5):** `'/users{/:id}'`. `'/users/:id?'` throws `PathError: Unexpected ?` at startup. More extras in [lesson 53](53-express-routing-extras.md).
-- **`mergeParams: true`** goes on the *child* router. It then sees the parent's `:userId`. On a name clash, the child's value wins.
+- `mergeParams: true` belongs on the child router, so it can see the parent's `:userId`. On a name clash, the child's value wins.
+- Express 5 changed the path matcher. Audit wildcard and regex paths on upgrade.
+- An optional parameter in Express 5 is `'/users{/:id}'`. `'/users/:id?'` throws `PathError: Unexpected ?` at startup. Lesson 53 has the rest.
 
----
+## Good to know
+
+- A user hits `GET /users/me` and the handler returns the wrong record when `/users/:id` was registered before `/users/me`, so `:id` captured the string `"me"`. Move the literal route above the dynamic one.
+- Attach auth to only the admin routes by putting those routes on their own Router and calling `router.use(authMiddleware)`, or by passing the middleware when you mount that router. The rest of the app is untouched.
+- path-to-regexp is 0.1.13 under Express 4.22.3, and 8.4.2 through the `router` package 2.2.0 under Express 5.3.0. Version 8 throws a `PathError` at registration for an unexpected `( ) [ ] ? + !` or a `*` without a name.
 
 ## Learn More
 

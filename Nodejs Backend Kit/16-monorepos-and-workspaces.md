@@ -13,68 +13,72 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A monorepo is one git repository that holds many packages, and workspaces are the package-manager feature that links those packages together on disk so one install makes each local package importable by name. It exists so a shared library can be edited and tested with the API in the same commit, instead of publishing and bumping every consumer. The trade-off is a new class of bugs: imports that work only because a dependency was hoisted, two copies of one library in one process, and builds that rerun everything unless a task runner caches them.
+
 ## Why it matters
 
-A backend team rarely ships one package. A typical company has an API, a background worker, a shared validation library, a shared logger, and a TypeScript and lint configuration that every one of them should use. Kept in separate repositories, each change to the shared library becomes a release dance: publish `utils@1.4.0`, open a pull request in the API to bump the range, wait for CI, repeat for the worker. Bugs hide in the gap, because the API is tested against last week's `utils`, not the code you just wrote.
+A backend team rarely ships one package. There is an API, a worker, a shared validation library, a shared logger, and a TypeScript and lint setup they should all use. In separate repositories, a change to the shared library is a release dance: publish utils at a new version, open a pull request in the API to bump the range, wait for CI, and repeat for the worker. Bugs hide in the gap, because the API is tested against last week's utils, not the code you just wrote.
 
-A **monorepo** puts all of those packages in one git repository, and **workspaces** are the package-manager feature that makes that practical: one `install` links the local packages to each other, so the API imports the `utils` source on disk instead of a published copy. The same features also create a class of bugs you never see in a single-package project: code that works only because of hoisting (phantom dependencies), two copies of the same library in one process (`instanceof` returning `false`), version numbers that drift, and CI that rebuilds everything on every commit. This lesson shows the real on-disk layout each package manager produces, so those bugs stop being mysterious.
+Workspaces make one install link the local packages, so the API imports the utils source on disk instead of a published copy. The same machinery creates bugs you do not see in a single package: phantom dependencies, two copies of one library so instanceof returns false, drifting versions, and CI that rebuilds everything. This lesson shows the on-disk layout each package manager actually writes.
 
 ## The concept, simply
 
-A monorepo is one repository with many `package.json` files. A workspace setup has five concrete parts:
+A monorepo is one repository with many package.json files. A workspace setup has five parts.
 
-1. **The root manifest.** A `package.json` at the top, usually `"private": true`, that lists where the packages live: `"workspaces": ["packages/*", "apps/*"]` for npm and Yarn, or a `pnpm-workspace.yaml` file for pnpm.
-2. **Workspace packages.** Each folder matched by those globs, with its own `package.json`, `name`, `version`, dependencies and scripts.
-3. **Links.** At install time, the package manager makes each workspace package reachable by name through a symlink in a `node_modules` folder (for npm, `node_modules/@acme/utils -> ../../packages/utils`). Nothing is copied; your edits are visible immediately.
-4. **One lockfile.** The whole graph (every workspace, every third-party package) is resolved in one pass and recorded in a single `package-lock.json`, `pnpm-lock.yaml` or `yarn.lock` at the root.
-5. **A task runner.** Something that runs `build` or `test` in every package, ideally in dependency order and skipping work whose inputs have not changed: the package manager's own `--workspaces` / `-r` flags, or a build orchestrator such as Turborepo or Nx.
+1. The root manifest. A package.json at the top, usually with private set to true, that lists where the packages live. npm and Yarn use a workspaces array such as packages/* and apps/*. pnpm uses a pnpm-workspace.yaml file.
+2. Workspace packages. Each folder those patterns match, with its own package.json, name, version, dependencies, and scripts.
+3. Links. At install time the package manager makes each workspace reachable by name through a symlink in node_modules. For npm, node_modules/@acme/utils points at ../../packages/utils. Nothing is copied. Your edits are visible immediately.
+4. One lockfile. The whole graph, every workspace and every third-party package, is resolved in one pass and recorded in a single package-lock.json, pnpm-lock.yaml, or yarn.lock at the root.
+5. A task runner. Something that runs build or test in every package, ideally in dependency order and skipping work whose inputs have not changed. That is the package manager's own workspaces flags, or an orchestrator such as Turborepo or Nx.
 
-Workspaces do not change how Node itself loads modules. Node still runs the same `node_modules` walk it always has; the package manager only arranges files and symlinks so that the walk finds the right thing.
+Workspaces do not change how Node loads modules. Node still walks node_modules the way it always has. The package manager only arranges files and symlinks so that walk finds the right thing.
 
 ## How it works
 
-**What `npm install` does in a workspace root**, step by step:
+What npm install does in a workspace root:
 
-1. It reads the root `package.json` and expands the `workspaces` globs into a list of folders.
-2. It reads each folder's `package.json`. Every workspace becomes a node in the dependency graph, under its `name`.
-3. It resolves the dependencies of all workspaces together. A dependency on `@acme/utils` is satisfied by the local workspace when the local version matches the requested range.
-4. It places third-party packages. npm **hoists**: it puts each package as high as possible, normally in the root `node_modules`, and only nests a copy inside a workspace (`packages/x/node_modules/…`) when two workspaces need incompatible versions.
-5. It creates a symlink in the root `node_modules` for every workspace package.
-6. It writes one `package-lock.json` that records workspace folders as `"link": true` entries.
+1. It reads the root package.json and expands the workspaces globs into a list of folders.
+2. It reads each folder's package.json. Every workspace becomes a node in the dependency graph, under its name.
+3. It resolves the dependencies of all workspaces together. A dependency on @acme/utils is satisfied by the local workspace when the local version matches the requested range.
+4. It places third-party packages. npm hoists: it puts each package as high as possible, normally in the root node_modules, and only nests a copy inside a workspace when two workspaces need incompatible versions.
+5. It creates a symlink in the root node_modules for every workspace package.
+6. It writes one package-lock.json that records workspace folders as link true entries.
 
-**Why hoisting works: Node's `node_modules` walk.** When `apps/api/index.js` calls `require('ms')`, Node does not know about workspaces. It looks for `apps/api/node_modules/ms`, then `apps/node_modules/ms`, then `<root>/node_modules/ms`, and so on up to the filesystem root, stopping at the first hit. npm puts every hoisted package in the root `node_modules`, which sits above every workspace folder, so the walk from any workspace ends there. The same walk is what makes **phantom dependencies** possible: `apps/api` can `require('debug')` without declaring it, because `@acme/utils` declared it and npm hoisted it to the root, where the walk from `apps/api` finds it anyway.
+Why hoisting works. When apps/api/index.js calls require('ms'), Node does not know about workspaces. It looks for apps/api/node_modules/ms, then apps/node_modules/ms, then the root node_modules/ms, and so on up to the filesystem root, and it stops at the first hit. npm puts every hoisted package in the root node_modules, which sits above every workspace, so the walk from any workspace ends there. The same walk is what makes a phantom dependency possible. apps/api can require('debug') without declaring it, because @acme/utils declared it and npm hoisted it to the root, where the walk from apps/api finds it anyway.
 
 ![Diagram of the three specifier types and a node_modules lookup walking up the folder tree, missing /app/src/node_modules/express and finding /app/node_modules/express](assets/i10_01_27074a5e.svg)
 *Figure: how Node resolves a bare specifier by walking `node_modules` folders up the directory tree. Look at: the lookup panel, where `/app/src/node_modules/express` misses and `/app/node_modules/express` is found. A hoisted root `node_modules` plays the role of `/app/node_modules` for every workspace.*
 
-**pnpm uses isolation instead of hoisting.** pnpm stores one copy of each package version in a content-addressable store and hard-links the files into `node_modules/.pnpm/<name>@<version>/node_modules/<name>`. Each project then gets symlinks only for the dependencies it declares: `apps/api/node_modules/ms` is a symlink into `.pnpm`, and `debug` is absent there because `apps/api` never asked for it. A package's own dependencies are siblings of it inside `.pnpm/<name>@<version>/node_modules/`, so `debug` still finds `ms`. Node follows the symlinks to the real path (lesson 13 covers that), and the walk from `apps/api` never passes a folder that contains `debug`. Result: undeclared imports fail.
+pnpm uses isolation instead of hoisting. It stores one copy of each package version in a content-addressable store and hard-links the files into node_modules/.pnpm/name@version/node_modules/name. Each project then gets symlinks only for the dependencies it declares. apps/api/node_modules/ms is a symlink into .pnpm, and debug is absent there if apps/api never asked for it. A package's own dependencies are siblings inside .pnpm, so debug still finds ms. Node follows the symlinks to the real path, and the walk from apps/api never passes a folder that contains an undeclared package. Undeclared imports fail.
 
-**Yarn 4 (Berry) defaults to Plug'n'Play.** With no configuration, `yarn install` writes no `node_modules` at all. It writes `.pnp.cjs`, a generated module that patches Node's resolver with a table of "package X may load packages A, B, C, located here". Plain `node index.js` therefore fails; you run code through `yarn node`, which loads `.pnp.cjs` first. Setting `nodeLinker: node-modules` in `.yarnrc.yml` makes Yarn produce an npm-style hoisted tree instead.
+Yarn 4, also called Berry, defaults to Plug'n'Play. With no configuration, yarn install writes no node_modules. It writes .pnp.cjs, a generated module that patches Node's resolver with a table of which packages each package may load, and where they are. Plain node index.js therefore fails. You run code through yarn node, which loads .pnp.cjs first. Setting nodeLinker to node-modules in .yarnrc.yml makes Yarn produce an npm-style hoisted tree instead.
 
-**The `workspace:` protocol.** pnpm and Yarn let you write `"@acme/utils": "workspace:*"`, which means "this must be the local workspace; fail instead of downloading from the registry". On `pnpm pack` / `pnpm publish` the protocol is rewritten into a normal range: `workspace:*` becomes the exact local version (`1.0.0`), `workspace:^` becomes `^<version>`, and `workspace:~` becomes `~<version>`. npm 11 does not support the protocol and stops with `EUNSUPPORTEDPROTOCOL`; in npm you write a normal range (`"*"` or `"^1.0.0"`) and npm links the local package when its version satisfies the range.
+The workspace: protocol. pnpm and Yarn let you write "@acme/utils": "workspace:*", which means this must be the local workspace, and the install should fail instead of downloading from the registry. On pnpm pack or pnpm publish the protocol is rewritten into a normal range. workspace:* becomes the exact local version, such as 1.0.0. workspace:^ becomes a caret range of that version. workspace:~ becomes a tilde range of that version. npm 11 does not support the protocol and stops with EUNSUPPORTEDPROTOCOL. In npm you write a normal range, star or caret, and npm links the local package when its version satisfies the range.
 
-**Shared configuration through `extends`.** Put a `base.json` in a workspace package such as `@acme/tsconfig` and write `"extends": "@acme/tsconfig/base.json"` in each package's `tsconfig.json`. TypeScript resolves that specifier through `node_modules` like any package, finds the workspace symlink and merges the base options under the local ones. One rule bites people: relative paths inside a base file (`outDir`, `rootDir`, `include`) are resolved relative to the **base file**, not to the package that extends it, so keep those in each package's own `tsconfig.json`. ESLint's flat config has no `extends` string; a shared config is just a workspace package that exports an array, and the root `eslint.config.mjs` imports it and spreads it.
+Shared configuration through extends. Put a base.json in a workspace package such as @acme/tsconfig and write extends set to @acme/tsconfig/base.json in each package's tsconfig.json. TypeScript resolves that specifier through node_modules, finds the workspace symlink, and merges the base options under the local ones. One rule bites people. Relative paths inside a base file, such as outDir, rootDir, and include, are resolved relative to the base file, not to the package that extends it. Keep those in each package's own tsconfig.json. ESLint's flat config has no extends string. A shared config is a workspace package that exports an array, and the root eslint.config.mjs imports it and spreads it.
 
-**Root scripts.** The root `package.json` holds the commands people actually type: `"build": "npm run build --workspaces --if-present"`, `"start": "npm start -w @acme/api"`. `-w <name>` (or `--workspace`) targets one workspace, `--workspaces` targets all of them, and `--if-present` skips workspaces that lack the script. npm runs workspaces in the order the `workspaces` globs list them, **not** in dependency order (Example 2 proves it). pnpm's `pnpm -r run build` and Yarn's `yarn workspaces foreach -t` do sort topologically.
+Root scripts. The root package.json holds the commands people actually type. build can be npm run build --workspaces --if-present. start can be npm start -w @acme/api. -w, or --workspace, targets one workspace. --workspaces targets all of them. --if-present skips workspaces that lack the script. npm runs workspaces in the order the workspaces globs list them, not in dependency order. pnpm -r run build and Yarn's yarn workspaces foreach -t do sort topologically, meaning dependencies run before the packages that depend on them.
 
-**Build orchestration and caching (Turborepo, Nx).** An orchestrator replaces "run the script in every package" with a task graph plus a cache:
+Build orchestration and caching, with Turborepo or Nx. An orchestrator replaces "run the script in every package" with a task graph plus a cache.
 
-1. It reads the workspace list from the package manager and the task rules from its config (`turbo.json`). `"dependsOn": ["^build"]` means "before building a package, build the packages it depends on".
-2. For each task it computes a hash from the task's inputs: the files matched by `inputs` (by default, the package's git-tracked files), the resolved dependency versions, the task configuration, and the hashes of the dependency tasks it waits on.
-3. It looks the hash up in the local cache (`.turbo/cache`), and optionally a shared remote cache.
-4. On a **hit** it skips the script, restores the files listed in `outputs` (for example `dist/**`) and replays the logged output.
-5. On a **miss** it runs the script, then stores the outputs and logs under the new hash.
+1. It reads the workspace list from the package manager and the task rules from its config, turbo.json. dependsOn set to ["^build"] means: before building a package, build the packages it depends on.
+2. For each task it hashes the inputs: the files matched by inputs, which by default are the package's git-tracked files, the resolved dependency versions, the task configuration, and the hashes of the dependency tasks it waits on.
+3. It looks that hash up in the local cache, .turbo/cache, and optionally a shared remote cache.
+4. On a hit it skips the script, restores the files listed in outputs, such as dist/**, and replays the logged output.
+5. On a miss it runs the script, then stores the outputs and logs under the new hash.
 
-Because a package's hash includes its dependencies' hashes, editing `@acme/utils` invalidates `@acme/api` too, while editing only `@acme/api` leaves the `utils` entry cached. Example 7 shows all three cases with Turborepo 2.11.7. Nx implements the same idea (a project graph, cache keys from inputs, restored outputs) with its own `nx.json` configuration.
+Because a package's hash includes its dependencies' hashes, editing @acme/utils invalidates @acme/api too, while editing only @acme/api leaves the utils entry cached. Nx implements the same idea, a project graph, cache keys from inputs, and restored outputs, with its own nx.json.
 
 > ⚠️ Unverified: Nx was not installed or run for this lesson; its behaviour is described from the nx.dev documentation only.
 
-**Versioning and publishing with Changesets.** When several packages publish to npm, someone has to decide each new version, update the ranges of local dependents and write changelogs. Changesets turns that into files committed with the code:
+Versioning and publishing with Changesets. When several packages publish to npm, someone has to pick each new version, update the ranges of local dependents, and write changelogs. Changesets turns that into files committed with the code.
 
-1. `npx changeset init` creates `.changeset/config.json`.
-2. With each change, a contributor adds a small Markdown file in `.changeset/` (by hand or with `npx changeset`) whose front matter names the packages and the bump type (`major`, `minor`, `patch`), and whose body is the changelog line.
-3. `npx changeset version` reads all pending changeset files, computes the new versions, rewrites the `package.json` files, bumps local dependents whose ranges no longer match, updates their ranges, writes `CHANGELOG.md` entries, and deletes the consumed changeset files.
-4. `npx changeset publish` publishes every package whose version is not on the registry yet and creates git tags.
+1. npx changeset init creates .changeset/config.json.
+2. With each change, a contributor adds a small Markdown file in .changeset/, by hand or with npx changeset. Its front matter names the packages and the bump type, major, minor, or patch, and its body is the changelog line.
+3. npx changeset version reads the pending files, computes the new versions, rewrites the package.json files, bumps local dependents whose ranges no longer match, updates their ranges, writes CHANGELOG.md entries, and deletes the consumed changeset files.
+4. npx changeset publish publishes every package whose version is not on the registry yet and creates git tags.
 
 ## Code examples
 
@@ -885,52 +889,55 @@ Two copies on disk means two module instances, and each defines its own `HttpErr
 
 ## Common mistakes & gotchas
 
-- **Relying on hoisting.** Under npm any workspace can import anything another workspace declared. It works until the hoisted copy moves or the package is published. Declare every import in the package that uses it; pnpm or Yarn PnP will catch the omission (Example 9).
-- **Assuming `npm run x --workspaces` runs in dependency order.** It follows the `workspaces` glob order. Use pnpm `-r`, `yarn workspaces foreach -t`, or an orchestrator with `dependsOn: ["^build"]`.
-- **Using `workspace:*` with npm.** npm 11 rejects it with `EUNSUPPORTEDPROTOCOL`. Use a normal range with npm; use `workspace:` only with pnpm or Yarn, which rewrite it on pack/publish.
-- **Version-range mismatches between workspaces.** Two workspaces asking for incompatible ranges of a stateful library get two copies, and `instanceof`, `Symbol`-keyed registries and module-level caches split in two (Example 10). Check with `npm ls <pkg>` and align ranges.
-- **Running `node index.js` in a Yarn PnP repo.** There is no `node_modules`; use `yarn node` or set `nodeLinker: node-modules`.
-- **Putting `outDir` or `include` in a shared tsconfig.** They resolve relative to the base file (Example 6b).
-- **Caching a task without `outputs`.** Turborepo's docs state that without `outputs` it caches no files, so a cache hit restores logs but no `dist` folder. Also, setting `inputs` replaces the default git-tracked file set, so forgetting a file there makes stale cache hits.
-- **Forgetting the lockfile after `changeset version`.** It edits `package.json` files only; run the install command so the lockfile records the new local versions (Example 8).
+- Relying on hoisting. Under npm any workspace can import a package some other workspace declared. It works until the hoisted copy moves or the package is published. Declare every import in the package that uses it. pnpm or Yarn Plug'n'Play will catch the omission.
+- npm run with --workspaces follows the workspaces glob order, not dependency order. Use pnpm -r, yarn workspaces foreach -t, or an orchestrator with dependsOn set to ["^build"].
+- workspace:* with npm 11 fails with EUNSUPPORTEDPROTOCOL. Use a normal range with npm. Use the workspace protocol only with pnpm or Yarn, which rewrite it on pack and publish.
+- Two workspaces asking for incompatible ranges of a stateful library get two copies. instanceof, Symbol-keyed registries, and module-level caches then split. Check with npm ls and align the ranges.
+- node index.js in a Yarn Plug'n'Play repo fails because there is no node_modules. Use yarn node, or set nodeLinker to node-modules.
+- outDir or include in a shared tsconfig resolves relative to the base file.
+- A Turborepo task with no outputs caches logs but no files, so a hit restores no dist folder. Setting inputs replaces the default git-tracked set, so a forgotten file makes stale hits.
+- changeset version edits package.json files only. Run install afterwards so the lockfile records the new local versions.
 
 ## Best practices
 
-- **Keep the root `private`.** `"private": true` on the root manifest stops anyone from publishing the whole repository by accident.
-- **Pick one package manager and pin it.** Set `packageManager` in the root `package.json` and commit exactly one lockfile.
-- **Make dependency declarations strict.** Use pnpm, or run a check in CI, so undeclared imports fail before they ship.
-- **Put shared config in workspace packages.** `@acme/tsconfig`, `@acme/eslint-config`: each package extends or imports them, so a rule change is one commit.
-- **Expose the common commands at the root.** `build`, `test`, `lint`, `typecheck` as root scripts, so CI and people type the same thing.
-- **Let an orchestrator decide what to rebuild.** Declare `dependsOn` and `outputs` per task; give `inputs` only when you know the full file set.
-- **Record version intent with the change.** A changeset file in the same pull request as the code; `changeset version` in a release step; commit the updated lockfile with it.
+- Keep the root private, so nobody publishes the whole repository by accident.
+- Pick one package manager, set the packageManager field, and commit exactly one lockfile.
+- Make dependency declarations strict. Use pnpm, or a CI check, so undeclared imports fail before they ship.
+- Put shared config in workspace packages such as @acme/tsconfig and @acme/eslint-config.
+- Expose build, test, lint, and typecheck as root scripts so CI and people type the same commands.
+- Let an orchestrator decide what to rebuild. Declare dependsOn and outputs. Set inputs only when you know the full file set.
+- Record version intent in the same pull request, run changeset version in a release step, and commit the updated lockfile with it.
 
 ## ⭐ Interview lens
 
 > **Q: “What does a workspace install actually do on disk?”**  
-> A: It expands the workspace globs, resolves all packages' dependencies in one graph, writes one lockfile, and makes each workspace reachable by name through a symlink. npm and Yarn's `node-modules` linker hoist third-party packages to the root `node_modules`; pnpm keeps them in `node_modules/.pnpm` and symlinks only declared dependencies into each project; Yarn PnP writes `.pnp.cjs` and no `node_modules`. *Trap:* saying the local packages are copied. They are symlinked, so edits are live.
+> A workspace install reads the root globs, reads every workspace package.json, and resolves all of those dependencies as one graph. It writes one lockfile, and it makes each workspace importable by name through a symlink, not a copy, so edits are live. npm, and Yarn with the node-modules linker, hoist third-party packages into the root node_modules. pnpm puts the real files in node_modules/.pnpm and symlinks only declared dependencies into each project. Yarn Plug'n'Play writes .pnp.cjs and no node_modules at all, so you run through yarn node. For example, after an npm install, require('@acme/utils') resolves to packages/utils on disk. The limit is that Node itself does not understand workspaces. It only walks node_modules. The package manager has to lay the files out so that walk succeeds.
 
 > **Q: “What is a phantom dependency and why does pnpm catch it when npm doesn't?”**  
-> A: An import of a package the importing package never declared, which still works because another package's dependency was hoisted to a `node_modules` on the lookup path. npm hoists to the root, which every workspace's walk reaches. pnpm symlinks only declared dependencies into each project's `node_modules` and keeps the rest inside `.pnpm`, which the walk from the project never passes, so the `require` fails.
+> A phantom dependency is an import of a package the importing package never declared, which still works because some other package's dependency was hoisted onto the node_modules walk. npm hoists to the root node_modules, and every workspace's walk reaches that root, so apps/api can require('debug') just because @acme/utils depends on it. pnpm symlinks only what each project declares. The rest stays inside .pnpm, which the walk from the project never passes, so the require fails. Yarn Plug'n'Play fails too, because its table has no debug entry for that package. The fix is to declare debug in the package that imports it. The limit of "pnpm catches it" is local: once you publish and install elsewhere, the bug shows up under npm too, but only after the undeclared import leaves the monorepo.
 
 > **Q: “Why could `err instanceof HttpError` be false for an error that really is an HttpError?”**  
-> A: Two copies of the library are installed, for example because two workspaces requested incompatible ranges, so one copy is nested. Each copy is a separate module instance with its own class. Diagnose with `npm ls <pkg>` and `require.resolve` from each package; fix by aligning ranges (or using a peer dependency); defend by checking shape (`isHttpError`, `err.status`) instead of class identity.
+> Two copies of the library are installed, so there are two module instances and two different HttpError classes. That happens when two workspaces request incompatible ranges and the package manager cannot hoist both to one place, so one copy is nested. An error built by one copy fails instanceof against the other copy's class, and an Express handler can turn a 404 into a 500. Diagnose with npm ls and with require.resolve from each package. Fix it by aligning the ranges, or by using a peer dependency. Defend by checking shape, such as isHttpError or err.status, instead of class identity. The same split hits duplicate React copies and any module-level singleton, such as a pool or a cache, that then exists twice.
 
 > **Q: “How does Turborepo know it can skip a build?”**  
-> A: It hashes the task's inputs (package files, dependency versions, task config) together with the hashes of the tasks it depends on. If that hash is in the cache, it restores the declared `outputs` and replays the logs instead of running the script. Because dependency hashes are part of the key, changing a library invalidates its dependents.
-
-> **Q: “What does `workspace:^` turn into when you publish?”**  
-> A: pnpm and Yarn rewrite it to a real range based on the local package's current version: `workspace:^` with local `2.4.1` becomes `^2.4.1`, `workspace:~` becomes `~2.4.1`, and `workspace:*` becomes the exact version. Consumers outside the monorepo never see the protocol.
+> Turborepo hashes the task's inputs together with the hashes of the tasks it depends on. Inputs are the package files, by default the git-tracked ones, the resolved dependency versions, and the task config. If that hash is already in the cache, it skips the script, restores the files listed in outputs, and replays the logs. dependsOn set to ["^build"] means dependencies are built first, and their hashes are part of this key, so editing a library invalidates its dependents while editing only the app leaves the library cached. For example, deleting dist and running again restores the files from .turbo/cache without rerunning the compiler. The limit is the outputs field. With no outputs, a hit restores logs and no dist folder, so the cache looks successful and the build artifacts are missing.
 
 ## Cheat-card
 
-- **npm:** `"workspaces": [globs]`; `-w <name>` one workspace; `--workspaces` all; `--if-present` skip missing scripts; runs in glob order.
-- **Layout:** npm/Yarn `node-modules` = hoisted root `node_modules` + symlinks for workspaces; pnpm = `node_modules/.pnpm` + symlinks for declared deps only; Yarn 4 default = `.pnp.cjs`, no `node_modules`.
-- **`workspace:` protocol:** pnpm/Yarn only; on pack `*` → exact, `^` → `^x.y.z`, `~` → `~x.y.z`; npm: `EUNSUPPORTEDPROTOCOL`.
-- **Phantom dep:** works under hoisting, fails under pnpm/PnP; declare what you import.
-- **Duplicate copies:** two versions = two module instances = `instanceof` false; `npm ls <pkg>`.
-- **Shared config:** `"extends": "@acme/tsconfig/base.json"`; base-file paths resolve from the base file.
-- **Turborepo:** `dependsOn: ["^build"]`, `outputs`, `inputs`; hash hit = skip + restore outputs.
-- **Changesets:** `init` → `.changeset/*.md` per change → `version` (bumps, ranges, CHANGELOG) → `publish`.
+- npm: a workspaces array of globs. -w names one workspace. --workspaces runs all. --if-present skips a missing script. npm uses glob order, not dependency order.
+- Layout: npm and Yarn node-modules hoist to the root and symlink workspaces. pnpm uses node_modules/.pnpm and symlinks only declared deps. Yarn 4 defaults to .pnp.cjs and no node_modules.
+- workspace: is pnpm and Yarn. On publish, star becomes the exact version, caret becomes a caret range, tilde becomes a tilde range. npm 11 rejects it with EUNSUPPORTEDPROTOCOL.
+- A phantom dependency works under hoisting and fails under pnpm and Plug'n'Play. Declare what you import.
+- Two versions means two module instances, so instanceof is false. Check with npm ls.
+- Shared tsconfig extends a workspace package. Paths inside the base file resolve from the base file.
+- Turborepo: dependsOn ["^build"], outputs, and a hash. A hit skips the script and restores outputs.
+- Changesets: init, one markdown file per change, version to bump and write changelogs, then publish.
+
+## Good to know
+
+- “What does `workspace:^` turn into when you publish?” pnpm and Yarn rewrite it from the local package's current version. workspace:^ with local 2.4.1 becomes ^2.4.1, workspace:~ becomes ~2.4.1, and workspace:* becomes the exact version. Consumers outside the monorepo never see the protocol.
+
+- Example 7 in this lesson was run with Turborepo 2.11.7.
 
 ---
 

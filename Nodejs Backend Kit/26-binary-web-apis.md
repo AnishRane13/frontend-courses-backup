@@ -13,57 +13,58 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+The binary web APIs are the globals browsers and Node share for bytes and text: TextEncoder and TextDecoder turn strings into UTF-8 bytes and back, Blob and File are immutable byte sequences with a type, atob and btoa do legacy base64 on one-byte characters, and structuredClone deep-copies data the way postMessage does. They exist so the same code can run in Node, a browser, or an edge worker without Buffer. The trade-off is that each one has a sharp edge: a split character becomes two replacement characters, btoa throws on characters above one byte, and structuredClone drops a class's methods.
+
 ## Why it matters
 
-Lesson 25 covers `Buffer`, Node's own byte type. Between v11 and v20, Node also added the byte and text APIs that browsers, Deno, Bun and Cloudflare Workers share: `TextEncoder`, `TextDecoder`, `Blob`, `File`, `atob`, `btoa` and `structuredClone`. They are globals, so no `import` is needed. `fetch`, `FormData`, `Request` and `Response` (lesson 96) return and accept them, so you meet them as soon as you call `await res.blob()` or read an uploaded file from `await req.formData()`.
+Lesson 25 covers Buffer, Node's own byte type. Node also has the byte and text APIs that browsers, Deno, Bun, and Cloudflare Workers share: TextEncoder, TextDecoder, Blob, File, atob, btoa, and structuredClone. They are globals, so no import is needed. fetch, FormData, Request, and Response return and accept them, so you meet them as soon as you await res.blob or read an upload from formData.
 
-Code that only uses these APIs runs unchanged in a browser, a worker or an edge runtime. Code that reaches for `Buffer` does not. Each API also has a sharp edge that causes real bugs:
-
-- decoding chunks one at a time without `{ stream: true }` turns a split `ë` into `��`;
-- `btoa('€')` throws instead of encoding;
-- `structuredClone` silently turns a `Money` instance into a plain object, and turns a `Buffer` into a plain `Uint8Array`.
+Code that uses only these APIs runs unchanged in a browser, a worker, or an edge runtime. Code that reaches for Buffer does not. Each API has a sharp edge that causes real bugs. Decoding chunks one at a time without stream true turns a split character into two replacement characters. btoa of a euro sign throws instead of encoding. structuredClone silently turns a class instance into a plain object, and turns a Buffer into a plain Uint8Array.
 
 ## The concept, simply
 
-All of these APIs work on the same raw material: an `ArrayBuffer` (a fixed block of bytes) seen through a `Uint8Array` view. `Buffer` is a `Uint8Array` subclass, so every API below also accepts a `Buffer`.
+All of these APIs work on the same raw material: an ArrayBuffer, a fixed block of bytes, seen through a Uint8Array view. Buffer is a Uint8Array subclass, so every API below also accepts a Buffer.
 
-- **`TextEncoder`** turns a JavaScript string into UTF-8 bytes (a `Uint8Array`). It only knows UTF-8. `encodeInto` writes into an array you already have.
-- **`TextDecoder`** turns bytes back into a string, in UTF-8 by default or any WHATWG encoding label. It can throw on bad bytes (`fatal`), keep or strip a byte order mark (`ignoreBOM`), and hold back an incomplete character between calls (`{ stream: true }`).
-- **`Blob`** is an immutable, sized sequence of bytes with a MIME `type` label. You read it with promises (`text()`, `arrayBuffer()`, `bytes()`) or as a web `ReadableStream` (`stream()`), and cut it with `slice()`.
-- **`File`** is a `Blob` with a `name` and a `lastModified` timestamp. Uploaded form fields arrive as `File`s.
-- **`atob` / `btoa`** convert between base64 and a "binary string", meaning a string with one character per byte (code points 0–255). They are marked **Legacy** in the Node docs.
-- **`structuredClone(value, { transfer })`** makes a deep copy using the HTML structured clone algorithm, the same one `postMessage` uses between worker threads (lesson 98).
+TextEncoder turns a JavaScript string into UTF-8 bytes, a Uint8Array. It only knows UTF-8. encodeInto writes into an array you already have.
 
-Version marks, from the v24 docs' History tables: `TextEncoder`/`TextDecoder` global (added in v11.0.0; in `node:util` since v8.3.0) · `atob`/`btoa` global (added in v16.0.0, Stability 3 – Legacy) · `structuredClone` (added in v17.0.0) · `Blob` global (added in v18.0.0; `buffer.Blob` added in v15.7.0, no longer experimental in v18.0.0) · `File` global (added in v20.0.0; `buffer.File` added in v19.2.0 and v18.13.0, no longer experimental in v20.0.0, cloneable since v23.0.0) · `blob.bytes()` (added in v22.3.0) · `TextDecoderStream` (stable since v23.11.0 and v22.15.0).
+TextDecoder turns bytes back into a string, UTF-8 by default or any WHATWG encoding label. WHATWG is the group whose encoding standard browsers follow. It can throw on bad bytes with fatal, keep or strip a byte order mark with ignoreBOM, and hold back an incomplete character between calls when you pass stream true.
+
+Blob is an immutable, sized sequence of bytes with a MIME type label. MIME is the type string such as text/plain. You read a Blob with promises, text, arrayBuffer, or bytes, or as a web ReadableStream from stream, and you cut it with slice.
+
+File is a Blob with a name and a lastModified timestamp. Uploaded form fields arrive as Files.
+
+atob and btoa convert between base64 and a binary string, meaning a string with one character per byte, code points 0 through 255. The Node docs mark them Legacy.
+
+structuredClone(value, { transfer }) makes a deep copy using the HTML structured clone algorithm, the same one postMessage uses between worker threads. transfer moves an ArrayBuffer instead of copying it.
 
 ## How it works
 
-1. **Text to bytes.** `new TextEncoder().encode(str)` walks the string's UTF-16 code units and writes each character as 1 to 4 UTF-8 bytes into a new `Uint8Array`. `encodeInto(str, dest)` writes into `dest` and stops before a character that does not fit, returning `{ read, written }`: UTF-16 code units consumed and bytes written.
-2. **Bytes to text.** `new TextDecoder(label, { fatal, ignoreBOM })` creates a decoder with internal state. `decode(bytes)` turns the bytes into a string. An invalid sequence becomes U+FFFD (`�`), or throws a `TypeError` if `fatal` is `true`.
-3. **Chunks.** `decode(chunk, { stream: true })` decodes what it can and keeps the bytes of a character cut off at the end of the chunk. The next `decode` call puts them in front of its input. A final `decode()` with no arguments flushes the decoder: a leftover incomplete sequence comes out as `�`, and the decoder is reset.
-4. **Blobs.** `new Blob(parts, { type })` copies the parts (strings are UTF-8 encoded) into one immutable byte sequence. `slice(start, end, type)` synchronously returns a new `Blob` for a byte range. `text()`, `arrayBuffer()` and `bytes()` return promises. `stream()` returns a WHATWG `ReadableStream` of `Uint8Array` chunks.
-5. **Files.** `new File(parts, name, { type, lastModified })` adds two read-only properties to a `Blob`. `lastModified` defaults to the current time in milliseconds.
-6. **Base64 the legacy way.** `btoa(str)` checks that every character is ≤ U+00FF, treats each one as a byte, and base64-encodes those bytes. Anything above U+00FF throws a `DOMException` named `InvalidCharacterError`. `atob(b64)` returns one character per decoded byte, so it does not give you back UTF-8 text.
-7. **Cloning.** `structuredClone(v)` walks the value graph and copies each supported type, keeping shared references and cycles. Functions and symbols cannot be copied and throw `DataCloneError`. Prototypes are not copied, so class instances lose theirs. With `{ transfer: [arrayBuffer] }` the bytes are moved instead of copied, and the original `ArrayBuffer` is detached (length 0).
+1. Text to bytes. new TextEncoder().encode(str) walks the string's UTF-16 code units and writes each character as 1 to 4 UTF-8 bytes into a new Uint8Array. encodeInto(str, dest) writes into dest and stops before a character that does not fit. It returns read and written: UTF-16 code units consumed, and bytes written.
+2. Bytes to text. new TextDecoder(label, { fatal, ignoreBOM }) creates a decoder with internal state. decode turns the bytes into a string. An invalid sequence becomes the replacement character U+FFFD, or throws a TypeError if fatal is true.
+3. Chunks. decode(chunk, { stream: true }) decodes what it can and keeps the bytes of a character cut off at the end. The next decode puts those bytes in front of its input. A final decode with no arguments flushes. A leftover incomplete sequence comes out as the replacement character, and the decoder resets.
+4. Blobs. new Blob(parts, { type }) copies the parts into one immutable byte sequence. Strings are encoded as UTF-8. slice(start, end, type) synchronously returns a new Blob for a byte range. text, arrayBuffer, and bytes return promises. stream returns a WHATWG ReadableStream of Uint8Array chunks.
+5. Files. new File(parts, name, { type, lastModified }) adds two read-only properties. lastModified defaults to the current time in milliseconds.
+6. Base64 the legacy way. btoa checks that every character is at or below U+00FF, treats each one as a byte, and base64-encodes those bytes. Anything above that throws a DOMException named InvalidCharacterError. atob returns one character per decoded byte, so it does not give you UTF-8 text back.
+7. Cloning. structuredClone walks the value and copies each supported type, keeping shared references and cycles. Functions and symbols cannot be copied and throw DataCloneError. Prototypes are not copied, so class instances lose theirs. With transfer set to a list of ArrayBuffers, the bytes are moved, and the original ArrayBuffer is detached, length 0.
 
-**`stream: true` is the web version of `StringDecoder`.** Lesson 37's fixed `createCsvParser()` uses `StringDecoder` from `node:string_decoder` so the 2-byte `ë` survives a chunk boundary. `TextDecoder` with `{ stream: true }` does the same job, and `TextDecoderStream` wraps it as a `TransformStream` for web streams. Either way, use one decoder per byte stream, for its whole life. A new decoder per chunk is the bug lesson 37 fixed.
+stream true is the web version of StringDecoder from lesson 37. TextDecoderStream wraps the same idea as a TransformStream for web streams. Use one decoder per byte stream, for its whole life. A new decoder per chunk is the bug.
 
-**What `structuredClone` copies.** It handles primitives except symbols (including `BigInt`), plain objects and arrays, `Date`, `RegExp`, `Map`, `Set`, `ArrayBuffer` and all typed arrays, `DataView`, `Error` types, `Blob`/`File`, and cyclic or shared references. For plain objects it copies only own enumerable string-keyed properties. It runs getters and stores their values, and drops symbol keys and non-enumerable properties. The prototype is not copied, so a class instance comes back as a plain object with the same own data, and a `Buffer` comes back as a plain `Uint8Array`.
+What structuredClone copies. Primitives except symbols, including BigInt. Plain objects and arrays. Date, RegExp, Map, Set, ArrayBuffer, and all typed arrays. DataView. Error types. Blob and File. Cyclic or shared references. For plain objects it copies only own enumerable string-keyed properties. It runs getters and stores the values. It drops symbol keys and non-enumerable properties. The prototype is not copied, so a class instance comes back as a plain object with the same own data, and a Buffer comes back as a plain Uint8Array.
 
-**When to use what instead of `Buffer`.** `Buffer` is still the right tool inside Node-only code: binary protocol parsing (`readUInt16BE`), hex/base64url, `fs` and `net` results. The web APIs win when the code must also run elsewhere, or when the API you call already speaks them.
+When to use these instead of Buffer. Buffer is still the right tool inside Node-only code: binary protocol parsing such as readUInt16BE, hex and base64url, and fs and net results. The web APIs win when the code must also run elsewhere, or when the API you call already speaks them.
 
-| Task | Use | Why not just `Buffer` |
-|---|---|---|
-| String → UTF-8 bytes in shared/isomorphic code | `new TextEncoder().encode(s)` | `Buffer` does not exist in browsers or most edge runtimes |
-| Fill a preallocated array without allocating | `encoder.encodeInto(s, u8)` | `buf.write(s)` works too, but only on a `Buffer` |
-| Bytes → string, rejecting invalid UTF-8 | `new TextDecoder('utf-8', { fatal: true })` | `buf.toString()` always replaces bad bytes with `�`, it never throws |
-| Decode a chunked byte stream | one `TextDecoder` + `{ stream: true }`, or `TextDecoderStream` | `StringDecoder` is fine in Node-only code; per-chunk `toString()` is wrong in both |
-| Decode a legacy charset (Shift_JIS, windows-1251…) | `new TextDecoder('shift_jis')` (full ICU builds) | `Buffer` only knows a fixed set: `utf8`, `utf16le`, `latin1`, `ascii`, `base64`, `base64url`, `hex` (plus aliases) |
-| Bytes with a MIME type, for `fetch`/`FormData`/`Response` | `Blob` / `File` | a `Buffer` has no `type` or `name`; `FormData.append('f', Buffer.from('hi'))` stores the string `'hi'`, not a file (checked on v24.19.0) |
-| Base64 in Node | `Buffer.from(s).toString('base64')` / `Buffer.from(b64, 'base64')` | n/a: `Buffer` IS the answer; `atob`/`btoa` are Legacy and Latin-1 only |
-| Base64 in portable code on Node 24 | `TextEncoder` + `btoa(String.fromCharCode(...bytes))` for small inputs | `Uint8Array.prototype.toBase64` is not on V8 13.6 by default (see Example 6) |
-| Deep copy of data (Date, Map, Set, cycles) | `structuredClone(v)` | `JSON.parse(JSON.stringify(v))` turns `Date` into a string, `Map`/`Set` into `{}`, and throws on cycles |
-| Hand a large byte array to another owner without copying | `structuredClone(v, { transfer: [ab] })` / `postMessage(v, [ab])` | a pooled `Buffer`'s `ArrayBuffer` cannot be transferred (Example 8) |
+| Task | Use | Why not just Buffer |
+| --- | --- | --- |
+| String to UTF-8 bytes in shared code | `new TextEncoder().encode(s)` | Buffer does not exist in browsers or most edge runtimes |
+| Fill a preallocated array without allocating | `encoder.encodeInto(s, u8)` | `buf.write(s)` works too, but only on a Buffer |
+| Bytes to string, rejecting invalid UTF-8 | `new TextDecoder('utf-8', { fatal: true })` | `buf.toString()` replaces bad bytes and never throws |
+| Decode a chunked byte stream | one TextDecoder with `{ stream: true }`, or TextDecoderStream | per-chunk toString is wrong in Node and in the browser |
+| Bytes with a MIME type, for fetch, FormData, or Response | Blob or File | a Buffer has no type or name |
+| Base64 in Node | `Buffer.from(s).toString('base64')` | atob and btoa are Legacy and Latin-1 only |
+| Deep copy of Date, Map, Set, and cycles | `structuredClone(v)` | JSON turns a Date into a string, a Map into an empty object, and throws on cycles |
+| Hand off a large byte array without copying | `structuredClone(v, { transfer: [ab] })` | a pooled Buffer's ArrayBuffer cannot be transferred |
 
 ## Code examples
 
@@ -434,53 +435,68 @@ With `transfer`, the 16 MiB of bytes moved into the clone and the original `Arra
 
 ## Common mistakes & gotchas
 
-- **A new `TextDecoder` (or a plain `decode()` call) per chunk.** Each call without `{ stream: true }` treats its input as complete, so a character split across chunks becomes two `�`. Keep one decoder per stream, pass `{ stream: true }`, and call `decode()` once at the end.
-- **Forgetting the final `decode()`.** With `stream: true`, bytes of an incomplete character stay inside the decoder. Without the closing call they never come out, and a truncated input is not even reported as `�`.
-- **Expecting `TextEncoder` to support other encodings.** It is UTF-8 only; `encoding` is always `'utf-8'`. To produce UTF-16 or Latin-1 bytes, use `Buffer.from(s, 'utf16le' | 'latin1')`.
-- **Trusting `buf.toString()` to reject bad input.** It never throws. Use `new TextDecoder('utf-8', { fatal: true })` when invalid UTF-8 must be an error.
-- **Using `btoa` on user text.** It throws `InvalidCharacterError` on anything above U+00FF, and silently produces Latin-1 bytes for `é`, `ü` and similar characters. In Node use `Buffer`; in portable code encode to UTF-8 bytes first.
-- **Treating `atob` output as text.** It is a binary string, one character per byte. Turn it into a `Uint8Array` and decode it with `TextDecoder`.
-- **Believing `blob.type` or `file.name`.** Both come from the client. Check the actual bytes (magic numbers, a parser) before trusting an upload.
-- **Expecting `structuredClone` to keep classes.** Prototypes, methods, getters (as getters), symbol keys and non-enumerable properties are lost. Functions and symbols throw `DataCloneError`.
-- **Cloning a `Buffer` and calling `buf.readUInt16BE` on the result.** The clone is a plain `Uint8Array` with no `Buffer` methods.
-- **Using a view after transferring its buffer.** The `ArrayBuffer` is detached: `byteLength` is 0 and typed-array methods throw `TypeError`.
+- A new TextDecoder, or a plain decode, per chunk treats each chunk as complete, so a character split across chunks becomes two replacement characters. Keep one decoder, pass stream true, and call decode once at the end.
+- With stream true, bytes of an incomplete character stay inside the decoder. Without the final decode they never come out, and a truncated input is not reported as the replacement character.
+- TextEncoder is UTF-8 only. encoding is always utf-8. For UTF-16 or Latin-1 bytes, use Buffer.from with utf16le or latin1.
+- buf.toString never throws on bad UTF-8. Use TextDecoder with fatal true when invalid UTF-8 must be an error.
+- btoa on user text throws InvalidCharacterError above U+00FF, and for characters such as é it silently writes the Latin-1 byte. In Node use Buffer. In portable code, encode to UTF-8 bytes first.
+- atob output is a binary string, one character per byte. Turn it into a Uint8Array and decode with TextDecoder.
+- blob.type and file.name come from the client. Check the actual bytes before you trust an upload.
+- structuredClone does not keep classes. Prototypes, methods, getters as getters, symbol keys, and non-enumerable properties are lost. Functions and symbols throw DataCloneError.
+- Cloning a Buffer and calling readUInt16BE on the result fails. The clone is a plain Uint8Array.
+- After you transfer an ArrayBuffer, it is detached. byteLength is 0 and typed-array methods throw TypeError.
 
 ## Best practices
 
-- **Write shared (browser + Node + edge) code against the web APIs:** `TextEncoder`/`TextDecoder`, `Blob`, `structuredClone`, `crypto.subtle` (lesson 28). Keep `Buffer` in Node-only modules.
-- **Reuse one `TextEncoder` and one `TextDecoder` per stream.** They are cheap but stateful (the decoder), and one long-lived decoder is what makes `stream: true` work.
-- **Turn on `fatal: true` at trust boundaries** where invalid UTF-8 should be rejected rather than patched over.
-- **Use `Buffer` for base64 in Node,** including `'base64url'` for tokens and URLs, until `Uint8Array.prototype.toBase64` ships by default in your minimum Node version.
-- **Read big `Blob`s with `stream()`** piped through `TextDecoderStream` instead of `text()`, which builds the whole string in memory.
-- **Use `structuredClone` for data, not for objects with behaviour.** For class instances, write a `toJSON`/`fromJSON` pair or a copy constructor.
-- **Transfer large `ArrayBuffer`s you no longer need** instead of copying them, and only ones you own outright (not a pooled `Buffer`'s).
+- Write shared browser, Node, and edge code against TextEncoder, TextDecoder, Blob, structuredClone, and crypto.subtle. Keep Buffer in Node-only modules.
+- Reuse one TextEncoder and one TextDecoder per stream. The decoder is stateful, and one long-lived decoder is what makes stream true work.
+- Turn on fatal true at trust boundaries where invalid UTF-8 should be rejected.
+- Use Buffer for base64 in Node, including base64url for tokens and URLs, until Uint8Array toBase64 ships by default on your minimum Node version.
+- Read a big Blob with stream piped through TextDecoderStream, not with text, which builds the whole string in memory.
+- Use structuredClone for data, not for objects with behaviour. For class instances, write a toJSON and fromJSON pair, or a copy constructor.
+- Transfer large ArrayBuffers you no longer need, and only ones you own outright, not a pooled Buffer's memory.
 
 ## ⭐ Interview lens
 
 > **Q: “Why does `btoa('€')` throw, and how do you base64-encode Unicode text in Node?”**  
-> A: `btoa` takes a binary string, one character per byte, so every character must be ≤ U+00FF. `€` is U+20AC, so it throws a `DOMException` named `InvalidCharacterError`. Encode the text to UTF-8 bytes first. In Node that is `Buffer.from(text).toString('base64')`. In portable code it is `TextEncoder` and then `btoa(String.fromCharCode(...bytes))` for small inputs. *Trap:* `btoa('é')` does not throw, but it produces the Latin-1 byte `e9`, not UTF-8 `c3 a9`.
+> btoa takes a binary string, one character per byte, so every character must be at or below U+00FF. The euro sign is U+20AC, so btoa throws a DOMException named InvalidCharacterError. To base64-encode Unicode in Node, turn the text into UTF-8 bytes first and encode those: Buffer.from(text).toString('base64'). In portable code, TextEncoder produces the bytes and btoa(String.fromCharCode(...bytes)) encodes them, but only for small inputs, because spreading a huge array blows the call stack. The trap is btoa of é. It does not throw. It writes the single Latin-1 byte e9, while UTF-8 consumers expect the two bytes c3 a9, so the base64 looks valid and is wrong. The limit of atob is the reverse: it returns one character per byte, not a Unicode string, so you still have to decode those bytes as UTF-8.
 
 > **Q: “You decode a stream of UTF-8 chunks and some characters come out as `��`. What is wrong and how do you fix it?”**  
-> A: A multibyte character was split at a chunk boundary, and each chunk was decoded as if it were complete. The lead byte and the continuation byte each became a replacement character. Use one `TextDecoder` for the whole stream, call `decode(chunk, { stream: true })` for every chunk and `decode()` once at the end, or pipe through `TextDecoderStream`. In Node-only code, `StringDecoder` does the same thing (lesson 37).
+> A multibyte character was split at a chunk boundary, and each chunk was decoded as if it were finished. The lead byte and the continuation byte each became a replacement character, which is why you see two of them. Keep one TextDecoder for the whole stream. Call decode(chunk, { stream: true }) on every chunk so an incomplete character is held back, then call decode with no arguments once at the end to flush. TextDecoderStream does the same job on a web stream. In Node-only code, StringDecoder from node:string_decoder is the same idea. The limit is one decoder per stream. A second decoder, or forgetting the final flush, either splits the character again or silently drops the leftover byte.
 
 > **Q: “What does `structuredClone` do with a class instance, a `Map`, a function and a cycle?”**  
-> A: The class instance becomes a plain object with its own enumerable data and no prototype, so its methods are gone. The `Map` is copied as a `Map`. The function throws `DataCloneError`. The cycle is kept: the clone points to itself, not to the original. It is the same algorithm `postMessage` uses between workers.
+> A class instance comes back as a plain object with its own enumerable data and no prototype, so its methods are gone. A Map is copied as a Map, not as a plain object. A function cannot be cloned and throws a DOMException named DataCloneError. A cycle is preserved: the clone points at itself, not at the original. That is the same algorithm postMessage uses between workers. For example, a Money instance keeps its cents field and loses format. You rebuild it with new Money(copy.cents). The limit is everything that is not data. Symbol keys, non-enumerable properties, and getters as getters are dropped, and a Buffer comes back as a plain Uint8Array with no Buffer methods.
 
 > **Q: “What is the difference between `Blob` and `Buffer`?”**  
-> A: A `Buffer` is a mutable `Uint8Array` view over memory you can read and write synchronously. A `Blob` is an immutable byte sequence with a MIME `type`, read only through promises or a stream, and `slice()` returns a sub-blob for a byte range. `fetch`, `FormData` and `Response` use `Blob`/`File`. You convert with `Buffer.from(await blob.arrayBuffer())` and `new Blob([buf])`.
+> A Buffer is a mutable Uint8Array view over memory you can read and write synchronously, including helpers such as toString and readUInt16BE. A Blob is an immutable byte sequence with a MIME type. You read it through promises, text or arrayBuffer or bytes, or through a stream, and slice returns another Blob for a byte range. fetch, FormData, and Response speak Blob and File. File adds a name and lastModified. You convert with Buffer.from(await blob.arrayBuffer()) and new Blob([buf]). The limit is that the Blob type string is only a label. Nothing checks it against the bytes, and a cloned Buffer is no longer a Buffer.
 
 ## Cheat-card
 
-- **Encode:** `new TextEncoder().encode(s)` → `Uint8Array` (UTF-8 only); `encodeInto(s, u8)` → `{ read, written }`.
-- **Decode:** `new TextDecoder(label?, { fatal, ignoreBOM })`; bad bytes → `�`, or `TypeError` `ERR_ENCODING_INVALID_ENCODED_DATA` with `fatal`.
-- **Chunks:** one decoder, `decode(chunk, { stream: true })`, then `decode()` to flush. Same job as `StringDecoder`; `TextDecoderStream` for web streams.
-- **BOM:** stripped by default; `ignoreBOM: true` keeps U+FEFF.
-- **Blob:** `new Blob(parts, { type })`, `size` in bytes, `slice(start, end, type)`, `text()` / `arrayBuffer()` / `bytes()` / `stream()`. Global since v18.0.0.
-- **File:** Blob + `name` + `lastModified`. Global since v20.0.0. Uploads arrive as `File` via `formData()`.
-- **atob/btoa:** Legacy (v16.0.0); Latin-1 only; `InvalidCharacterError`. Node: `Buffer.from(s).toString('base64')`.
-- **toBase64/fromBase64:** not on Node 24 / V8 13.6 without `--js-base-64`; present by default in Node 25 (V8 14.1).
-- **structuredClone:** Date, Map, Set, RegExp, BigInt, typed arrays, Error, Blob, cycles OK; functions/symbols → `DataCloneError`; prototypes lost; `Buffer` → `Uint8Array`.
-- **transfer:** `structuredClone(v, { transfer: [ab] })` moves bytes, detaches the original; pooled Buffer memory can't be transferred.
+- Encode with new TextEncoder().encode. UTF-8 only. encodeInto returns read and written.
+- Decode with TextDecoder. Bad bytes become the replacement character, or a TypeError if fatal is true.
+- One decoder per stream. decode with stream true, then a final decode to flush.
+- A byte order mark is stripped by default. ignoreBOM true keeps it.
+- Blob: parts plus a type, size in bytes, slice, and text, arrayBuffer, bytes, or stream.
+- File is a Blob plus name and lastModified. Uploads arrive as Files from formData.
+- atob and btoa are legacy and Latin-1 only. In Node, use Buffer for base64, including base64url.
+- structuredClone keeps Date, Map, Set, RegExp, BigInt, typed arrays, Error, Blob, and cycles. Functions and symbols throw DataCloneError. Prototypes are lost. A Buffer becomes a Uint8Array.
+- transfer moves an ArrayBuffer and detaches the original. A pooled Buffer's memory cannot be transferred.
+
+## Good to know
+
+- TextEncoder and TextDecoder became globals in v11.0.0. They have been in node:util since v8.3.0.
+- atob and btoa became globals in v16.0.0 and are Stability 3, Legacy.
+- structuredClone was added in v17.0.0.
+- Blob became a global in v18.0.0. buffer.Blob was added in v15.7.0 and left experimental status in v18.0.0.
+- File became a global in v20.0.0. buffer.File was added in v19.2.0 and v18.13.0, left experimental status in v20.0.0, and has been cloneable since v23.0.0.
+- blob.bytes was added in v22.3.0.
+- TextDecoderStream has been stable since v23.11.0 and v22.15.0.
+- Uint8Array toBase64 and fromBase64 are not on Node v24.19.0, V8 13.6, unless you pass the experimental V8 flag --js-base-64. Node v25.9.0, V8 14.1, has them with no flag. Do not use the flag in production.
+- FormData.append of a Buffer stores the string, not a file. Checked on v24.19.0.
+- TextDecoder label latin1 maps to windows-1252. Non-UTF encodings need a full ICU build.
+- Spreading a million bytes into String.fromCharCode threw RangeError: Maximum call stack size exceeded. 100,000 bytes worked in a separate run.
+- A legacy charset such as Shift_JIS or windows-1251 is new TextDecoder(label) on a full ICU build. Buffer's own encodings are utf8, utf16le, latin1, ascii, base64, base64url, and hex, plus aliases.
+- Portable base64 on Node 24, for small inputs, is TextEncoder then btoa of String.fromCharCode on those bytes. Buffer is the Node answer.
 
 ---
 

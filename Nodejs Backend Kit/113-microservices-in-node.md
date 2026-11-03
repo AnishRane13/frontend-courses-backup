@@ -13,31 +13,35 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A microservice split takes one process that shares one database and turns each business capability into its own process, usually with its own database, talking over the network instead of by function call. You can deploy, scale, or lose one service without touching the others. It exists when a monolith's single release pipeline, or a single failure, is the thing hurting you. The trade-off is the tax: timeouts, partial failure, and no single database transaction across services.
+
 ## Why it matters
 
-Every backend starts as a **monolith**: one codebase, one deploy, one database. That is not an embarrassment — it is the correct default, and it stays correct for a very long time. But as an organisation grows, a single deployable can become a bottleneck: fifty engineers stepping on one release pipeline, one memory leak taking the whole product down, and a checkout path that needs ten servers dragging along an admin panel that needs one.
+Every backend starts as a monolith: one codebase, one deploy, one database. That is the correct default, and it stays correct for a long time. As an organisation grows, one deployable can become the bottleneck. Fifty engineers share one release pipeline. One memory leak takes the whole product down. A checkout path that needs ten servers drags along an admin panel that needs one.
 
-**Microservices** split that one process into many small, independently deployable services, each owning a slice of the domain. It is one of the most over-applied ideas in the industry — teams adopt it for résumé reasons and inherit a distributed-systems tax they were not ready to pay. So the interview value here is almost entirely about *judgement*: recognising the real forces that justify the split, drawing service boundaries that do not leak, and naming honestly what you give up. In Node specifically, the lightweight process model makes spinning up services easy, which makes the discipline of *not* over-splitting even more important.
+Microservices split that process into many small services, each independently deployable and each owning a slice of the domain. Teams adopt the split before they have those forces, and then they pay a distributed-systems tax they were not ready for. The useful judgement is which force justifies the split, where the boundary goes, and what you give up. Node makes a new process cheap to start, which makes over-splitting easier.
 
 ## The concept, simply
 
-A monolith keeps all its modules in one process; they call each other as ordinary function calls and share one database. Microservices put each capability in its own process, on its own schedule, usually with its own database, and they talk over the **network** instead of via function calls. The unit of independence is the key idea: you can deploy, scale, and (in a failure) lose one service without touching the others.
+A monolith keeps its modules in one process. They call each other as ordinary functions and share one database. Microservices put each capability in its own process, on its own schedule, usually with its own database, and they talk over the network. The point is independence. You can deploy, scale, or lose one service without touching the others.
 
 ![A monolith box holding four internal modules over one database, beside four separate services each with its own database talking over the network](assets/i66_01_b72019ff.svg)
 
-A monolith calls in-process over one DB — simple and fast; microservices trade that simplicity for independent deploy and scaling, paying with network calls, distributed data, and operational overhead.
+A monolith calls in-process over one database. That is simple and fast. Microservices trade that for independent deploy and scaling, and they pay with network calls, distributed data, and operational overhead.
 
-The single most important concept is the **service boundary**. A good boundary follows a *business capability* that changes as a unit and owns its data — "Orders", "Payments", "Notifications" — not a technical layer like "the database service". The litmus test: two services should be able to evolve and deploy independently. If every change to Orders forces a coordinated change to Inventory, you have not drawn a boundary; you have drawn a fault line.
+The boundary is the decision that matters. A good boundary follows a business capability that changes as a unit and owns its data: Orders, Payments, Notifications. It does not follow a technical layer such as "the database service". The test is independent change. If every change to Orders forces a coordinated change to Inventory, you have drawn a fault line, not a boundary.
 
 ## How it works (deep)
 
-**Data ownership** is the rule that makes microservices actually independent: each service owns its data and no other service touches that database directly — the "database-per-service" pattern. The instant two services share a table, they are coupled at the schema and can no longer deploy independently; you have built a "distributed monolith", which has all the network cost of microservices and none of the independence. Cross-service data is obtained by *asking the owning service*, never by reaching into its store.
+Data ownership is what makes the split real. Each service owns its data, and no other service reads that database. That is database-per-service. The moment two services share a table, they are coupled at the schema and must deploy together. That is a distributed monolith: all the network cost, none of the independence. Cross-service data is obtained by asking the owning service, or by consuming an event it published, never by reading its tables.
 
-**Communication** comes in two flavours. *Synchronous* request/response (HTTP/REST or gRPC) is simple and immediate but creates temporal coupling — if Payments is down, the caller waiting on it is affected, and chains of synchronous calls multiply latency and failure probability. *Asynchronous* messaging (events over a queue or broker) decouples in time: Orders emits "OrderPlaced" and moves on; Notifications and Analytics react whenever they can. Async buys resilience and scalability at the cost of eventual consistency and harder reasoning. Mature systems mix both: synchronous where an answer is needed now, events for everything that can be fire-and-forget.
+Communication has two shapes. Synchronous request and response, HTTP or gRPC, is simple and immediate, and it couples you in time. If Payments is down, the caller waiting on it is down, and a chain of calls multiplies latency and the chance of failure. Asynchronous messaging decouples in time. Orders emits OrderPlaced and returns. Notifications and Analytics react when they can. You gain resilience and you accept eventual consistency, meaning the other services catch up later rather than in the same transaction. Mature systems mix them. Call synchronously when you need the answer now. Emit an event for anything that can wait.
 
-Because you cannot span a database transaction across services, **consistency becomes eventual** and multi-step workflows use the **Saga** pattern: a sequence of local transactions, each emitting an event that triggers the next, with *compensating actions* to undo prior steps if a later one fails (cancel the order if payment fails, refund the payment if shipping fails). This is a deliberate trade — you give up the simplicity of one ACID transaction to gain independence.
+You cannot wrap two services in one database transaction. Multi-step work uses a saga: a sequence of local transactions, each emitting an event that starts the next, plus a compensating action that undoes an earlier step if a later one fails. Cancel the order if payment fails. Refund the payment if shipping fails. Handlers must be idempotent, because a message can be delivered twice.
 
-A cluster of supporting pieces make it workable: an **API gateway** as the single front door (auth, routing, rate limiting) so clients do not talk to dozens of services; **service discovery** so services find each other's moving addresses; **resilience patterns** — timeouts, retries with backoff and jitter, and **circuit breakers** that stop hammering a failing dependency — because in a distributed system partial failure is the normal case, not the exception; and **distributed tracing** with correlation IDs so one user action can be followed across ten services when it goes wrong. None of these exist in a monolith because in-process calls do not need them; every one of them is part of the tax.
+The tax is a set of pieces a monolith does not need. An API gateway is the one front door: auth, routing, rate limits, so clients do not know every service address. Service discovery is how a service finds another's moving address. Resilience is timeouts, retries with backoff and jitter, and a circuit breaker that stops calling a dependency that is already failing. Distributed tracing, with a correlation id, is how you follow one user action across ten services. Partial failure is the normal case.
 
 ## Code examples
 
@@ -175,17 +179,17 @@ async function connectDbAndBroker() {}
 
 ## ⭐ Interview lens
 
-> **Q: When would you choose microservices over a monolith?** When concrete forces justify the tax: independent scaling of hot paths, autonomy for many teams shipping in parallel, isolating a failure or security domain, or differing technology needs. Absent those, a modular monolith is simpler, faster, and easier to operate. *Trap:* "because it scales better" — a well-built monolith scales horizontally too; microservices scale *parts* independently, which is a different claim.
+> **Q: When would you choose microservices over a monolith?**  
+> A: A monolith is one codebase, one deploy, and one database, and that is the right default. I split only when a concrete force shows up. A hot path needs more copies than the rest of the app. Several teams need to ship without sharing one pipeline. A failure or a security boundary should not take the whole product down. Or one piece genuinely needs a different runtime. Without one of those, a modular monolith is simpler, faster, and easier to operate. "It scales better" is the trap. A well-built monolith scales horizontally too, by running more copies of the whole process. Microservices scale parts independently, which is a different claim. The limit is the tax. Every service adds a network call, its own data, CI, monitoring, and on-call. Ten services means ten of each. Node makes the process cheap to start, which makes it easy to split too early.
 
-> **Q: How do you decide service boundaries?** Around business capabilities that change and deploy as a unit and own their data (Orders, Payments, Notifications) — not around technical layers. The test is independent evolvability: if changing one always forces changing another, the boundary is wrong.
+> **Q: How do you decide service boundaries?**  
+> A: Draw the line around a business capability that changes as a unit and owns its data. Orders, Payments, and Notifications are capabilities. "The database service" or "the logic service" is a technical layer, and every feature then cuts across several services. The test is whether the two sides can evolve and deploy independently. If every Orders change forces an Inventory change in the same release, the boundary is a fault line. Data follows the same line. The service that owns the capability owns the tables, and the other service asks for what it needs. The limit is a boundary that looks clean on a diagram and still shares a table. That share is what couples the deploys.
 
-> **Q: What is a "distributed monolith" and why is it the worst case?** Services that must be deployed together — usually because they share a database or have tightly coupled synchronous contracts. You pay the full cost of the network and distributed operations while keeping the coupling of a monolith, getting the downsides of both.
+> **Q: What is a "distributed monolith" and why is it the worst case?**  
+> A: A distributed monolith is a set of services that still have to be deployed together. The usual cause is a shared database, or a synchronous contract so tight that one schema change breaks the caller. You pay for the network, the timeouts, the partial failures, and the extra pipelines, and you keep the coupling of the monolith. You get the downsides of both and the upside of neither. Asking the owning service, or consuming an event it published, is the alternative to reading its tables. The limit of fixing it later is that the shared table is already the integration. Pulling it apart means a new API and a period where both sides still know the old columns.
 
-> **Q: You cannot do a transaction across services. How do you keep data consistent?** Accept eventual consistency and use the Saga pattern: a chain of local transactions linked by events, with compensating actions to roll back completed steps when a later one fails. Handlers must be idempotent because messages can be redelivered.
-
-> **Q: Service B is slow. How do you stop it from taking down A?** Timeouts so A never waits indefinitely, retries with backoff and jitter for transient blips, and a circuit breaker that trips after repeated failures to fail fast (with a fallback) instead of queuing doomed requests. Bulkheads isolate the resource pool so one dependency cannot starve the rest.
-
-> **Q: Sync REST/gRPC vs async messaging between services — how do you choose?** Synchronous when the caller genuinely needs the result to proceed (a read it will render now) — accept the temporal coupling and bound it. Asynchronous events when the work can happen independently (notifications, analytics, downstream updates) — you gain decoupling and resilience but must design for eventual consistency and duplicate delivery.
+> **Q: You cannot do a transaction across services. How do you keep data consistent?**  
+> A: You stop expecting one ACID transaction and you accept eventual consistency. A saga is the usual shape. Each service does a local transaction and emits an event that starts the next step. If a later step fails, a compensating action undoes the earlier one. Cancel the order if payment fails. Refund the payment if shipping fails. Because the broker delivers at least once, the handler must be idempotent. Processing "charge order 42" twice charges once, which you do by claiming a message id before the work and marking it done only after success. The outbox keeps the business row and the event row in one local transaction, so you do not save the order and then crash before the publish. The relay can still publish twice if it crashes after the broker accepts and before it marks the row sent, which is why the consumer dedupes.
 
 ## Cheat-card
 
@@ -200,7 +204,15 @@ async function connectDbAndBroker() {}
 - **gRPC:** `.proto` contract + `@grpc/grpc-js` 1.14.6 + `@grpc/proto-loader` 0.8.1; unary `callback(null, msg)` or `callback({ code, details })`; server stream `call.write()` then `call.end()`; always pass `{ deadline }` (none by default). `NOT_FOUND` = 5, `DEADLINE_EXCEEDED` = 4.
 - **Gateway / BFF:** one entry point does auth, request ids and timeouts, then forwards by prefix; a BFF route fans out with `Promise.all` and shapes one screen's response; upstream timeout = `504`.
 - **Discovery:** `dns.lookup` = OS resolver on the thread pool; `resolveSrv` = DNS query returning host, port, priority, weight. Consul DNS (port 8600) omits failing instances; Kubernetes gives each Service a stable DNS name.
-- **Outbox:** order row + outbox row in one transaction; relay claims with `FOR UPDATE SKIP LOCKED` and a lease, publishes, marks `sent_at`; a crash in between republishes, so consumers dedupe (claim → work → done).
+- **Outbox:** order row and outbox row in one transaction. The relay claims with `FOR UPDATE SKIP LOCKED` and a lease, publishes, then sets `sent_at`. A crash in between republishes, so consumers dedupe.
+
+## Good to know
+
+- Q: Service B is slow. How do you stop it taking down A? Timeout so A never waits forever. Retry with backoff and jitter for a blip. A circuit breaker opens after repeated failures and fails fast, then probes. The sample opens after `threshold` failures, stays open for `cooldownMs`, and allows one half-open call. A bulkhead keeps one dependency from using the whole pool.
+- Q: Sync or async between services? Synchronous HTTP or gRPC when the caller needs the answer now, always with a deadline. Async events when the work can happen later, such as email or analytics. Async means eventual consistency and duplicate delivery.
+- gRPC status codes used here: `OK` is 0, `DEADLINE_EXCEEDED` is 4, `NOT_FOUND` is 5. grpc-js 1.14.6 also emits `cancelled` after a normal `end()`, so that event alone does not mean the client gave up.
+- gRPC sets no deadline by default. The slow stream example used a 250 ms deadline, sent one order at 150 ms, then the client got `DEADLINE_EXCEEDED` and the server saw `call.cancelled` with `sent: 1`.
+- `@grpc/grpc-js` 1.14.6 and `@grpc/proto-loader` 0.8.1. `keepCase: false` turns `user_id` into `userId`. `longs: Number` makes `int64` a JS number.
 
 ---
 

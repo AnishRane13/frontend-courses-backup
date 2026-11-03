@@ -13,39 +13,43 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+GraphQL is an API where the client sends a query that names the exact fields it wants, and the server returns that shape from one endpoint. A schema lists the types. A resolver, one function per field, fetches each value by walking the query from the top down. It exists so one screen can ask for a user, their posts, and a count without a custom URL or a chain of calls. The trade-off is that you lose easy HTTP caching, because every query is a POST to the same path, and a naive resolver fires one database query per row.
+
 ## Why it matters
 
-REST organises an API around **resources at URLs**: the server decides what each endpoint returns, and the client takes it or leaves it. That works beautifully until a screen needs a little of this resource and a little of that one. Then you either build a bespoke endpoint for every screen, or you make the client fire several requests and stitch the results together. Mobile teams felt this pain first — every extra round-trip on a flaky network hurts — and GraphQL grew out of it at Facebook.
+REST organises an API around resources at URLs. The server decides what each endpoint returns, and the client takes it or leaves it. That works until a screen needs a little of this resource and a little of that one. Then you either build an endpoint for every screen, or the client fires several requests and stitches the results. Mobile clients felt this first, because every extra round trip on a flaky network hurts. GraphQL grew out of that at Facebook.
 
-GraphQL flips the control: the **client sends a query describing exactly the shape it wants**, and the server returns precisely that — no more, no less — from a single endpoint. Understanding GraphQL is now table stakes for backend interviews, not because it replaces REST (it does not), but because knowing *when* its flexibility pays for its added complexity is exactly the kind of trade-off judgement senior engineers are hired for.
+GraphQL flips the control. The client sends a query that describes the shape it wants, and the server returns that shape, no more and no less, from a single endpoint. It does not replace REST. The judgement is when the flexibility is worth the extra machinery.
 
 ## The concept, simply
 
-A GraphQL API is defined by a **schema**: a strongly-typed contract listing every type, every field, and the entry points (`Query` for reads, `Mutation` for writes, `Subscription` for real-time streams). The client sends a query that mirrors the shape of the data it wants; the response JSON comes back in that same shape.
+A GraphQL API is defined by a schema, a typed contract that lists every type, every field, and the entry points. `Query` is for reads, `Mutation` is for writes, and `Subscription` is for a stream that stays open. The client sends a query that mirrors the shape it wants. The JSON comes back in that same shape.
 
-The two problems it targets have names. **Over-fetching** is when an endpoint hands you 40 fields and you needed 3. **Under-fetching** is when one endpoint is not enough, so you call a second and a third — the "waterfall". GraphQL lets one request ask for a user, their last five posts, and each post's comment count, all at once, with every field named explicitly.
+Two problems have names. Over-fetching is an endpoint that hands you 40 fields when you needed 3. Under-fetching is one endpoint that is not enough, so you call a second and a third. That chain is the waterfall. GraphQL lets one request ask for a user, their last five posts, and each post's comment count, with every field named.
 
 ![Side-by-side of REST needing three endpoint calls versus GraphQL fetching the same nested data in one typed query](assets/i65_01_de542c0f.svg)
 
-REST spreads one screen across several endpoints and fixed payloads; GraphQL lets the client request the exact nested shape from a single endpoint — at the cost of harder caching and resolver-level work.
+REST spreads one screen across several endpoints and fixed payloads. GraphQL lets the client request the exact nested shape from a single endpoint, at the cost of harder caching and resolver-level work.
 
 ## How it works (deep)
 
-The heart of a GraphQL server is the pairing of a **schema** with **resolvers**. The schema is the "what" — a menu of types and fields. Resolvers are the "how" — a function per field that knows where to get that field's value. When a query arrives, the server does four things: **parses** the query string into an AST, **validates** it against the schema (unknown field? wrong argument type? rejected before any code runs), **executes** by walking the query tree and calling each field's resolver, then assembles the result into JSON matching the requested shape.
+A GraphQL server pairs a schema with resolvers. The schema is the menu of types and fields. A resolver is the function that knows where that field's value comes from. When a query arrives, the server parses the string into a tree, validates it against the schema, and rejects an unknown field or a wrong argument type before your code runs. Then it executes by walking the tree and calling each field's resolver, and it assembles JSON in the shape that was asked for.
 
 ![Pipeline showing a query string flowing through parse, validate, execute-resolvers, to a JSON response](assets/i65_02_76f1c6dd.svg)
 
-Every query is parsed, validated against the typed schema, then executed by walking field-by-field to resolvers — nested fields resolve top-down, which is where the N+1 problem is born and where DataLoader solves it.
+Every query is parsed, validated against the typed schema, then executed field by field. Nested fields resolve from the top down. That walk is where the N+1 problem starts, and where DataLoader stops it.
 
-Resolution is **hierarchical and top-down**. The `user` resolver runs first and returns a user object (the "parent"). Then, for each field the query asked for on that user, the corresponding resolver runs, receiving that parent. A field resolver's signature is `(parent, args, context, info)`: `parent` is the resolved object above it, `args` are the field's arguments, `context` is a per-request bag (auth, loaders, db handles) shared across every resolver in that request, and `info` is the query AST for advanced cases. If a field maps directly to a property on `parent`, you can omit the resolver — the "default resolver" reads it for you.
+The `user` resolver runs first and returns a user object, the parent. Then each field the query asked for on that user runs its own resolver and receives that parent. The signature is `(parent, args, context, info)`. `parent` is the object one level up. `args` are the field's arguments. `context` is a per-request bag, shared by every resolver in that request, where you put auth, loaders, and database handles. `info` is the query tree, for the rare case that needs it. If a field is just a property on `parent`, you can omit the resolver. The default resolver reads it.
 
-This top-down walk creates the single most important GraphQL performance trap: the **N+1 problem**. Ask for 10 posts and each post's author, and the naive author-resolver fires 10 separate database queries — one per post — on top of the 1 query for the posts. The fix is **DataLoader**: a per-request utility that collects all the keys requested within a tick, issues *one* batched query (`WHERE id IN (...)`), and also caches within the request so the same author is never fetched twice. DataLoader is not optional in production GraphQL; it is the thing that makes the flexible query model survivable.
+Ask for 10 posts and each post's author, and a naive author resolver fires 10 database queries on top of the 1 query for the posts. That is N+1. DataLoader is a per-request helper that collects the keys requested in one tick, issues one batched query such as `WHERE id IN (...)`, and caches inside that request so the same author is not fetched twice. Create the loader in `context`, not as a global, or one user's cache leaks into the next request.
 
-Two more structural facts. First, GraphQL is **transport-agnostic but conventionally a single `POST /graphql`**. That is why HTTP caching (which keys on URL + method) does not help you — every query is a POST to the same URL. Caching moves into the application: persisted queries, response caches keyed on the query, or field-level caching. Second, the schema is **introspectable**: the server can describe its own types, which powers auto-generated docs, IDE autocomplete, and code generation — a genuine developer-experience win REST only gets via extra tooling like OpenAPI.
+Two more facts. GraphQL does not require HTTP, but the usual shape is a single `POST /graphql`. HTTP caches key on URL and method, so they cannot tell one query from another. Caching moves into the app: persisted queries, a response cache keyed on the query, or field-level caches. The schema is also introspectable. The server can describe its own types, which powers generated docs, editor autocomplete, and code generation. REST gets that only with extra tooling such as OpenAPI.
 
 ## Code examples
 
-A minimal server with Apollo Server 5 (the current major line — Apollo Server 4 has been end-of-life since 26 January 2026) and standalone startup. Schema-first: types in SDL, resolvers as plain functions. Install with `npm install @apollo/server graphql@16` — Apollo Server 5 requires Node.js 20+ and `graphql` `^16.11.0` as a peer dependency, so a bare `npm install graphql` (which now installs v17) does not satisfy it.
+A minimal server with Apollo Server 5 and standalone startup. Schema-first: types in the schema language, resolvers as plain functions. Install with `npm install @apollo/server graphql@16`. Apollo Server 5 requires Node.js 20 or newer and `graphql` `^16.11.0` as a peer, so a bare `npm install graphql`, which now installs v17, does not satisfy it. The Apollo Server 4 end date is in Good to know.
 
 javascript
 
@@ -201,17 +205,17 @@ const resolvers = {
 
 ## ⭐ Interview lens
 
-> **Q: What problems does GraphQL solve that REST struggles with?** Over-fetching (endpoints returning more than a screen needs) and under-fetching (needing several round-trips to assemble one view). The client specifies the exact fields, nested, in a single request against one endpoint, and the strongly-typed schema gives introspection and codegen for free.
+> **Q: What problems does GraphQL solve that REST struggles with?**  
+> A: REST fixes the shape of each URL. The server decides the fields, and the client takes them or calls another URL. Over-fetching is the first problem: an endpoint returns 40 fields and the screen needed 3. Under-fetching is the second: one endpoint is not enough, so the client calls a second and a third and stitches them. That chain is a waterfall, and it hurts on a slow network. GraphQL lets the client send one query that names the nested fields, a user, their posts, each post's title, and the server returns JSON in that same shape from one endpoint, usually `POST /graphql`. The schema is the typed contract, so an unknown field is rejected before a resolver runs, and the server can describe its own types for docs and code generation. It does not replace REST. The limit is the cost of that flexibility: caching is no longer free, and each field is a function that can hit the database.
 
-> **Q: Explain the N+1 problem in GraphQL and how you fix it.** Resolvers execute top-down per field, so a list of N parents whose child field each hits the DB produces 1 + N queries. Fix with DataLoader: it collects keys within a tick, issues one batched `IN (...)` query, and caches per request. *Trap:* saying "add a database index" — indexing speeds each query but you are still making N of them.
+> **Q: Explain the N+1 problem in GraphQL and how you fix it.**  
+> A: Resolvers run from the top down, one function per field. The posts resolver returns a list. Then the author resolver runs once per post, and a naive one does `find` or a query each time. Ten posts means 1 query plus 10 more. An index makes each of those 10 faster and you still make 10 of them. DataLoader fixes the count. You create it per request on `context`. During one tick, every `load(id)` is collected, then one batched query runs, `WHERE id IN (...)`, and the results are handed back in the same order as the ids. It also caches inside that request, so two posts by the same author do not fetch the user twice. The federation example showed the same trap: `__resolveReference` ran once per post even though both posts were user 1. The limit is a loader that lives longer than the request. A global cache would leak one user's data into the next request.
 
-> **Q: Why is HTTP caching harder with GraphQL than REST?** REST caches on URL + method; GET `/users/1` is trivially cacheable. GraphQL is conventionally a single `POST /graphql`, so URL-based caches cannot distinguish queries. You move caching into the app: persisted queries, response caching keyed on the query, or field-level caches.
+> **Q: Why is HTTP caching harder with GraphQL than REST?**  
+> A: A REST cache keys on the URL and the method. `GET /users/1` is the same response for every caller who is allowed to see it. GraphQL is conventionally one `POST /graphql`. The URL does not change, and the body does, so a CDN or a browser cache cannot tell the queries apart. You move caching into the application. Persisted queries mean only queries you have already vetted will run, which also caps cost on a public API. Or you cache the response keyed on the query, or you cache individual fields. The limit is that none of this is free. You have to add it. A CDN will not do it from the URL.
 
-> **Q: A resolver throws. What HTTP status does the client see?** Usually still **200** — GraphQL reports errors in an `errors` array inside the JSON body while returning partial `data`. Clients must check that array, not rely on the status code. This surprises people coming from REST.
-
-> **Q: What are the arguments to a resolver?** `(parent, args, context, info)`. `parent` is the resolved object one level up, `args` the field arguments, `context` the shared per-request object (auth, loaders, db), `info` the query AST. Loaders and the current user live on `context`.
-
-> **Q: When would you NOT choose GraphQL?** Simple CRUD with few clients, endpoints that benefit from HTTP/CDN caching, file uploads/downloads, or teams without the appetite for schema governance and N+1 discipline. GraphQL's flexibility is overhead you should only pay when many clients need divergent, graph-shaped data.
+> **Q: When would you NOT choose GraphQL?**  
+> A: Skip it for simple CRUD with one or two clients, for endpoints that want HTTP or CDN caching, and for file upload and download, which are a poor fit for a JSON query. Also skip it if the team will not keep the schema and will not batch resolvers. The flexible query is overhead you pay on every request. Use it when many clients need different slices of the same graph of entities. A related limit inside GraphQL itself: a thrown resolver usually still comes back as HTTP 200, with the failure in an `errors` array and partial `data` beside it. Clients that only check the status line will treat a failure as success. And a public schema plus unbounded depth is a map of your domain and a way to make one request very expensive, so you cap depth and complexity.
 
 ## Cheat-card
 
@@ -225,7 +229,17 @@ const resolvers = {
 - **Subscriptions:** graphql-ws 6.3.0 on a `ws` server via `useServer` from `graphql-ws/use/ws`, sharing the `http.Server` with `@as-integrations/express5`; `startStandaloneServer` has no WebSocket support.
 - **`subscribe`:** return an AsyncIterator such as `events.on(bus, name)` directly; an `async function*` wrapper keeps the listener until the next event after unsubscribe. In-memory buses reach one process only.
 - **Federation 2:** entities marked `@key`, loaded by `__resolveReference` through `_entities`; the router builds a query plan across subgraphs. Apollo recommends the GraphOS Router (Rust) over `@apollo/gateway` (2.14.4) in most cases; `APOLLO_TELEMETRY_DISABLED=1` opts out of the gateway's telemetry.
-- **Codegen:** `@graphql-codegen/cli` 7.4.6 + `typescript` + `typescript-resolvers` generates a typed `Resolvers` map; set `contextType` and `mappers` (row types as `parent`) and let `tsc` check it.
+- **Codegen:** `@graphql-codegen/cli` 7.4.6 plus `typescript` and `typescript-resolvers` writes a typed `Resolvers` map. Set `contextType` and `mappers` so the parent is the row type, then let `tsc` check it.
+
+## Good to know
+
+- Q: A resolver throws. What HTTP status does the client see? Usually still 200. The failure is in an `errors` array, often with partial `data`. Clients must read that array.
+- Q: What are the resolver arguments? `(parent, args, context, info)`. Parent is the object above, args are the field arguments, context is the per-request bag for auth and loaders, info is the query tree.
+- Q: How do you add subscriptions on Apollo Server 5, and what changes with three instances? There is no built-in subscription transport for a non-federated graph. Put HTTP on your own `http.Server` with `@as-integrations/express5`, attach `ws` plus `useServer` from `graphql-ws/use/ws`, and dispose it in `drainServer`. `subscribe` returns an AsyncIterator. An in-memory emitter only reaches subscribers on that process, so three instances need a shared broker such as Redis. `startStandaloneServer` has no WebSocket support.
+- Q: In Federation 2, how does a query that needs two subgraphs get answered? Entities are marked `@key`. The router fetches the root field, gets references of `__typename` plus key, sends them to the other subgraph's `_entities`, and `__resolveReference` loads each entity. Apollo recommends the Rust GraphOS Router over Node `@apollo/gateway` in most cases.
+- Apollo Server 4 has been end-of-life since 26 January 2026. Apollo Server 5.5.1 with graphql 16.14.2 printed `ready at http://localhost:4000/`.
+- `@apollo/gateway` 2.14.0 added opt-out anonymous telemetry. With the variable unset, a run tried `169.254.169.254` and logged `MetadataLookupWarning`. Set `APOLLO_TELEMETRY_DISABLED=1`. The package checked here is 2.14.4, released 2026-08-18. The GraphOS Router binary and Rover were not run.
+- `buildSubgraphSchema({ typeDefs, resolvers })` threw `TypeError: doc.definitions is not iterable` on @apollo/subgraph 2.15.0 and 2.15.1. It worked on 2.14.4. Pass an array.
 
 ---
 
@@ -795,8 +809,4 @@ With the generator, `return()` was still pending after 500 ms and the listener w
 
 ### ⭐ Interview lens (additional topics)
 
-> **Q: “How do you add subscriptions to an Apollo Server 5 API, and what changes when you run three instances?”**  
-> A: Apollo Server has no built-in subscription transport for a non-federated graph. Serve HTTP through an integration (`@as-integrations/express5`) on your own `http.Server`. Attach a `ws` `WebSocketServer` to it with graphql-ws's `useServer({ schema })`, and dispose it in a `drainServer` plugin hook. Each `Subscription` field's `subscribe` returns an AsyncIterator. With three instances, an in-memory emitter only reaches subscribers on the instance that handled the mutation, so events must go through a shared broker such as Redis pub/sub. *Trap:* expecting `startStandaloneServer` to handle WebSockets.
-
-> **Q: “In Federation 2, how does a query that needs fields from two subgraphs get answered?”**  
-> A: Entities are marked `@key(fields: "id")` in each subgraph that contributes fields. The router builds a query plan. It fetches from the subgraph that owns the root field, which returns entity references (`__typename` plus key). It then sends those representations to the other subgraph's `_entities` field, where `__resolveReference` loads each entity, and merges the results. Apollo recommends the Rust-based GraphOS Router over the Node `@apollo/gateway` in most cases.
+The subscriptions question and the Federation question are one line each under Good to know.

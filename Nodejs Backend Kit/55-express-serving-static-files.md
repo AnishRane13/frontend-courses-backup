@@ -13,20 +13,24 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`express.static` is middleware that, for a GET or HEAD request, looks for a file under a root directory and streams it if it is there. If the file is missing it calls next, so later routes still run. It sets the content type, the length, a validator for caches, and support for range requests. Apps use it for a built front end, images, and files like robots.txt, instead of writing that file server by hand. The trade-off is that caching and the "page not found" fallback are your settings. Cache the HTML for too long and users keep a dead build. Fall back to index.html for every miss and a missing script comes back as a web page.
+
 ## Why it matters
 
-Almost every Express app sends some files straight from disk: a built single-page app (SPA), images, a `robots.txt`, a `.well-known/security.txt`. Lesson 42's appendix built a static file server by hand and showed how many details it needs: MIME types, streaming, `..` segments, dotfiles, directory requests. `express.static` does all of that in one line, so most apps use it. The bugs come from the settings around it:
+Almost every Express app sends some files straight from disk: a built single-page app, images, a `robots.txt`, a `.well-known/security.txt`. Lesson 42's appendix built that server by hand and showed the details: MIME types, streaming, `..` segments, dotfiles, and directory requests. `express.static` does that in one line. The bugs come from the settings around it.
 
-- **Stale apps after a deploy.** If HTML is cached for an hour, users keep loading the old `index.html`, which points at JavaScript files the new build deleted.
+- **Stale apps after a deploy.** If HTML is cached for an hour, users keep the old `index.html`, which points at JavaScript files the new build deleted.
 - **Endless revalidation.** If nothing is cached, every page view re-requests every asset.
-- **A history fallback that returns HTML for everything.** A missing `/assets/app.0ld0ld.js` gets `200 text/html`, so the browser receives HTML where it expected a script, and API clients get the SPA shell instead of a JSON 404.
+- **A history fallback that returns HTML for everything.** A missing `/assets/app.0ld0ld.js` comes back as `200` with `text/html`. The browser expected a script. An API client gets the SPA shell instead of a JSON 404.
 - **Leaking files.** Before Express 5, a dot-directory such as `.git/` inside the served folder was served by default.
 
 ## The concept, simply
 
-`express.static(root, options)` returns a middleware function. For a `GET` or `HEAD` request it takes the request path (after any mount prefix), resolves it under `root`, and if a regular file is there it streams that file with `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`, `Cache-Control` and `Accept-Ranges` headers. If there is no such file it calls `next()`, so later middleware and routes still get the request. That one property, "serve it if it exists, otherwise step aside", is what makes static serving fit into the middleware pipeline from lesson 49.
+`express.static(root, options)` returns a middleware function. For GET or HEAD it takes the request path, after any mount prefix, resolves it under `root`, and if a regular file is there it streams that file. The response gets `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`, `Cache-Control`, and `Accept-Ranges`. If there is no such file it calls `next()`, so later middleware and routes still run. "Serve it if it exists, otherwise step aside" is what makes static files fit the pipeline from lesson 49.
 
-Express does not implement this itself. `express.static` is the [serve-static](https://github.com/expressjs/serve-static) package (2.2.1 under Express 5.3.0; 1.16.3 under Express 4.22.3), and serve-static hands each file to the [send](https://github.com/pillarjs/send) package (1.2.1 under Express 5.3.0; 0.19.2 under Express 4.22.3), which does the path checks, the conditional-request logic and the streaming. `res.sendFile` uses the same `send` package (lesson 56).
+Express does not implement this itself. `express.static` is the serve-static package, and serve-static hands each file to the send package, which does the path checks, the conditional requests, and the streaming. `res.sendFile` uses the same send package. Lesson 56 covers that.
 
 Where it sits in a request:
 
@@ -56,17 +60,17 @@ setHeaders(res, path, stat)  →  Cache-Control, ETag, Last-Modified, Accept-Ran
 
 ## How it works
 
-What happens for `GET /static/assets/app.3f9a1c.js` with `app.use('/static', express.static(PUBLIC))`:
+For `GET /static/assets/app.3f9a1c.js` with `app.use('/static', express.static(PUBLIC))`:
 
-1. **Mount matching.** The router sees the `/static` prefix, strips it, and calls the middleware with `req.url` set to `/assets/app.3f9a1c.js` (`req.originalUrl` keeps the full path).
-2. **Method check.** Anything other than `GET` or `HEAD` goes to `next()`. With `fallthrough: false` it gets `405` and `Allow: GET, HEAD` instead.
-3. **Path decoding and checks (in send).** The path is percent-decoded. A malformed escape or a NUL byte gives `400`. The path is then joined to the root and normalized, and if a `..` segment would still be left (an attempt to climb out of the root) the result is `403`. Then the dotfiles rule is applied to every segment of the path below the root.
-4. **`stat()`.** A missing file is `404` inside send, which serve-static turns into `next()`. A directory without a trailing slash gets a `301` to the same path plus `/` (option `redirect`). A directory with a trailing slash is retried with `index.html` (option `index`). If there is no index file, the request goes to `next()`. No directory listing is ever generated.
-5. **Headers.** `setHeaders(res, path, stat)` runs first, then send fills in whatever is still unset: `Accept-Ranges: bytes`, `Cache-Control: public, max-age=<maxAge in seconds>` (plus `, immutable`), `Last-Modified` from the file's mtime, and a weak `ETag` built from size and mtime (`W/"<size hex>-<mtime ms hex>"`). `Content-Type` comes from the extension.
-6. **Freshness and ranges.** If `If-None-Match` matches the ETag, or `If-Modified-Since` is not older than the mtime, the answer is `304` with no body. A valid `Range` header gives `206` (lesson 56 shows ranges in detail).
-7. **Streaming.** The file is piped from an `fs.createReadStream`, so a large file is never read into memory all at once.
+1. **Mount.** The router sees the `/static` prefix, strips it, and calls the middleware with `req.url` of `/assets/app.3f9a1c.js`. `req.originalUrl` keeps the full path.
+2. **Method.** Anything other than GET or HEAD goes to `next()`. With `fallthrough: false` it gets `405` and `Allow: GET, HEAD`.
+3. **Path checks, inside send.** The path is percent-decoded. A bad escape or a NUL byte is `400`. The path is joined to the root and normalized. A `..` segment that would still climb out of the root is `403`. Then the dotfiles rule runs on every segment below the root.
+4. **`stat()`.** A missing file is a 404 inside send, which serve-static turns into `next()`. A directory without a trailing slash gets a 301 to the same path plus `/`, unless you turn `redirect` off. A directory with a trailing slash is retried as `index.html`, unless you change `index`. No index file means `next()`. Express never lists the directory.
+5. **Headers.** `setHeaders(res, path, stat)` runs first. Then send fills whatever is still unset: `Accept-Ranges: bytes`, `Cache-Control: public, max-age=<seconds>` plus `, immutable` when you asked for it, `Last-Modified` from the file mtime, and a weak ETag from size and mtime, shaped like `W/"<size hex>-<mtime ms hex>"`. `Content-Type` comes from the extension.
+6. **Freshness and ranges.** A matching `If-None-Match`, or an `If-Modified-Since` that is not older than the mtime, is `304` with no body. A valid `Range` is `206`. Lesson 56 shows ranges.
+7. **Streaming.** The file is piped from `fs.createReadStream`. A large file is not read into memory all at once.
 
-**The options (serve-static 2.2.1 README).**
+**The options, from the serve-static 2.2.1 README.**
 
 | Option | Default | What it does |
 |---|---|---|
@@ -83,7 +87,7 @@ What happens for `GET /static/assets/app.3f9a1c.js` with `app.use('/static', exp
 | `redirect` | `true` | Redirect a directory path to the same path with a trailing `/`. |
 | `setHeaders` | — | `fn(res, path, stat)`, called synchronously just before the headers go out. Only called when a file is actually sent. |
 
-**Cache headers for a built SPA.** A bundler such as Vite or webpack puts a hash of the content in each asset's filename (`app.3f9a1c.js`). A file with a given name therefore never changes. When the code changes, the file gets a new name and `index.html` points at it. That gives two classes of file with opposite rules:
+**Cache headers for a built SPA.** A bundler such as Vite or webpack puts a hash of the file contents in the filename, like `app.3f9a1c.js`. That name never changes. When the code changes, the file gets a new name and `index.html` points at it. The two kinds of file need opposite cache rules.
 
 text
 
@@ -96,13 +100,13 @@ app.3f9a1c.js ─ Cache-Control: public, max-age=31536000, immutable ─► reus
 deploy:  index.html now references app.9d41e2.js  →  new URL, fetched once, then cached for a year
 ```
 
-`no-cache` does not mean "do not store". RFC 9111 §5.2.2.4 says it means the cache must not use the stored copy without validating it with the server first, which costs a round trip but usually returns a body-less `304`. `max-age=31536000` (one year in seconds) plus `immutable` (RFC 8246) tells the browser not to revalidate during that year. RFC 8246 says clients "SHOULD NOT issue a conditional request during the response's freshness lifetime (e.g., upon a reload)"; a force-reload still revalidates.
+`no-cache` does not mean "do not store". It means the cache must check with the server before using the stored copy. That costs a round trip and usually comes back as a `304` with no body. `max-age=31536000` is one year in seconds. Together with `immutable`, it tells the browser not to revalidate during that year. A force-reload still revalidates.
 
-**Behind a CDN or reverse proxy.** A shared cache (CDN, nginx `proxy_cache`, Varnish) stores a response under a *cache key*. By default that key is the method and the URL (often including the host), not the request headers. If the response depends on a request header, the server has to say so with `Vary`, for example `Vary: Accept-Encoding` when the body may be gzipped and `Vary: Accept` when the SPA fallback answers differently to `Accept: text/html`. Without it, the cache can hand a gzipped body to a client that did not ask for gzip, or the SPA shell to an API client. `express.static` itself sends no `Vary` header (Example 7 shows that `compression` adds one). Express's `trust proxy` setting does not affect `express.static` at all. It decides whether `req.protocol`, `req.ip` and `req.hostname` are read from `X-Forwarded-*` headers, which matters when you build absolute URLs or redirects behind the proxy (lesson 41's appendix [`X-Forwarded-For` and trust boundaries](41-parsing-requests-writing-responses.md#x-forwarded-for-and-trust-boundaries) covers the trust boundary).
+**Behind a shared cache.** A CDN, nginx `proxy_cache`, or Varnish stores a response under a cache key. By default that key is the method and the URL, not the request headers. If the body depends on a request header, say so with `Vary`. Use `Vary: Accept-Encoding` when the body may be gzipped, and `Vary: Accept` when the SPA fallback answers differently to `Accept: text/html`. Without it, the cache can hand a gzipped body to a client that did not ask for gzip, or the SPA shell to an API client. `express.static` itself sends no `Vary`. Example 7 shows that `compression` adds one. `trust proxy` does not change static headers. It only changes whether `req.protocol`, `req.ip`, and `req.hostname` are read from `X-Forwarded-*` headers.
 
 > ⚠️ Unverified: how specific CDNs (CloudFront, Cloudflare, Fastly) build their cache keys, which `Vary` values they honour, and whether they keep `immutable`. No CDN was available to test. The behaviour above is what RFC 9111 specifies; check your CDN's documentation for its defaults.
 
-**Security.** send refuses `..` after decoding (`403`) and malformed or NUL-containing paths (`400`), and it never lists directories (that is a separate package, `serve-index`). send follows symlinks: in a separate run, a `public/link.txt` symlink pointing at `../secret.txt` was served (`200 TOP SECRET`), so never let anything create links inside the root. It also does not stop you from serving the wrong folder: `express.static('.')` publishes your source code, `package.json` and anything else in the project directory. Example 6 attacks it with `curl --path-as-is`. For the hand-written version of the same checks, see lesson 42's appendix, [A safe path-traversal guard](42-manual-routing-serving-json.md#a-safe-path-traversal-guard).
+**Security.** send refuses `..` after decoding, with `403`, and a malformed or NUL path, with `400`. It never lists directories. That is a separate package, `serve-index`. send follows symlinks. In a separate run, a `public/link.txt` symlink pointing at `../secret.txt` was served as `200` with the body `TOP SECRET`, so never let anything create links inside the root. `express.static('.')` publishes your source, `package.json`, and the rest of the project directory. Example 6 attacks the checks with `curl --path-as-is`. Lesson 42's appendix builds the same checks by hand.
 
 ## Code examples
 
@@ -578,58 +582,58 @@ function makeApp(trust) {
 
 ## Common mistakes & gotchas
 
-- **A relative root.** `express.static('public')` is resolved against `process.cwd()`, not against the file that calls it. Start the app from another directory and every file is a 404. Build the root from `import.meta.url` or `__dirname`.
-- **Serving the project directory.** `express.static('.')` or `express.static(__dirname)` publishes `package.json`, the source code and anything else next to it. Serve a dedicated `public/` or `dist/` folder.
-- **Catch-all SPA fallback.** `app.get('/{*splat}', sendIndex)` turns every missing asset and every unknown API route into `200 text/html` (Example 4).
-- **Long `max-age` on unhashed files.** `maxAge: '1y'` on `index.html` or `logo.png` means users keep the old copy for a year. Only fingerprinted names can be cached that long.
-- **Expecting `dotfiles: 'deny'` to produce a 403.** With the default `fallthrough: true` the 403 becomes `next()` and your 404 route answers.
-- **Upgrading to Express 5 and losing `.well-known`.** Dot-directories are now ignored by default. Mount that one directory with `dotfiles: 'allow'`.
-- **Sending `err.message` to the client.** For a missing file it contains the absolute path on disk (`ENOENT: no such file or directory, stat '/srv/app/public/x.js'`).
-- **Putting `express.static` after heavy middleware.** Every asset request then runs body parsers, session lookups and auth. Register static serving early, before sessions and auth, unless the files are private.
-- **Using `express.static` for user uploads.** Uploaded files may be HTML or SVG that runs script in your origin. Serve them from another origin, or with `Content-Disposition: attachment` (lesson 56) and `X-Content-Type-Options: nosniff`.
+- **A relative root.** `express.static('public')` is resolved from `process.cwd()`, not from the file that calls it. Start the app from another directory and every file is a 404. Build the root from `import.meta.url` or `__dirname`.
+- **Serving the project directory.** `express.static('.')` or `express.static(__dirname)` publishes `package.json` and the source. Serve a dedicated `public/` or `dist/` folder.
+- **A catch-all SPA fallback.** `app.get('/{*splat}', sendIndex)` turns every missing asset and every unknown API route into `200` with `text/html`. Example 4 shows it.
+- **A long `maxAge` on a file whose name does not change.** `maxAge: '1y'` on `index.html` or `logo.png` keeps the old copy for a year. Only fingerprinted names can be cached that long.
+- **Expecting `dotfiles: 'deny'` to produce a 403.** With the default `fallthrough: true`, that 403 becomes `next()` and your 404 route answers.
+- **Losing `.well-known` on the way to Express 5.** Dot-directories are ignored by default. Mount that one directory with `dotfiles: 'allow'`.
+- **Sending `err.message` to the client.** For a missing file it contains the absolute path on disk.
+- **Putting `express.static` after heavy middleware.** Every asset then runs body parsers, session lookups, and auth. Register it early, unless the files are private.
+- **Using `express.static` for user uploads.** An upload may be HTML or SVG that runs script on your origin. Serve it from another origin, or with `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`. Lesson 56 covers the header.
 
 ## Best practices
 
-- **Two mounts for an SPA:** `/assets` with `maxAge: '1y', immutable: true, fallthrough: false`, and the rest with `Cache-Control: no-cache` on HTML.
-- **A narrow history fallback:** `GET`/`HEAD`, not `/api`, no extension, `Accept` contains `text/html`, plus `Vary: Accept`.
-- **Absolute roots** from `fileURLToPath(new URL('./public', import.meta.url))` or `path.join(__dirname, 'public')`.
-- **Keep the default `dotfiles: 'ignore'`** and opt in per directory (`/.well-known`) with `dotfiles: 'allow'`.
-- **Use `fallthrough: false` on mounts that are only a directory** (like `/assets`), so misses are real 404s and other methods get `405`.
-- **Put a CDN or reverse proxy in front for heavy static traffic**, as the Express API docs recommend, and send `Vary` for every request header your response depends on.
-- **Set `trust proxy` to the proxies you run**, not `true`, if you rely on `req.protocol` or `req.ip`.
+- Two mounts for an SPA. `/assets` gets `maxAge: '1y'`, `immutable: true`, and `fallthrough: false`. HTML gets `Cache-Control: no-cache` through `setHeaders`.
+- A narrow history fallback: GET or HEAD, not under `/api`, no file extension, and `Accept` contains `text/html`. Send `Vary: Accept`.
+- An absolute root, from `fileURLToPath(new URL('./public', import.meta.url))` or `path.join(__dirname, 'public')`.
+- Keep the default `dotfiles: 'ignore'`. Opt in per directory, such as `/.well-known`, with `dotfiles: 'allow'`.
+- Use `fallthrough: false` on a mount that is only a directory, such as `/assets`, so a miss is a real 404 and other methods get 405.
+- Put a CDN or reverse proxy in front for heavy static traffic, and send `Vary` for every request header the response depends on.
+- Set `trust proxy` to the proxies you run, not `true`, when you rely on `req.protocol` or `req.ip`.
 
 ## ⭐ Interview lens
 
 > **Q: “What does `express.static` do when the file does not exist?”**  
-> A: It calls `next()`, so later middleware and routes still get the request. That is the default `fallthrough: true`. With `fallthrough: false` a miss becomes `next(err)` with `err.status` 404, and non-GET/HEAD methods get `405` with `Allow: GET, HEAD`. *Trap:* with fallthrough on, a `403` from `dotfiles: 'deny'` or a `..` path is also turned into `next()`.
+> A: With the default `fallthrough: true`, a missing file calls `next()`. Later middleware and routes still see the request, which is how a 404 handler or an SPA fallback can run. `express.static` only handles GET and HEAD. Anything else also falls through. Set `fallthrough: false` and a miss becomes `next(err)` with `err.status` 404, and other methods get `405` with `Allow: GET, HEAD`. The trap is that fallthrough does not only hide 404s. A `403` from `dotfiles: 'deny'`, or from a `..` path, is also turned into `next()` when the status is below 500. The client then sees your normal 404 and cannot tell a blocked path from a missing file.
 
 > **Q: “How would you cache a built React or Vue app?”**  
-> A: Hashed asset files get `Cache-Control: public, max-age=31536000, immutable`, because a changed file gets a new name. `index.html` gets `no-cache`, so the browser revalidates it on each load and gets a cheap `304` until a deploy changes it. A deploy then changes the asset URLs inside `index.html`. *Trap:* `no-cache` still allows storing; `no-store` is the one that forbids it.
+> A: A bundler puts a content hash in each asset filename, so `app.3f9a1c.js` never changes until the bytes change, and then the name changes. Give those files `Cache-Control: public, max-age=31536000, immutable`. 31536000 is one year in seconds. The browser can reuse the file all year without asking again. Give `index.html` `no-cache`, so every load revalidates. Until a deploy changes the file, that revalidation is a cheap `304` with no body. After a deploy, the new HTML points at new asset URLs, which are fetched once and cached again. The trap is the word `no-cache`. It still allows storing. `no-store` is the directive that forbids a stored copy. Do not put a year-long max age on HTML or on any file whose name stays the same.
 
 > **Q: “Your SPA fallback serves `index.html` for unknown paths. What can go wrong?”**  
-> A: Missing scripts after a deploy come back as `200 text/html`, API 404s turn into HTML, POSTs can get HTML, and a CDN can cache the HTML for a URL that an API client also requests. Limit it to `GET`/`HEAD`, non-`/api` paths, paths without an extension and requests whose `Accept` includes `text/html`, and send `Vary: Accept`.
-
-> **Q: “What changed about dotfiles in Express 5?”**  
-> A: serve-static 2 applies `dotfiles: 'ignore'` to every path segment below the root, so files inside dot-directories like `.well-known` are 404 by default. In Express 4, `.env` was already hidden by default, but files inside a dot-directory were served. Opt in per directory with `dotfiles: 'allow'`.
+> A: A client-side router owns URLs such as `/dashboard/settings` that are not files, so a reload must still get `index.html`. If that fallback is "any unknown path", three things break. A browser that still has the previous HTML asks for `/assets/app.0ld0ld.js`, which the new build deleted, and gets `200` with `text/html` instead of JavaScript. An unknown `/api` route gets the HTML shell, so the client fails while parsing JSON. A shared cache can store that HTML for a URL an API client also requests. Limit the fallback to GET and HEAD, skip `/api`, skip any path with a file extension, and require `Accept` to contain `text/html`. Check the header text rather than `req.accepts('html')`, because `req.accepts` also says yes to `*/*` and to a missing `Accept` header. Send `Vary: Accept`.
 
 > **Q: “Can `GET /..%2f..%2fetc/passwd` escape `express.static`'s root?”**  
-> A: No. send decodes the path, normalizes it, and refuses any remaining `..` segment with `403`, and a NUL byte or malformed escape with `400`. The real risks are choosing the wrong root (`.`), or symlinks inside the root that point outside it.
+> A: No. send decodes the path, normalizes it, and refuses any `..` segment that would still climb out of the root, with status 403. A NUL byte or a broken percent-escape is 400. The same refusal covers `%2e%2e`, an encoded slash `%2f`, and an encoded backslash `%5c`, because the check runs after decoding. A `..` that stays inside the root, such as `assets/../about.html`, is normalized and served. With `fallthrough: true` the 403 becomes `next()`, so the client just sees your 404. The real ways out are choosing the wrong root, such as `'.'`, which publishes the project, or a symlink inside the root that points outside it. send follows symlinks. In a separate run a link to `../secret.txt` was served.
 
 ## Cheat-card
 
-- **`express.static(root, opts)`** = serve-static 2.2.1 → send 1.2.1 (Express 5.3.0). Express 4.22.3: serve-static 1.16.3 → send 0.19.2.
-- **Only `GET`/`HEAD`.** Miss → `next()`. `fallthrough: false` → `next(err)` (404) and `405` for other methods.
-- **Defaults:** `index: 'index.html'`, `redirect: true` (dir → `301` to `dir/`), `etag: true` (weak, size-mtime), `lastModified: true`, `maxAge: 0`, `acceptRanges: true`, `cacheControl: true`, `immutable: false`, `extensions: false`, `dotfiles: 'ignore'`.
-- **Never lists directories.**
-- **Mount:** `app.use('/static', express.static(dir))`; the prefix is stripped from `req.url`.
-- **Cache:** hashed assets `maxAge: '1y', immutable: true` → `public, max-age=31536000, immutable`; HTML `no-cache` via `setHeaders`. Revalidation → `304`.
-- **`setHeaders(res, path, stat)`** runs first; send does not overwrite a `Cache-Control` you set.
-- **SPA fallback:** GET/HEAD + not `/api` + no extension + `Accept` has `text/html` + `Vary: Accept`.
-- **Dotfiles (changed in Express 5):** dot-directories ignored too. `/.well-known` → mount with `dotfiles: 'allow'`.
-- **Traversal:** `..` (also `%2e%2e`, `..%2f`, `..%5c`) → `403`; NUL or bad escape → `400`; hidden as `next()` under fallthrough.
-- **Proxies:** caches key on URL; declare header dependencies with `Vary`; `trust proxy` changes `req.protocol/ip/hostname`, not static headers.
+- `express.static(root, opts)` is serve-static, which calls send. Express 5.3.0 uses serve-static 2.2.1 and send 1.2.1. Express 4.22.3 uses serve-static 1.16.3 and send 0.19.2.
+- Only GET and HEAD. A miss calls `next()`. `fallthrough: false` turns a miss into `next(err)` with 404, and other methods get 405.
+- Defaults: `index` is `index.html`, `redirect` is true so a directory becomes a 301 to `dir/`, `etag` is a weak tag from size and mtime, `lastModified` is true, `maxAge` is 0, `acceptRanges` is true, `cacheControl` is true, `immutable` is false, `extensions` is false, `dotfiles` is `'ignore'`.
+- It never lists a directory.
+- `app.use('/static', express.static(dir))` strips the prefix from `req.url`.
+- Hashed assets: `maxAge: '1y'` and `immutable: true` become `public, max-age=31536000, immutable`. HTML gets `no-cache` from `setHeaders`. Revalidation is a 304.
+- `setHeaders(res, path, stat)` runs first. send does not overwrite a `Cache-Control` you already set.
+- SPA fallback: GET or HEAD, not `/api`, no extension, `Accept` contains `text/html`, and `Vary: Accept`.
+- Dot-directories are ignored too, which changed in Express 5. Mount `/.well-known` with `dotfiles: 'allow'`.
+- Traversal: `..`, including `%2e%2e`, `..%2f`, and `..%5c`, is 403. A NUL or a bad escape is 400. Under fallthrough those become `next()`.
+- A shared cache keys on the URL. Declare header dependencies with `Vary`. `trust proxy` changes `req.protocol`, `req.ip`, and `req.hostname`, not the static headers.
 
----
+## Good to know
+
+- What changed about dotfiles in Express 5? serve-static 2 applies `dotfiles: 'ignore'` to every path segment below the root, so a file inside a dot-directory such as `.well-known` is a 404 by default. In Express 4, with serve-static 1.16.3, `.env` was already hidden, but files inside a dot-directory were served. The documented Express 4 exception was that the default would not ignore files within a directory whose name starts with a dot. Opt in per directory with `dotfiles: 'allow'`. The check only looks at segments below the root, so a root that itself sits inside a dot-directory still works.
+- `'1y'` becomes `max-age=31536000` because the ms package counts a year as 365.25 days and send then caps `maxAge` at 365 days.
 
 ## Learn More
 

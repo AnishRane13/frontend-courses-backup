@@ -13,22 +13,21 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+OpenTelemetry is a shared way for services to record one request as it moves. Each step becomes a span, a timed unit of work with an id, and a header called traceparent carries that id to the next service so the spans form one tree. A small SDK in the process sends the spans to a Collector, a separate process that forwards them to a backend such as Jaeger. It exists so you can tell whether a slow checkout was waiting on the next service, on a database pool, or on the query itself, using data you already emit. The trade-off is cost. Recording every span of every request uses CPU, network, and storage, so you usually keep only a fraction of traces.
+
 ## Why it matters
 
-A user reports that checkout "sometimes takes five seconds". Checkout touches a gateway, an orders service and PostgreSQL. Each one has its own logs, and nothing in those logs says which lines belong to the same click. You can see that the gateway was slow, but not whether it was waiting on the orders service, the orders service waiting on a pool connection, or the database running a bad plan.
+A user reports that checkout sometimes takes five seconds. Checkout touches a gateway, an orders service, and PostgreSQL. Each one has its own logs, and nothing in those logs says which lines belong to the same click. You can see that the gateway was slow, but not whether it was waiting on the orders service, the orders service was waiting on a pool connection, or the database was running a bad plan.
 
-**Observability** is being able to answer that kind of question from the data your services already emit, without shipping new code first. It needs three kinds of data and one thing that ties them together:
+Observability means answering that from data the services already emit, without shipping new code first. You need three kinds of data and one thing that ties them together. Traces show one request's path through every service, with a time for each step. Metrics are numbers added up over time, such as request rate, error count, and a latency histogram. They are cheap enough to keep for every request and to alert on (lesson [112](108-apm-and-alerting.md)). Logs are the event lines you already write (lesson [56](90-logging.md)). Context propagation carries a trace id from service to service, so all three can be joined for one request.
 
-- **Traces** show one request's path through every service, with timings for each step.
-- **Metrics** are numbers aggregated over time (request rate, error count, latency histogram), cheap enough to keep for every request and to alert on (lesson [112](108-apm-and-alerting.md)).
-- **Logs** are the detailed event lines you already write (lesson [56](90-logging.md)).
-- **Context propagation** carries a trace id from service to service, so all three can be joined for one request.
-
-**OpenTelemetry (OTel)** is the vendor-neutral standard for producing all of this: an API your code calls, an SDK that records and exports, instrumentation libraries that patch Express, `pg`, `fetch` and others for you, a wire protocol (**OTLP**), and a standalone process, the **Collector**, that receives, processes and forwards the data. Because the format is standard, you can send the same data to Jaeger, Grafana Tempo, Datadog or New Relic by changing exporter config instead of re-instrumenting.
+OpenTelemetry, often called OTel, is the vendor-neutral standard for producing all of this. Your code calls an API. An SDK records and exports. Instrumentation libraries patch Express, `pg`, `fetch`, and others for you. A wire protocol called OTLP carries the data. A standalone process, the Collector, receives it, processes it, and forwards it. Because the format is standard, you can send the same data to Jaeger, Grafana Tempo, Datadog, or New Relic by changing exporter config instead of re-instrumenting.
 
 ## The concept, simply
 
-A **trace** is the record of one operation, usually one incoming request, across every process it touched. It is a tree of **spans**. A span is one timed unit of work with these concrete fields (all taken from the real output in Example 3):
+A trace is the record of one operation, usually one incoming request, across every process it touched. It is a tree of spans. A span is one timed unit of work. These fields are taken from the real output in Example 3:
 
 | Field | Real value | What it is |
 |---|---|---|
@@ -41,11 +40,11 @@ A **trace** is the record of one operation, usually one incoming request, across
 | Attributes | `http.route: /checkout/:orderId`, `http.response.status_code: 200`, `db.query.text: SELECT …` | Key/value facts about this span; names follow the OTel **semantic conventions** |
 | Status | `Unset` (or `Error`) | Whether the operation failed |
 
-A **resource** describes the process that produced the data, not the request: `service.name: checkout`, `host.name`, `process.pid`, `process.runtime.version: 24.19.0`, `telemetry.sdk.version: 2.12.0`. Every span, metric point and log record from that process carries the same resource. The **instrumentation scope** names the library that created the span (`@opentelemetry/instrumentation-express 0.71.0`).
+A resource describes the process, not the request: `service.name: checkout`, `host.name`, `process.pid`, `process.runtime.version: 24.19.0`, `telemetry.sdk.version: 2.12.0`. Every span, metric point, and log record from that process carries the same resource. The instrumentation scope names the library that created the span, here `@opentelemetry/instrumentation-express 0.71.0`.
 
-A **metric** is a named instrument (counter, histogram, gauge) whose measurements the SDK aggregates in memory and exports every interval. A counter `invoices_processed` that you call `add(1)` on three times is exported as one data point with `Value: 3` (Example 6). A **log record** becomes correlated with a trace when it carries the same `trace_id` and `span_id`.
+A metric is a named instrument, a counter, a histogram, or a gauge. The SDK adds the measurements up in memory and exports them on an interval. A counter `invoices_processed` that you call `add(1)` on three times leaves as one point with `Value: 3` (Example 6). A log record joins a trace when it carries the same `trace_id` and `span_id`.
 
-**Context propagation across services.** Inside one process, the SDK keeps the "current span" in an `AsyncLocalStorage`-based context manager, so when the Express handler calls `fetch()`, the fetch instrumentation finds the handler's span and makes it the parent of the new client span. Across processes there is no shared memory, so the client puts the context into a request header and the server reads it back. OTel's default propagator uses the W3C Trace Context header **`traceparent`**. The value service B received in Example 3 was:
+Inside one process, the SDK keeps the current span in a context manager built on `AsyncLocalStorage`, so when the Express handler calls `fetch()`, the fetch instrumentation finds the handler's span and makes it the parent of the new client span. Across processes there is no shared memory. The client puts the context in a request header and the server reads it back. The default header is the W3C Trace Context header `traceparent`. The value service B received in Example 3 was:
 
 text
 
@@ -62,7 +61,7 @@ Service B's SDK reads this header, continues trace `5636…4f37`, and makes its 
 ![A correlation id threads one request: the client calls an API gateway, which mints an x-request-id if none is present; the auth service and the orders service log the same id; a log aggregator filters by requestId to show every hop's line in order. The footer says to propagate via headers plus AsyncLocalStorage.](assets/i53_02_6cd24834.svg)
 *Figure: the correlation-id pattern from lesson [56](90-logging.md): a gateway mints `x-request-id`, and every hop passes it on in a header and keeps it in `AsyncLocalStorage`. Look at: the same id in every box, which in OpenTelemetry is the trace id carried in `traceparent`.*
 
-The figure is the hand-rolled version of the same idea. In OpenTelemetry, the W3C `traceparent` header plays the role of `x-request-id`: the trace id is the correlation id, and you don't write the middleware. The SDK's AsyncLocalStorage context manager carries it inside each process, and the http and undici instrumentations write and read the header at every hop, adding a fresh parent span id each time so the backend can rebuild the tree, not just a flat list of lines.
+The figure is the hand-rolled version of the same idea. In OpenTelemetry, `traceparent` plays the role of `x-request-id`. The trace id is the correlation id, and you do not write the middleware. The http and undici instrumentations write and read the header, adding a fresh parent span id each hop so the backend can rebuild the tree, not just a flat list of lines.
 
 ## How it works
 
@@ -78,7 +77,7 @@ What happens for one request through the two services in this lesson:
 8. **The Collector processes and fans out.** Its pipeline is receivers → processors → exporters. Here: `otlp` receiver → `batch` processor → `debug` (print to stdout) and `otlp_grpc/jaeger` (forward to Jaeger).
 9. **Jaeger stores and serves.** Jaeger groups spans by trace id and serves them on its query API (`/api/v3/traces/<id>`), where Example 4 rebuilds the tree.
 
-**SDK setup and auto-instrumentation.** `@opentelemetry/sdk-node` wires together a tracer provider, a meter provider, a logger provider, resource detection, the propagators and the instrumentations. `@opentelemetry/auto-instrumentations-node` 0.81.0 bundles 41 instrumentations, and `getNodeAutoInstrumentations()` returned 39 of them: all except `fs` and `host-metrics`, which are off by default. You can configure one by its package name, for example `'@opentelemetry/instrumentation-net': { enabled: false }`, or with the environment variables `OTEL_NODE_ENABLED_INSTRUMENTATIONS` and `OTEL_NODE_DISABLED_INSTRUMENTATIONS` (short names such as `http,express,pg`). If you only want a few, install them separately (`@opentelemetry/instrumentation-http`, `-express`, `-pg`, `-undici`) and pass instances, as the lesson 102 appendix does.
+`@opentelemetry/sdk-node` wires a tracer provider, a meter provider, a logger provider, resource detection, the propagators, and the instrumentations. `@opentelemetry/auto-instrumentations-node` 0.81.0 bundles 41 instrumentations, and `getNodeAutoInstrumentations()` returned 39: all except `fs` and `host-metrics`, which are off by default. Turn one off by package name, for example `'@opentelemetry/instrumentation-net': { enabled: false }`, or with `OTEL_NODE_DISABLED_INSTRUMENTATIONS` using short names such as `http,express,pg`. If you only want a few, install them separately and pass instances, as the lesson 102 appendix does.
 
 **CommonJS vs ESM loading.** Instrumentations work by intercepting module loading, so they have to be installed before the module they patch is loaded.
 
@@ -89,7 +88,7 @@ What happens for one request through the two services in this lesson:
 | ESM, as written in OTel's `esm-support.md` | `node --experimental-loader=@opentelemetry/instrumentation/hook.mjs --import ./telemetry.mjs app.mjs` | Same hook. On Node v24.19.0 this prints `ExperimentalWarning: --experimental-loader may be removed in the future; instead use register()` |
 | Zero-code | `node --require @opentelemetry/auto-instrumentations-node/register app.js` (ESM adds the loader hook) | The `register` entry point builds the SDK from `OTEL_*` environment variables |
 
-OTel's own ESM document (`doc/esm-support.md` in opentelemetry-js) still documents the `--experimental-loader` form and says the recommendation will move to `module.register(...)`. This lesson uses `register()` inside `telemetry.mjs` because it worked on Node v24.19.0 without the warning (Example 3). Example 7 shows what you lose without any hook.
+This lesson calls `register()` inside `telemetry.mjs` because it worked on Node v24.19.0 without the warning (Example 3). Example 7 shows what you lose with no hook. The older `--experimental-loader` form is in Good to know.
 
 **Exporters and the Collector.** An exporter turns finished spans or metric points into a wire format. In the Node SDK the choices are OTLP over HTTP/protobuf (`@opentelemetry/exporter-trace-otlp-proto`, used here), OTLP over HTTP/JSON (`-otlp-http`), OTLP over gRPC (`-otlp-grpc`), Zipkin, Prometheus (metrics, pull) and the console exporters for debugging. OTLP's standard ports are 4317 (gRPC) and 4318 (HTTP); this lesson moves them to 7240/7241 because other processes share the machine. You could export straight from the app to a vendor, but most setups send OTLP to a Collector next to the app (a sidecar or a host agent). The Collector then:
 
@@ -116,7 +115,7 @@ Head sampling can't prefer errors or slow requests, because it decides before th
 
 **Example 1 — download and verify the Collector and Jaeger (no root, no Docker).**
 
-The archives come from the projects' GitHub release pages: `otelcol-contrib_0.162.0_linux_amd64.tar.gz` (112 MB) from `open-telemetry/opentelemetry-collector-releases` tag `v0.162.0`, and `jaeger-2.22.0-linux-amd64.tar.gz` (65 MB) from `jaegertracing/jaeger` tag `v2.22.0`. The link here was slow, so they were fetched with parallel ranged `curl -r` requests and joined; a plain `curl -sLO <url>` gives the same file. The collector project publishes a `.sha256` file per archive, and Jaeger publishes checksums for the binaries inside its archive:
+The archives are the official GitHub releases: Collector Contrib 0.162.0 (112 MB) and Jaeger 2.22.0 (65 MB). Each project publishes a checksum. A plain `curl -sLO` gives the same file as the ranged download used here:
 
 bash
 
@@ -582,7 +581,7 @@ console.log(`traces with spans from both services: ${both}`);
 //   traces with spans from both services: 250
 ```
 
-Earlier runs while writing this lesson gave 25.3 % (of 400), 25.8 % and 25.7 % (of 1,000): about a quarter each time, varying because trace ids are random. Every kept trace contains both services, and no trace has only one, because B never made its own decision. In the run above, B's log has 250 headers ending in `-01` and 750 ending in `-00` (`grep -c`). The first four:
+Every kept trace contains both services, and no trace has only one, because B never made its own decision. In the run above, B's log has 250 headers ending in `-01` and 750 ending in `-00`. Earlier percentages from the same setup are in Good to know. The first four headers:
 
 text
 
@@ -791,19 +790,16 @@ checkout  GET /checkout/:orderId  [instrumentation-http] 69.1 ms  span 080e4db6d
 ## ⭐ Interview lens
 
 > **Q: “What is a span, and how do spans from two services end up in one trace?”**  
-> A: A span is one timed operation with a trace id, its own span id, a parent span id, a name, a kind, start and end times, attributes and a status. Spans that share a trace id form one trace, and the parent ids make it a tree. Across services, the client-side instrumentation injects the W3C `traceparent` header (`00-<trace-id>-<client-span-id>-<flags>`), and the server-side instrumentation extracts it and starts its server span as a child of the client span. Inside a process, an AsyncLocalStorage-based context manager carries the current span across `await`s. *Trap:* saying the backend "matches up timestamps". The link is the propagated ids.
-
-> **Q: “Why does OpenTelemetry need a special loader for ESM apps?”**  
-> A: Auto-instrumentation patches libraries as they are loaded. For CommonJS it hooks `require()`. ES module `import`s don't go through `require()`, so a loader hook (`@opentelemetry/instrumentation/hook.mjs`, registered with `module.register()` or `--experimental-loader`) is needed. Without it you get partial data: packages that load internal files with `require()` (like `pg`) are still patched, but a top-level `import express` isn't, so you lose the Express spans and route names.
+> A: A span is one timed step of one request. It has a trace id shared by the whole request, its own span id, a parent span id, a name, a kind such as Server, Client, or Internal, a start and an end, attributes, and a status. Spans that share a trace id are one trace. The parent ids make the tree. In Example 3 the checkout server span was the root, id `c0460ad1b584ddf9`, trace `5636fe4773653b2168607e9a80e44f37`. When checkout called orders with `fetch`, the undici instrumentation started a client span and put a W3C `traceparent` header on the request: version `00`, the trace id, the client span id `39ef6bbf9d8ffcce`, and flags `01` meaning sampled. Orders read that header and started its server span with that client span as the parent. Inside one process there is no header. The SDK keeps the current span in `AsyncLocalStorage`, so an `await` does not lose it. The backend does not match timestamps. The link is those ids. The limit is a missing hook or a service that does not read the header. Then you get spans, but they are separate traces.
 
 > **Q: “Head sampling vs tail sampling?”**  
-> A: Head sampling decides at the root span, before the request runs, usually as a ratio of trace ids. With a parent-based sampler, downstream services follow the decision in `traceparent`, so traces stay whole. It is cheap but blind to outcome. Tail sampling runs in the Collector after all of a trace's spans have arrived, so it can keep every error or every slow trace. It costs memory and needs every span of a trace to reach the same Collector instance.
+> A: Head sampling decides at the root span, before the request has an outcome. `TraceIdRatioBasedSampler(0.25)` keeps a trace when a number taken from the trace id falls in the first 25 percent of the range. The same trace id always gets the same answer. `ParentBasedSampler` uses that rule only for spans with no parent. Every later service copies the flag in `traceparent`, so if checkout drops the trace, orders drops it too. In the 1,000-request run at 25 percent, 250 traces were kept, all of them had both services, and the other 750 still carried a header ending in `00` so logs could join, but no spans were stored. Head sampling is cheap and blind. It cannot prefer errors, because it decides before the error happens. Tail sampling runs in the Collector after the spans of a trace have arrived, so it can keep every error or every slow trace. The limit is memory and routing. The Collector has to buffer whole traces, and every span of one trace has to reach the same Collector instance.
 
 > **Q: “Why run a Collector instead of exporting straight to the vendor?”**  
-> A: It takes retries and batching off the app process, keeps vendor credentials out of app containers, lets you redact or drop attributes before data leaves your network, enables tail sampling, and lets you change or add backends by editing YAML instead of redeploying every service.
+> A: The Collector is a process next to the app. The app exports OTLP to it, and the Collector's pipeline is receivers, then processors, then exporters. In this lesson that was an OTLP receiver, a batch processor, a debug exporter that prints spans, and `otlp_grpc` forwarding to Jaeger. You run it so retries, batching, and back-pressure stay off the Node process, and so the vendor's credentials stay out of the app container. Processors can drop, rename, or redact attributes before data leaves your network, which matters because `db.query.text` holds SQL and `url.full` can hold a token. Tail sampling also lives there, because the app has already decided at the root. Changing backends, or sending to two at once, is a YAML edit. The limit is that the Collector is another process. In Example 2, `otelcol-contrib validate` exited 0 on the real config and exited 1 on a typo, `verbosty` instead of `verbosity`.
 
-> **Q: “What makes a metric expensive?”**  
-> A: Cardinality: every unique combination of attribute values is its own time series. A counter with `route` and `status` is fine; add `user.id` and you get a series per user. Put unbounded values on spans or logs instead.
+> **Q: “Why does OpenTelemetry need a special loader for ESM apps?”**  
+> A: Auto-instrumentation works by patching a library as it loads. For CommonJS, that hook sits on `require()`. An ES module `import` does not go through `require()`, so you register a loader hook, `@opentelemetry/instrumentation/hook.mjs`, with `module.register()` from inside `telemetry.mjs`, and you start the process with `node --import ./telemetry.mjs`. This lesson did that and got the Express route names. Example 7 set `NO_ESM_HOOK=1` and the request still returned the order, the trace id still crossed to orders, and the `pg` spans were still there, because `pg` loads its own files with `require()`. What disappeared were the Express spans, and the server spans were named `GET` instead of `GET /checkout/:orderId`, so every route looked the same. The limit is a silent partial trace. Some spans appearing does not prove ESM instrumentation works. Check for a span from every library you rely on.
 
 ## Cheat-card
 
@@ -817,7 +813,17 @@ checkout  GET /checkout/:orderId  [instrumentation-http] 69.1 ms  span 080e4db6d
 - **Batch defaults (2.12.0):** 2,048 queued, 512 per export, 5,000 ms delay. Call `sdk.shutdown()` on SIGTERM.
 - **Collector:** receivers → processors → exporters; `otelcol-contrib validate --config=…`; OTLP ports 4317 gRPC / 4318 HTTP; exporters `otlp_grpc`, `otlp_http`, `debug`.
 - **Jaeger 2.22.0:** Collector-based; `jaeger_storage` + `jaeger_query` extensions; API `/api/v3/services`, `/api/v3/traces/<id>`.
-- **Versions used:** Node v24.19.0, Express 5.3.0, sdk-node 0.223.0, auto-instrumentations-node 0.81.0, instrumentation-express 0.71.0, instrumentation-pg 0.75.0, instrumentation-undici 0.33.0, api 1.9.1, pg 8.23.1, PostgreSQL 18.4, otelcol-contrib 0.162.0, Jaeger 2.22.0.
+- **Versions used:** Node v24.19.0, Express 5.3.0, sdk-node 0.223.0, auto-instrumentations-node 0.81.0, api 1.9.1, otelcol-contrib 0.162.0, Jaeger 2.22.0.
+
+## Good to know
+
+- Q: What makes a metric expensive? Cardinality: every unique combination of attribute values is its own time series, so `user.id` on a counter is a series per user. Put unbounded values on spans or logs, and keep span names to the route.
+- OTel's `doc/esm-support.md` still documents `--experimental-loader=@opentelemetry/instrumentation/hook.mjs`. On Node v24.19.0 that prints `ExperimentalWarning: --experimental-loader may be removed in the future; instead use register()`.
+- Earlier sampling runs on the same setup: 25.3% of 400, then 25.8% and 25.7% of 1,000. The scripted run was exactly 250 of 1,000.
+- Example 4 timings, one laptop, first request after start: fetch 33.1 ms, orders server span 21.5 ms, `pg-pool.connect` 10.5 ms including `pg.connect` 8.6 ms, query 3.2 ms. Read them as proportions.
+- Download sizes: `otelcol-contrib_0.162.0_linux_amd64.tar.gz` 112 MB, `jaeger-2.22.0-linux-amd64.tar.gz` 65 MB. The slow link was fetched with parallel `curl -r` and joined. Collector sha256 `fcc063749f730f8c21fe29f2d340ff174f5f1c5885bd3156fb6c985a3036fcc3`.
+- In 0.162.0 the exporter names are `otlp_grpc` and `otlp_http`. The older names `otlp` and `otlphttp` still passed `otelcol-contrib validate` in this run.
+- Package versions also used: instrumentation-http 0.223.0, instrumentation-express 0.71.0, instrumentation-undici 0.33.0, instrumentation-pg 0.75.0, sdk-trace and sdk-metrics 2.12.0, pg 8.23.1, PostgreSQL 18.4.
 
 ---
 

@@ -13,35 +13,34 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`dns.lookup` asks the operating system to turn a host name into an address, on a worker thread, the same way `ping` and `curl` do. `dns.resolve` and its siblings send DNS queries themselves from the main thread and never read the hosts file. Node has both because connecting to a service should follow the machine's name rules, while mail records and a chosen DNS server are a different job. The trade-off is that `lookup` shares a small thread pool with file and crypto work, so a busy pool makes new connections wait, and Node itself does not cache either answer.
+
 ## Why it matters
 
-Every `fetch('https://api.example.com')`, `http.get`, `net.connect({ host })` and database driver that is given a host name turns that name into an IP address before it opens a socket. Node has two different machines for that job inside one module. `dns.lookup()` asks the operating system and runs on the libuv thread pool. `dns.resolve*()` sends DNS packets itself from the event loop. They can return different answers for the same name, they fail differently, and only one of them competes with `fs`, `crypto` and `zlib` for the four pool threads.
+Every `fetch`, `http.get`, `net.connect({ host })`, and database driver turns a host name into an IP before it opens a socket. Node has two machines for that job in one module. `dns.lookup()` asks the operating system and runs on the libuv thread pool. `dns.resolve` and the other `resolve*` functions send DNS packets from the event loop. They can disagree on the same name, they fail differently, and only `lookup` competes with `fs`, `crypto`, and `zlib` for the four pool threads.
 
-That difference causes real incidents:
-
-- A service that hashes passwords with `crypto.pbkdf2` suddenly takes a second to open outgoing HTTP connections, because `lookup()` is queued behind the hashes.
-- A name in `/etc/hosts` works with `curl` and `fetch` but fails with `dns.resolve4`.
-- A container's DNS server drops one UDP packet, and requests that normally take 20 ms take 5 seconds.
-
-Lookups are also not cached by Node itself, so a client that connects per request pays for name resolution on every request.
+That shows up as real incidents. Password hashing with `crypto.pbkdf2` makes outgoing HTTP slow, because `lookup` waits behind the hashes. A name in `/etc/hosts` works with `curl` and `fetch` and fails with `dns.resolve4`. One dropped UDP packet turns a 20 ms lookup into about 5 seconds. Node does not cache lookups, so a client that connects per request pays for the name every time.
 
 ## The concept, simply
 
-- **`dns.lookup(hostname, options, callback)`** calls the C library function `getaddrinfo(3)`. That is the same code path `ping`, `curl` and almost every other program use. On Linux with glibc, `getaddrinfo` follows `/etc/nsswitch.conf`. Its `hosts:` line usually reads `files … dns`: first `/etc/hosts`, then DNS, using the servers in `/etc/resolv.conf`. `getaddrinfo` is a blocking call, so Node runs it on a **libuv thread-pool thread** (4 threads by default, `UV_THREADPOOL_SIZE`) and calls you back on the main thread when it returns. `net`, `http`, `https`, `fetch` (undici), `tls` and `dgram` all use `lookup()` by default.
-- **`dns.resolve4()`, `resolve6()`, `resolveMx()`, … and `dns.reverse()`** use **c-ares**, a DNS client library bundled with Node (1.34.6 in v24.19.0). c-ares builds DNS query packets, sends them over UDP (TCP for large answers) to the servers it read from `/etc/resolv.conf` or that you set with `setServers()`, and lets libuv watch those sockets like any other socket. No thread-pool thread is used, `/etc/hosts` is never read, and the `search` domains from `/etc/resolv.conf` are not appended to the name (Example 2 shows both). These functions can also ask for record types that `getaddrinfo` cannot: MX, TXT, SRV, NS, CAA, SOA and more.
+`dns.lookup(hostname, options, callback)` calls the C function `getaddrinfo`. That is the path `ping`, `curl`, and most other programs use. On Linux with glibc it follows `/etc/nsswitch.conf`. The `hosts` line usually says `files` then `dns`: `/etc/hosts` first, then the servers in `/etc/resolv.conf`. `getaddrinfo` blocks, so Node runs it on a libuv pool thread. The default pool has 4 threads, set with `UV_THREADPOOL_SIZE`. `net`, `http`, `https`, `fetch`, `tls`, and `dgram` all use `lookup()` by default.
+
+`dns.resolve4`, `resolve6`, `resolveMx`, the rest of `resolve*`, and `dns.reverse` use c-ares, a DNS library bundled with Node. c-ares builds query packets, sends them by UDP, or by TCP when the answer is large, to the servers from `/etc/resolv.conf` or from `setServers()`, and libuv watches those sockets. No pool thread is used. `/etc/hosts` is never read. Search domains from `resolv.conf` are not appended. These functions can ask for record types `getaddrinfo` cannot: MX, TXT, SRV, NS, CAA, SOA, and more.
 
 ![Two columns: work the kernel does asynchronously, including dns.resolve() via c-ares, and work that occupies a thread-pool slot, including dns.lookup() via getaddrinfo](assets/i04_02_51406ab8.svg)
 *Figure: which Node APIs use the kernel's async I/O and which occupy one of the four thread-pool threads. Look at: `dns.resolve() (uses c-ares)` in the kernel column and `dns.lookup() (getaddrinfo)` in the thread-pool column, next to `crypto.pbkdf2`, which is what Example 3 uses to fill the pool.*
 
 ## How it works
 
-1. **You call `dns.lookup('api.example.com')`.** Node queues a `getaddrinfo` request on the libuv thread pool. If all pool threads are busy, the request waits in the queue.
-2. **A pool thread runs `getaddrinfo`.** glibc reads `/etc/nsswitch.conf` and tries each source in order: `files` (`/etc/hosts`), possibly `mdns4_minimal` (multicast DNS for `.local`), then `dns`. The `dns` source sends A and AAAA queries to the server in `/etc/resolv.conf`, waits up to `timeout` seconds (default 5) per try, and tries `attempts` times (default 2). On Ubuntu that server is `127.0.0.53`, the systemd-resolved stub, which has its own cache and forwards cache misses to the network's resolver.
-3. **glibc sorts the results** by the RFC 3484 rules, which `/etc/gai.conf` can change. Node then applies `order` (`verbatim` by default, meaning glibc's order is kept), and the callback gets the first address or, with `all: true`, all of them.
-4. **You call `dns.resolve4('api.example.com')` instead.** c-ares sends one A query from the main thread to the configured server and registers the UDP socket with libuv. When the answer arrives, libuv wakes the event loop, c-ares parses the packet, and your callback gets the addresses (with `{ ttl: true }`, the record TTLs too). If no answer comes within the resolver's timeout, c-ares resends the query, up to `tries` times (default 4), then fails with `ETIMEOUT`.
-5. **Either way, the caller decides what to do with several addresses.** `net.connect` asks `lookup()` for all addresses and, with `autoSelectFamily` (on by default since v20.0.0), tries them in turn, alternating IPv6 and IPv4, giving each attempt 250 ms before starting the next. This is the "Happy Eyeballs" algorithm of RFC 8305.
+1. `dns.lookup('api.example.com')` queues `getaddrinfo` on the libuv thread pool. If every pool thread is busy, the call waits.
+2. A pool thread runs `getaddrinfo`. glibc reads `nsswitch.conf` and tries each source: `files` (`/etc/hosts`), sometimes multicast DNS for `.local`, then `dns`. The DNS source sends A and AAAA queries, waits `timeout` seconds per try (default 5), and tries `attempts` times (default 2). On Ubuntu that server is often `127.0.0.53`, the systemd-resolved stub, which caches and forwards misses.
+3. glibc sorts results with the RFC 3484 rules, which `/etc/gai.conf` can change. Node then applies `order`. The default `verbatim` keeps glibc's order. The callback gets the first address, or every address when `all: true`.
+4. `dns.resolve4('api.example.com')` sends one A query from the main thread. When the answer arrives, c-ares parses it. `{ ttl: true }` includes the record TTL, the time the answer may be cached. If nothing comes back, c-ares resends, up to `tries` (default 4), then fails with `ETIMEOUT`.
+5. With several addresses, `net.connect` can try them in turn. `autoSelectFamily` has been on by default since v20.0.0. It alternates IPv6 and IPv4 and gives each attempt 250 ms. That is Happy Eyeballs, RFC 8305.
 
-The full path of one name, from your call to the server that owns the name:
+One name, from your call to the server that owns it:
 
 text
 
@@ -67,31 +66,19 @@ text
            answer (A / AAAA records + TTL) travels back up the same chain
 ```
 
-**Where each answer comes from.** On this machine (Ubuntu with systemd-resolved), `/etc/hosts` maps `localhost` to `127.0.0.1` only, so `lookup('localhost')` returns only `127.0.0.1`. `resolve6('localhost')` asks 127.0.0.53, and systemd-resolved makes up its own answer (`::1`) for `localhost`. `resolvectl query localhost` reports these records as `Data from: synthetic`. It also serves names from `/etc/hosts` this way, which is why `resolve6('ip6-localhost')` worked via the stub. A public resolver such as `1.1.1.1` knows neither name and answers `ENOTFOUND`. That is the clean proof that `resolve*()` does not read `/etc/hosts`: whatever it returns came from a DNS server.
+**Where the answer comes from.** On the machine used for these examples, Ubuntu with systemd-resolved, `/etc/hosts` maps `localhost` to `127.0.0.1` only, so `lookup('localhost')` returns only that. `resolve6('localhost')` asks `127.0.0.53`, and systemd-resolved synthesizes `::1`. `resolvectl query localhost` labels those records synthetic. A public resolver such as `1.1.1.1` knows neither name and answers `ENOTFOUND`. That is the proof `resolve*` does not read `/etc/hosts`.
 
-**Caching.** The Node docs never describe a DNS cache; they say `resolve*()` "always perform a DNS query on the network", and `lookup()` hands every call to `getaddrinfo`. Example 4 confirms it: four `resolve4()` calls to `1.1.1.1` sent four query packets, and each one waited for the network. Caching happens outside Node: in a local stub (systemd-resolved, nscd, dnsmasq) if the OS has one, and in the recursive resolver. Inside a minimal container image with no stub, every `lookup()` goes over the network. If you need an in-process cache, an HTTP agent's connection pool (fewer new connections) or a caching `lookup` function passed to `net.connect` / `http.Agent` are the usual fixes.
+**Caching.** The Node docs say `resolve*` always performs a DNS query on the network, and `lookup` hands every call to `getaddrinfo`. Example 4 shows four `resolve4` calls to `1.1.1.1` sent four packets. Caching lives outside Node: a local stub such as systemd-resolved, nscd, or dnsmasq, and the recursive resolver. A minimal container with no stub sends every `lookup` over the network. An in-process cache, an HTTP agent's connection pool, or a caching `lookup` passed to `net.connect` or `http.Agent` is how you avoid repeating it.
 
-**IPv4 vs IPv6 selection.** `lookup()` takes these options:
+**IPv4 and IPv6.** `family` is `4`, `6`, or `0` for any. `all: true` returns every address. `order` is `'verbatim'`, `'ipv4first'`, or `'ipv6first'`. The default order is `verbatim`, since v17.0.0. Before that, Node put IPv4 first, so moving to v17 made some `localhost` clients hit `::1` and get `ECONNREFUSED` from a server bound only to `127.0.0.1`. Happy Eyeballs hides most of those by trying the next address after 250 ms (`autoSelectFamilyAttemptTimeout`).
 
-- **`family`**: `4`, `6` or `0` (any).
-- **`all: true`**: return every address, not only the first.
-- **`order`**: `'verbatim'` (keep the resolver's order), `'ipv4first'` or `'ipv6first'`. `order` was added in v22.1.0 / v20.13.0, where it replaced the older `verbatim` boolean (now deprecated). `ipv6first` arrived at the same time.
-
-The default comes from `dns.setDefaultResultOrder()` or the `--dns-result-order` flag, and has been `verbatim` since v17.0.0. Before v17.0.0 Node put IPv4 first, so moving to v17+ made some programs that connected to `localhost` start connecting to `::1`, which caused `ECONNREFUSED` against servers listening only on `127.0.0.1`. Happy Eyeballs (`autoSelectFamily`) was added in v19.3.0 / v18.13.0 and made the default in v20.0.0 / v18.18.0. It fixes most of those cases by trying the next address when one fails or stays silent for `autoSelectFamilyAttemptTimeout` (250 ms by default; `net.setDefaultAutoSelectFamilyAttemptTimeout()` or `--network-family-autoselection-attempt-timeout` change it). `--no-network-family-autoselection` turns it off.
-
-**Why DNS causes latency spikes.**
-
-- **Cache miss.** When a TTL expires, the next query walks the chain above (root, TLD, authoritative) and can take tens to hundreds of milliseconds instead of under 1 ms.
-- **Packet loss.** DNS is mostly UDP (lesson 46): one lost query or answer costs a full retry timeout. That is 5 s with glibc's defaults, and the reason "requests sometimes take exactly 5 seconds" is a classic DNS symptom. Example 7 reproduces it with a local server that drops the first packet.
-- **Thread-pool queueing.** `lookup()` waits for a free pool thread, behind `fs`, `crypto.pbkdf2`, `scrypt` and `zlib` work (Example 3).
-- **Search domains.** A name with fewer dots than `ndots` (default 1) is tried with each `search` domain in `/etc/resolv.conf` appended before, or instead of, the bare name. Kubernetes pods use `ndots:5`, so `api.example.com` may first be tried as `api.example.com.<namespace>.svc.cluster.local` and similar names, and every failed try adds a round trip.
-- **IPv6 that does not work.** An AAAA answer for a host you cannot reach over IPv6 costs a connection timeout per attempt, unless Happy Eyeballs moves on after 250 ms.
+**Why DNS shows up as latency.** A cache miss walks from the root to the authoritative server and can take tens or hundreds of milliseconds. DNS is mostly UDP, so one lost packet costs a full retry. glibc's default `timeout` of 5 seconds is why "exactly 5 seconds slower" is a classic DNS symptom. Example 7 reproduces it. `lookup` also waits for a free pool thread, behind `fs`, `pbkdf2`, `scrypt`, and `zlib`. A name with fewer dots than `ndots` (default 1) is tried with each search domain appended. Kubernetes pods often use `ndots: 5`, so a name like `api.example.com` is tried inside the cluster first, and every miss adds a round trip. An AAAA answer you cannot route costs a connect timeout unless Happy Eyeballs moves on.
 
 ## Code examples
 
-The examples that query real names depend on the network and the date. They were run on 10 Oct 2026 from a home network behind systemd-resolved; your addresses, TTLs and timings will differ. Examples 3, 6 and 7 use only local servers, and Example 6 replaces DNS with a fixed `lookup` function.
+Examples that query real names were run on 10 Oct 2026 from a home network behind systemd-resolved. Addresses, TTLs, and timings will differ. Examples 3, 6, and 7 stay local, and Example 6 replaces DNS with a fixed `lookup`.
 
-**Example 1 — the same name through `lookup()`, `resolve*()` and a public resolver.**
+**Example 1: the same name through `lookup`, `resolve*`, and a public resolver.**
 
 javascript
 
@@ -127,9 +114,9 @@ console.log('resolve*() asks:', dns.getServers(), '| c-ares', process.versions.a
 //   resolve*() asks: [ '127.0.0.53' ] | c-ares 1.34.6
 ```
 
-`lookup('localhost')` returned only `127.0.0.1` because `/etc/hosts` lists only that. `resolve6('localhost')` returned `::1`, an answer systemd-resolved made up. `1.1.1.1` has neither name. `resolve4('ip6-localhost')` gave `ENODATA`: the name exists in the stub's data, but it has no A record.
+`lookup('localhost')` returned only `127.0.0.1` because that is all `/etc/hosts` lists. `resolve6('localhost')` returned `::1`, which systemd-resolved made up. `1.1.1.1` has neither name. `resolve4('ip6-localhost')` returned `ENODATA`: the stub knows the name and has no A record.
 
-**Example 2 — proof with `strace`: who reads `/etc/hosts`, and on which thread.**
+**Example 2: `strace` shows who reads `/etc/hosts`, and on which thread.**
 
 javascript
 
@@ -148,7 +135,7 @@ main thread id = 714341
 lookup -> ::1
 ```
 
-`trace-resolve.cjs` is the same script with `dns.resolve6('ip6-localhost', …)` in place of `lookup`:
+`trace-resolve.cjs` is the same script with `dns.resolve6('ip6-localhost', …)` instead of `lookup`:
 
 bash
 
@@ -159,9 +146,9 @@ main thread id = 714374
 resolve6 -> [ '::1' ]
 ```
 
-`lookup()` opened `/etc/hosts` from a different thread (`714363`), a libuv pool thread running `getaddrinfo`, and found `::1` there without sending a packet. `resolve6()` never opened `/etc/hosts`. It connected a UDP socket to port 53 of the stub resolver from the main thread (`714374`, the same id as the process). The ids change on every run.
+`lookup` opened `/etc/hosts` from a pool thread and found `::1` without a packet. `resolve6` never opened `/etc/hosts`. It sent UDP to port 53 of the stub from the main thread. Thread ids change every run.
 
-The search list makes the same difference visible. This machine's `/etc/resolv.conf` has `search lan`, and a single-label name has fewer dots than `ndots` (1):
+This machine's `/etc/resolv.conf` has `search lan`, and a single-label name has fewer dots than `ndots` (1):
 
 javascript
 
@@ -189,9 +176,9 @@ query: nosuchhostzz (A)
 resolve4 -> EREFUSED
 ```
 
-`getaddrinfo` sent A and AAAA queries for `nosuchhostzz.lan` first, then for the bare name: six packets for one `lookup()`. `resolve4()` sent one A query for exactly the name it was given. The stub refused the single-label query, and the two paths report that differently: `EAI_AGAIN` from `getaddrinfo`, `EREFUSED` from c-ares.
+`getaddrinfo` queried `nosuchhostzz.lan` and then the bare name: six packets for one `lookup`. `resolve4` sent one A query for the exact name. The stub refused the single-label query. `lookup` reports `EAI_AGAIN`. c-ares reports `EREFUSED`.
 
-**Example 3 — edge case: a full thread pool slows `lookup()` but not `resolve4()`.**
+**Example 3: a full thread pool slows `lookup` and not `resolve4`.**
 
 javascript
 
@@ -238,9 +225,9 @@ await Promise.all([
 //   (all 4 pbkdf2 jobs done)       1197 ms
 ```
 
-With an idle pool, both calls took a few milliseconds. With four `pbkdf2` jobs holding all four pool threads, `resolve4()` still answered in about 1 ms, while `lookup()` waited about 0.9 s, until a pool thread became free. The exact numbers change from run to run (between 847 ms and 926 ms for `lookup()` in five runs). With `UV_THREADPOOL_SIZE=8 node d2.mjs` the same `lookup()` took 1 ms, because four threads were still free. Every outgoing `http.get('http://name/')`, `fetch` and `net.connect({ host })` takes this path, so a CPU-heavy pool job can delay all of them.
+With an idle pool both calls took a few milliseconds. With four `pbkdf2` jobs holding the four pool threads, `resolve4` still answered in about 1 ms and `lookup` waited about 0.9 s. Five runs of that wait landed between 847 ms and 926 ms. `UV_THREADPOOL_SIZE=8` brought `lookup` back to 1 ms, because four threads were free. Every `http.get`, `fetch`, and `net.connect({ host })` takes this path.
 
-**Example 4 — Node does not cache: repeated timings.**
+**Example 4: Node does not cache.**
 
 javascript
 
@@ -273,7 +260,11 @@ console.log('TTL seen by 1.1.1.1:', (await remote.resolve4(name, { ttl: true }))
 //   TTL seen by 1.1.1.1: 80 s
 ```
 
-The first `lookup()` went to the network; the next three took a few milliseconds because systemd-resolved on this machine cached the answer. `resolve4()` via the stub at 127.0.0.53 was also served from that cache. `resolve4()` via `1.1.1.1` has no local cache in between and paid a network round trip **every time**: neither Node nor c-ares kept the answer. Three calls took 39–50 ms. One took 2050 ms: most likely a query or its answer was lost and c-ares resent it after its retry timer (this run was not traced). That is the spike Example 7 reproduces on purpose, and it happened here without any help. Counting the query packets confirms it:
+The first `lookup` hit the network. The next three were a few milliseconds because systemd-resolved cached the answer. `resolve4` through `1.1.1.1` paid a round trip every time: three calls took 39 to 50 ms, and one took 2050 ms.
+
+> ⚠️ Unverified: the cause of the single 2050 ms call in the timing run above. The packets of that run were not captured, so a lost UDP packet followed by a c-ares retry is the likely explanation, not a proven one.
+
+Counting packets:
 
 javascript
 
@@ -290,11 +281,9 @@ $ strace -f -e trace=sendto node d3b.cjs 2>&1 | grep -c 'example\\3net'
 4
 ```
 
-Four calls, four DNS query packets on the wire.
+Four calls, four DNS query packets.
 
-> ⚠️ Unverified: the cause of the single 2050 ms call in the timing run above. The packets of that run were not captured, so a lost UDP packet followed by a c-ares retry is the likely explanation, not a proven one.
-
-**Example 5 — IPv4/IPv6 selection with `family`, `all` and `order`.**
+**Example 5: `family`, `all`, and `order`.**
 
 javascript
 
@@ -328,9 +317,11 @@ $ node --dns-result-order=ipv4first -e "require('node:dns').promises.lookup('nod
 ipv4first { address: '104.16.212.131', family: 4 }
 ```
 
-`verbatim` kept glibc's order. Here glibc put IPv4 first; its RFC 3484 sorting can rank IPv4 above IPv6 depending on which source addresses the machine has. The two IPv4 addresses swap places between calls because the DNS server rotates them. `ipv6first` and `ipv4first` sort by family and keep the order inside each family. Without `all`, you get only the first address, so `order` decides which family a plain `lookup()` returns.
+`verbatim` kept glibc's order. Here glibc put IPv4 first. The two IPv4 addresses swap between calls because the DNS server rotates them. `ipv6first` and `ipv4first` sort by family and keep the order inside each family. Without `all`, you get only the first address, so `order` picks the family.
 
-**Example 6 — Happy Eyeballs: `autoSelectFamily` tries the next address.** A fixed `lookup` function stands in for DNS, so the result does not depend on the network. It gives `dual.test` one IPv6 address where nothing listens (`::1`), one IPv4 address that never answers (`10.255.255.1`, unused on this network), and the real server (`127.0.0.1`).
+**Example 6: Happy Eyeballs tries the next address.**
+
+A fixed `lookup` stands in for DNS. `dual.test` gets `::1` where nothing listens, `10.255.255.1` which never answers, and the real server at `127.0.0.1`.
 
 javascript
 
@@ -391,9 +382,11 @@ server.close();
 //      0 ms 'error' ECONNREFUSED
 ```
 
-With `autoSelectFamily: true` (the default since v20.0.0), `net.connect` asked the lookup function for all addresses. `::1` was refused at once. `10.255.255.1` stayed silent and was abandoned after the 250 ms attempt timeout, and `127.0.0.1` connected. With `autoSelectFamily: false` only the first address was tried, and the socket failed with `ECONNREFUSED`. The `'connectionAttempt'`, `'connectionAttemptFailed'` and `'connectionAttemptTimeout'` events were added in v21.6.0 / v20.12.0.
+With `autoSelectFamily: true`, the default since v20.0.0, `::1` was refused at once, `10.255.255.1` was abandoned after 250 ms, and `127.0.0.1` connected. With it off, only the first address was tried and the socket failed with `ECONNREFUSED`.
 
-**Example 7 — a latency spike from one lost UDP packet.** A small DNS server on `127.0.0.1` answers every A query with `10.0.0.7`. It **drops the first copy of each query on purpose** (simulated loss) so the client has to retry.
+**Example 7: one lost UDP packet.**
+
+A local DNS server answers every A query with `10.0.0.7` and drops the first copy of each query.
 
 javascript
 
@@ -438,13 +431,13 @@ server.close();
 //   timeout 1000 ms: ["10.0.0.7"] after 2000 ms
 ```
 
-The answer was ready in under a millisecond, yet each call took hundreds of milliseconds or seconds, because the first packet was "lost" and c-ares had to wait for its retry timer. The measured delay was not exactly the `timeout` value (200 → 330–370 ms and 1000 → 2000 ms in four runs), so treat `timeout` as the starting point of c-ares's retry timer, not as the total delay.
+The answer was ready in under a millisecond, and each call still took hundreds of milliseconds or seconds, because the first packet was dropped and c-ares waited for its retry. The delay was not exactly the `timeout` value (200 became about 330 to 370 ms, and 1000 became 2000 ms, over four runs). Treat `timeout` as the start of that timer, not the whole delay.
 
 > ⚠️ Unverified: why c-ares 1.34.6 waited about 1.7–1.9× and 2× the configured `timeout` before its retry. The Node docs only describe `timeout` as "query timeout in milliseconds", and c-ares's internal retry-timer algorithm was not checked here.
 
-glibc behaves the same way with its own numbers. The default `timeout:5` means one lost packet costs a `lookup()` 5 seconds.
+glibc does the same with its own numbers. The default `timeout: 5` means one lost packet costs a `lookup` 5 seconds.
 
-**Example 8 — `dns.promises`, a private `Resolver` with `setServers`, and what `setServers` does not touch.**
+**Example 8: `dns.promises`, a private `Resolver`, and what `setServers` does not touch.**
 
 javascript
 
@@ -484,60 +477,59 @@ console.log('lookup still works        :', (await dns.lookup('nodejs.org', { fam
 //   lookup still works        : true
 ```
 
-`new dns.Resolver()` has its own server list, so `setServers(['1.1.1.1', '8.8.8.8'])` changed nothing globally. `resolveNs` and `resolveMx` return record types that `lookup()` cannot. A name under `.invalid` (a top-level domain reserved never to exist) fails with `ENOTFOUND`, the value of `dns.NOTFOUND`. The global `dns.setServers(['127.0.0.1:9'])` broke `resolve4()` straight away (`ECONNREFUSED`, port 9 has no DNS server), while `lookup()` kept working, because `setServers` only affects `resolve*()` and `reverse()`.
+`new dns.Resolver()` has its own server list, so `setServers(['1.1.1.1', '8.8.8.8'])` changed nothing global. `resolveNs` and `resolveMx` return record types `lookup` cannot. A name under `.invalid` fails with `ENOTFOUND`, the value of `dns.NOTFOUND`. `dns.setServers(['127.0.0.1:9'])` broke `resolve4` at once with `ECONNREFUSED`, because port 9 has no DNS server, and `lookup` kept working. `setServers` only affects `resolve*` and `reverse`.
 
 ## Common mistakes & gotchas
 
-- **Thinking `resolve*()` is a faster `lookup()`.** It skips `/etc/hosts`, the other nsswitch sources such as mDNS, and the `search` domains, so names that work everywhere else on the machine can fail with it: entries that `docker run --add-host` or a VPN client writes into `/etc/hosts`, `.local` names, or short names like `db` that rely on a search domain.
-- **Forgetting that `lookup()` shares the thread pool.** `pbkdf2`, `scrypt`, `zlib` and `fs` work delay every outgoing connection by host name (Example 3). Raise `UV_THREADPOOL_SIZE` before the process starts, or keep CPU-heavy work in worker threads.
-- **Setting `process.env.UV_THREADPOOL_SIZE` inside the program.** The Node docs warn that this is not guaranteed to work, because the pool may already exist. Set it in the environment that starts `node`.
+- **Treating `resolve*` as a faster `lookup`.** It skips `/etc/hosts`, other nsswitch sources such as mDNS, and search domains. Names that work everywhere else can fail: Docker `--add-host`, `.local`, or a short name like `db`.
+- **Forgetting `lookup` shares the thread pool.** `pbkdf2`, `scrypt`, `zlib`, and `fs` delay every connection by name (Example 3). Raise `UV_THREADPOOL_SIZE` before the process starts, or move CPU work to worker threads.
+- **Setting `process.env.UV_THREADPOOL_SIZE` inside the program.** The pool may already exist. Set it in the environment that starts `node`.
 - **Expecting Node to cache DNS.** It does not (Example 4). Without a local stub, every new connection by name is a network round trip.
-- **Calling `dns.setServers()` to change where `fetch` or `http` resolve.** They use `lookup()`, which `setServers` does not affect. Pass a custom `lookup` (to `net.connect`, `http.Agent` or undici's `connect` options) if you need that.
-- **Assuming `localhost` means `127.0.0.1`.** With `verbatim` order (default since v17.0.0) it can resolve to `::1` first. A server bound to `127.0.0.1` then sees refused IPv6 attempts, which Happy Eyeballs (default since v20.0.0) usually hides. Bind and connect to an explicit address in tests.
-- **Reading `ENOTFOUND` as "the name does not exist".** The docs warn that `lookup()` also reports `ENOTFOUND` for other failures, such as running out of file descriptors.
-- **Ignoring TTLs on long-lived connections.** A pooled connection keeps using the IP it resolved when it opened, even after the DNS record changes. Recycle connections so failover by DNS takes effect.
+- **Calling `dns.setServers()` to change where `fetch` or `http` resolves.** They use `lookup`, which `setServers` does not affect. Pass a custom `lookup` to `net.connect`, `http.Agent`, or undici's `connect` options.
+- **Assuming `localhost` means `127.0.0.1`.** With `verbatim` order, the default since v17, it can be `::1` first. Bind and connect to an explicit address in tests.
+- **Reading `ENOTFOUND` as "the name does not exist".** `lookup` also reports `ENOTFOUND` for other failures, such as running out of file descriptors.
+- **Ignoring TTLs on pooled connections.** A pooled socket keeps the IP it resolved at connect time. Recycle connections so a DNS failover takes effect.
 
 ## Best practices
 
-- **Use `lookup()` (the default) for connecting**, so your program resolves names the way the rest of the system does. Use `resolve*()` for DNS-specific work: MX, TXT and SRV records, TTLs, or querying a specific server.
-- **Keep the thread pool free for `lookup()`** in services that make many outgoing connections: move CPU-heavy hashing to worker threads or raise `UV_THREADPOOL_SIZE`.
-- **Reuse connections** (keep-alive agents, connection pools) so DNS is paid once per connection, not once per request.
-- **Run a caching stub** (systemd-resolved, dnsmasq, NodeLocal DNSCache in Kubernetes) next to services that resolve often, and keep the resolver timeout short.
-- **Lower `ndots` or use fully qualified names ending in `.`** inside Kubernetes when you call external hosts, to avoid the extra search-domain queries.
-- **Leave `autoSelectFamily` on**, and when a server is IPv4-only, bind and connect to `127.0.0.1` rather than `localhost`.
-- **Use `dns.promises` and a private `Resolver`** for code that must query specific servers, and never call `setServers` while queries are in flight (the docs forbid it).
+- **Use `lookup`, the default, when you are connecting,** so names resolve the way the rest of the system does. Use `resolve*` for MX, TXT, SRV, TTLs, or a specific server.
+- **Keep the pool free for `lookup`** when you open many connections. Move hashing to workers, or raise `UV_THREADPOOL_SIZE`.
+- **Reuse connections** so DNS is paid once per connection, not once per request.
+- **Run a caching stub** next to services that resolve often, and keep the resolver timeout short.
+- **Lower `ndots`, or use a trailing dot on external names,** inside Kubernetes, so search domains are not tried first.
+- **Leave `autoSelectFamily` on.** When a server is IPv4-only, bind and connect to `127.0.0.1` rather than `localhost`.
+- **Use `dns.promises` and a private `Resolver`** when you must query specific servers. Do not call `setServers` while queries are in flight.
 
 ## ⭐ Interview lens
 
 > **Q: “What is the difference between `dns.lookup()` and `dns.resolve4()`?”**  
-> A: `lookup()` calls the OS's `getaddrinfo` on a libuv thread-pool thread, so it honours `/etc/hosts`, `nsswitch.conf` and the system resolver settings, and it is what `net`, `http` and `fetch` use. `resolve4()` uses the bundled c-ares library from the main thread, sends real DNS queries to the configured servers, ignores `/etc/hosts`, and can query any record type. *Trap:* only `lookup()` competes with `fs`, `crypto` and `zlib` for the four pool threads.
+A: `dns.lookup` calls the operating system's `getaddrinfo` on a libuv thread-pool thread. It honors `/etc/hosts`, `nsswitch.conf`, and the system resolver, which is why `ping` and `curl` agree with it. `net`, `http`, and `fetch` use it when you pass a host name. `dns.resolve4` uses the bundled c-ares library on the main thread. It sends a real DNS query to the configured servers, ignores `/etc/hosts`, and can ask for record types `getaddrinfo` cannot, such as MX or TXT. On a machine where `/etc/hosts` lists only `127.0.0.1` for localhost, `lookup` returns that and `resolve6` can still return `::1` from a local stub. The limit is the pool. Only `lookup` waits behind `fs`, `crypto`, and `zlib` for one of the four default threads. `resolve4` does not.
 
 > **Q: “Outgoing HTTP calls slow down whenever the service hashes a lot of passwords. Why?”**  
-> A: `crypto.pbkdf2`/`scrypt` and `dns.lookup()` share the libuv thread pool (4 threads by default). When the hashes hold all four threads, every `lookup()` for a new connection queues behind them. Fixes: raise `UV_THREADPOOL_SIZE` at startup, move hashing to worker threads, reuse connections, or resolve with c-ares and pass the IP address.
+A: `crypto.pbkdf2` and `dns.lookup` share the libuv thread pool, four threads unless you set `UV_THREADPOOL_SIZE` before startup. Hashing holds those threads, so every `lookup` for a new connection sits in the queue. In the lesson's run, four hashes made `lookup` wait about 0.9 seconds while `resolve4` still returned in about 1 ms, because c-ares does not use the pool. Outgoing `fetch`, `http.get`, and `net.connect({ host })` all call `lookup`. Raise the pool size in the environment that starts Node, move the hashing to worker threads, or reuse connections so you resolve once. The limit of "just switch to `resolve4`" is that it skips `/etc/hosts` and search domains, so a name the rest of the machine can open may fail.
 
 > **Q: “Does Node cache DNS results?”**  
-> A: No. Each `lookup()` calls `getaddrinfo` and each `resolve*()` sends a query. Caching comes from the OS (systemd-resolved, nscd), the recursive resolver, or your own code, for example a caching `lookup` function or long-lived pooled connections.
+A: No. Each `lookup` calls `getaddrinfo`, and each `resolve*` sends a query. The Node docs say the resolve functions always query the network. Example 4 sent four queries to `1.1.1.1` for four calls, and none of them were served from inside Node. A local stub such as systemd-resolved can make the second call look instant, and the recursive resolver caches by TTL. You can also pass a caching `lookup` function, or hold connections in a pool so you do not resolve per request. The limit is a long-lived socket. It keeps the address it got when it connected, even after the DNS record changes, until you recycle it.
 
 > **Q: “Some requests take exactly 5 seconds longer than usual. What do you suspect?”**  
-> A: A lost DNS packet: glibc's resolver waits `timeout:5` seconds before it retries over UDP. Another cause is an unresponsive first nameserver in `/etc/resolv.conf`: glibc waits the full timeout before it moves on to the next one. Check `/etc/resolv.conf`, run a caching stub, and lower the timeout.
-
-> **Q: “What does `autoSelectFamily` do?”**  
-> A: It is Node's Happy Eyeballs (RFC 8305). `net.connect` gets all addresses from `lookup()`, tries them alternating IPv6 and IPv4, and starts the next attempt if the current one has not connected within 250 ms (`autoSelectFamilyAttemptTimeout`). The first success wins, and if all fail you get an `AggregateError`. It was added in v19.3.0 / v18.13.0 and became the default in v20.0.0 / v18.18.0.
+A: Suspect a lost DNS packet. glibc's resolver waits `timeout` seconds, 5 by default, before it retries a UDP query, so the request is fine and then exactly five seconds late. The same stall happens when the first nameserver in `/etc/resolv.conf` does not answer: glibc waits out that timeout before it tries the next server. Example 7 dropped the first packet on purpose and the call waited on c-ares's retry timer even though the answer itself was ready in under a millisecond. Check `resolv.conf`, run a caching stub, and shorten the timeout. The limit is that five seconds is glibc's number. c-ares, which `resolve*` uses, has its own timeout and retry count, so the spike may be a different length on that path.
 
 ## Cheat-card
 
-- **`lookup`** = `getaddrinfo` on the thread pool · `/etc/hosts` + nsswitch + resolv.conf · used by `net`/`http`/`fetch` · options `family`, `all`, `order`, `hints`.
-- **`resolve*`** = c-ares on the main loop · real DNS queries · ignores `/etc/hosts` · any record type · `{ ttl: true }` on A/AAAA.
-- **Pool:** 4 threads shared with `fs`, `crypto.pbkdf2/scrypt/randomBytes`, `zlib`; set `UV_THREADPOOL_SIZE` before start.
-- **Cache:** none in Node; the OS stub and recursive resolvers cache by TTL.
-- **Order:** `verbatim` default since v17.0.0; `order` option + `ipv6first` since v22.1.0 / v20.13.0; `--dns-result-order`, `dns.setDefaultResultOrder()`.
-- **Happy Eyeballs:** `autoSelectFamily` default `true` since v20.0.0 / v18.18.0; 250 ms per attempt; `--no-network-family-autoselection`.
-- **Spikes:** cache miss, UDP loss → retry timeout (glibc `timeout:5`), pool queueing, search domains / `ndots`, broken IPv6.
-- **Promises:** `import dns from 'node:dns/promises'`; `new dns.Resolver({ timeout, tries })` + `setServers([...])` affects only that resolver; global `setServers` never affects `lookup`.
-- **Errors:** `ENOTFOUND`, `ENODATA`, `ETIMEOUT`, `ECONNREFUSED`, `ESERVFAIL`; codes exported as `dns.NOTFOUND` etc.
+- **`lookup`:** `getaddrinfo` on the thread pool. `/etc/hosts`, nsswitch, and resolv.conf. Used by `net`, `http`, and `fetch`. Options: `family`, `all`, `order`, `hints`.
+- **`resolve*`:** c-ares on the main loop. Real DNS queries. Ignores `/etc/hosts`. Any record type. `{ ttl: true }` on A and AAAA.
+- **Pool:** 4 threads, shared with `fs`, `crypto.pbkdf2`, `scrypt`, `randomBytes`, and `zlib`. Set `UV_THREADPOOL_SIZE` before start.
+- **Cache:** none in Node. The OS stub and recursive resolvers cache by TTL.
+- **Order:** `verbatim` is the default. `dns.setDefaultResultOrder()` and `--dns-result-order` change it.
+- **Happy Eyeballs:** `autoSelectFamily` defaults to true. 250 ms per attempt. `--no-network-family-autoselection` turns it off.
+- **Spikes:** cache miss, UDP loss and the retry timeout (glibc `timeout` 5), pool queueing, search domains and `ndots`, broken IPv6.
+- **Promises:** `import dns from 'node:dns/promises'`. `new dns.Resolver({ timeout, tries })` plus `setServers` affects only that resolver. Global `setServers` never affects `lookup`.
+- **Errors:** `ENOTFOUND`, `ENODATA`, `ETIMEOUT`, `ECONNREFUSED`, `ESERVFAIL`. Codes are also `dns.NOTFOUND` and the matching constants.
 
----
+## Good to know
 
+- c-ares is 1.34.6 in Node v24.19.0. The `order` option, including `ipv6first`, was added in v22.1.0 and v20.13.0 and replaced the older `verbatim` boolean. `verbatim` has been the default since v17.0.0. Happy Eyeballs was added in v19.3.0 and v18.13.0 and became the default in v20.0.0 and v18.18.0. The `'connectionAttempt'`, `'connectionAttemptFailed'`, and `'connectionAttemptTimeout'` events were added in v21.6.0 and v20.12.0.
+- What does `autoSelectFamily` do? It is Happy Eyeballs (RFC 8305). `net.connect` gets every address from `lookup`, tries them alternating IPv6 and IPv4, and starts the next attempt if the current one has not connected within 250 ms. The first success wins. If all fail you get an `AggregateError`.
 ## Learn More
 
 - [DNS | Node.js v24 Documentation nodejs.org](https://nodejs.org/docs/latest-v24.x/api/dns.html)

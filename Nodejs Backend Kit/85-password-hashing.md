@@ -13,43 +13,43 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Password hashing stores a one-way result of the password mixed with a unique random salt and run through a deliberately slow function, and at login you hash the guess the same way and compare. A database leak should not hand out usable passwords, because people reuse them. The trade-off is speed: slow enough that guessing millions of passwords is expensive, and still quick enough for one real login.
+
 ## Why it matters
 
-Storing passwords is one of the few pieces of code where a single wrong decision can harm millions of people. Data breaches are routine; the question is not whether your database might leak, but what an attacker can do when it does. If you stored passwords as plaintext, the answer is "log in as every user, everywhere" — because people reuse passwords across sites. If you hashed them correctly, the answer is "spend years and fail". Password storage is the clearest example of designing for the assumption that the perimeter *will* be breached.
-
-It is also a frequent interview topic because it exposes whether a candidate understands the difference between a general-purpose hash (fast, for integrity) and a password hash (deliberately slow, for resistance to guessing), plus salting, timing attacks, and cost tuning. These are conceptual, not syntactic — you cannot bluff them. "Why not just SHA-256 the password?" is a question that instantly separates people who have thought about security from those who have not.
-
-This topic covers why plaintext and fast hashes are unacceptable, how salting defeats precomputation, how bcrypt and argon2 make guessing expensive, and how timing-safe comparison prevents a subtler leak.
+Breaches are routine. The question is what an attacker can do with the dump. Plaintext passwords mean they log in as every user, including on other sites. A proper password hash means they spend years and still fail. Interviewers use this to see whether you know a fast hash such as SHA-256 is the wrong tool, and whether you can explain salt, cost, and timing-safe compare.
 
 ## The concept, simply
 
-You should never be able to recover a user's password from what you store — not even you, the operator. So you do not store the password; you store a **one-way hash** of it. At login you hash the submitted password the same way and compare. A hash is one-way: easy to compute forwards, infeasible to reverse.
+You should not be able to recover the password from what you store, not even as the operator. Store a **one-way hash**. At login, hash the submitted password the same way and compare. Easy to compute forward, infeasible to reverse.
 
-But a plain hash is not enough, for two reasons. First, identical passwords produce identical hashes, so an attacker can precompute hashes of common passwords (a *rainbow table*) and match them in bulk. The fix is a **salt**: a unique random value mixed into each password before hashing, so the same password yields a different hash for every user, and precomputed tables become useless. Second, general-purpose hashes like SHA-256 are *fast* — modern GPUs compute billions per second — so an attacker can brute-force guesses quickly. The fix is a **slow, tunable** hash: a password KDF (key derivation function) like bcrypt or argon2 that is deliberately expensive to compute.
+A plain hash is not enough. Identical passwords produce identical hashes, so an attacker can precompute common passwords, a rainbow table, and match them in bulk. A **salt** is a unique random value mixed in before hashing, so the same password looks different for every user and the table is useless. General-purpose hashes such as SHA-256 are also fast. GPUs compute billions per second. A password **key derivation function** such as bcrypt or argon2 is deliberately expensive, and you can raise the cost as hardware gets faster.
 
 ![Password combined with a random salt then run through a slow KDF to produce a stored hash, contrasted with fast unsalted hashes](assets/i48_01_656eb6b4.svg)
 
-A password plus a unique salt is fed through a slow, cost-tuned KDF (bcrypt/argon2) to produce the stored hash. Fast unsalted hashes like MD5 or SHA-256 fall to rainbow tables and GPU brute force.
+A password plus a unique salt goes through a slow, cost-tuned function, bcrypt or argon2, and that string is what you store. Fast unsalted hashes such as MD5 or SHA-256 fall to rainbow tables and GPU guessing.
 
-Put together: **salted + slow**. Salting kills precomputation; slowness kills mass guessing. bcrypt and argon2 do both, and they embed the salt and cost parameters right inside the output string so you do not manage them separately.
+Salt kills precomputation. Slowness kills mass guessing. bcrypt and argon2 do both, and they embed the salt and the cost in the output string so you do not store them in extra columns.
 
 ## How it works
 
-**Why plaintext is indefensible.** If the database leaks, every credential is instantly usable — and because users reuse passwords, your breach becomes a breach of their email, bank, and everything else. There is no scenario where storing plaintext (or reversible/encrypted-with-a-key passwords) is acceptable for authentication.
+**Plaintext is indefensible.** If the database leaks, every password is immediately usable, and reuse turns your breach into the user's email and bank. Reversible encryption is the same class of mistake for authentication passwords. You can recover the original.
 
-**Why fast hashes (MD5, SHA-1, SHA-256) fail.** These are designed to be fast for verifying file integrity. That speed is a liability for passwords: an attacker with the hash dump runs a wordlist or brute force at billions of guesses per second on commodity GPUs. Unsalted, they also fall to rainbow tables — giant precomputed hash→password lookups. SHA-256 is a fine hash; it is simply the wrong *tool* for passwords because it is not slow and has no salting built in.
+**Fast hashes fail here.** MD5, SHA-1, and SHA-256 were built to be fast for file integrity. That speed is the problem. An attacker with the dump runs a wordlist at billions of guesses a second. Unsalted, they also fall to rainbow tables. SHA-256 is a fine hash. It is the wrong tool for passwords because it is not slow and it has no salt built in.
 
-**How salting defeats precomputation.** A salt is a random value (16 bytes is typical) generated per user and stored alongside the hash. The KDF hashes `salt + password`. Because every user's salt differs, two users with password "hunter2" get completely different stored hashes — so an attacker cannot recognise shared passwords, and any rainbow table would have to be rebuilt per salt, which is infeasible. The salt is not secret; it can be public. Its job is uniqueness, not secrecy. (A *pepper* — a secret value added on top, stored separately from the DB — is an optional extra layer.)
+**Salt.** A random value, often 16 bytes, is generated per user and stored with the hash. The function hashes salt plus password. Two users with the password hunter2 get different stored strings, so shared passwords are not obvious, and a rainbow table would have to be rebuilt per salt. The salt is not secret. Its job is uniqueness. A **pepper** is an optional extra secret, stored outside the database, mixed in on top.
 
-**How bcrypt works.** bcrypt is a password hashing function built on the Blowfish cipher with a tunable *cost factor* (also called work factor or rounds). The cost is logarithmic: cost 12 means 2^12 = 4096 iterations of key setup. Each increment *doubles* the work, so as hardware gets faster you simply raise the cost to keep hashing expensive for attackers while it stays a fraction of a second for your one legitimate login. bcrypt also generates and embeds the salt automatically. Its output string encodes everything: `$2b$12$<22-char salt><31-char hash>` — the algorithm, the cost, the salt, and the digest, all in one field. That is why you store a single column and never a separate salt.
+**bcrypt** is built on the Blowfish cipher with a cost factor, also called work factor or rounds. Cost 12 means 2 to the 12, or 4096, iterations of key setup. Each increment doubles the work. Raise the cost as hardware speeds up so an attacker stays slow and one real login stays a fraction of a second. bcrypt generates the salt and embeds everything in one string: algorithm, cost, salt, and digest, in the shape `$2b$12$` plus the salt and the hash. One column, no separate salt column. It silently truncates input past 72 bytes.
 
-**How argon2 improves on it.** argon2 (specifically argon2id) won the 2015 Password Hashing Competition and is the current recommendation for new systems. Beyond being slow (time cost), it is *memory-hard*: it requires a configurable amount of RAM to compute, which specifically defeats attackers using GPUs and ASICs that have massive parallel compute but limited memory per core. Its parameters are time cost, memory cost, and parallelism. bcrypt remains perfectly acceptable and battle-tested; argon2id is preferred for new designs where the memory-hardness matters. (scrypt is a third memory-hard option; PBKDF2 is an older, non-memory-hard KDF still used where FIPS compliance is required.)
+**argon2id** won the 2015 Password Hashing Competition and is the recommendation for new systems. It is slow, and it is memory-hard: it needs a configurable amount of RAM, which hurts GPUs and custom chips that have lots of parallel compute and little memory per core. You tune time, memory, and parallelism. bcrypt is still acceptable and heavily used. argon2id is the better new design when memory hardness matters. scrypt is another memory-hard option. PBKDF2 is older, not memory-hard, and still used where FIPS compliance requires it.
 
-**Timing attacks and constant-time comparison.** When you verify a password, the KDF's own `compare` function does a timing-safe comparison of the digests. This matters because a naive byte-by-byte string comparison returns faster when the first differing byte is early, leaking information about how much of a guess is correct. bcrypt's `compare` and argon2's `verify` are constant-time, so they do not leak. The same principle applies anywhere you compare secrets (tokens, HMAC signatures): use `crypto.timingSafeEqual`, never `===`. A related timing leak is at the *account* level — responding faster when the email doesn't exist reveals which emails are registered; the mitigation is to always run a hash comparison (against a dummy hash if the user is missing) so the response time is uniform.
+**Timing.** The library compare function checks the digests in constant time. A naive byte-by-byte compare returns faster when the first mismatch is early, which leaks how much of a guess was right. Use `bcrypt.compare`, `argon2.verify`, or `crypto.timingSafeEqual`, never `===`, for secrets. A related leak is the account level: responding faster when the email does not exist tells attackers which emails are registered. Always run a hash compare, against a dummy hash if the user is missing, and return one generic error.
 
 ## Code examples
 
-Hashing a password on registration with bcrypt. You pass a cost factor; the library generates the salt and embeds it in the output.
+Hash on registration with bcrypt. You pass a cost. The library generates the salt and embeds it.
 
 javascript
 
@@ -69,7 +69,8 @@ app.post('/register', async (req, res) => {
 });
 ```
 
-Verifying at login with `bcrypt.compare`, which extracts the salt and cost from the stored hash and does a timing-safe comparison. Note the anti-enumeration trick of always comparing.
+
+`bcrypt.compare` pulls the salt and cost out of the stored string and compares in constant time. The dummy hash keeps the work similar when the user is missing.
 
 javascript
 
@@ -95,7 +96,8 @@ app.post('/login', async (req, res) => {
 });
 ```
 
-argon2id for a new system — the recommended modern default, with explicit memory/time parameters.
+
+argon2id for a new system, with memory and time set explicitly.
 
 javascript
 
@@ -116,7 +118,8 @@ async function verifyPassword(hash, password) {
 }
 ```
 
-Constant-time comparison for other secrets (e.g. an API key or HMAC), showing the general principle behind why `compare` is timing-safe.
+
+The same constant-time idea for other secrets, such as an API key or an HMAC.
 
 javascript
 
@@ -132,7 +135,8 @@ function safeEqual(a, b) {
 }
 ```
 
-Upgrading cost/algorithm transparently on login — because the stored hash records its own parameters, you can detect outdated hashes and re-hash with stronger settings the next time the user authenticates.
+
+Because the stored string records its own parameters, you can re-hash with a higher cost the next time that user logs in.
 
 javascript
 
@@ -151,57 +155,57 @@ async function loginAndMaybeUpgrade(user, password) {
 }
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Storing plaintext or reversible (encrypted) passwords.** Any scheme where you can recover the original is a full compromise on breach. Passwords must be one-way hashed.
-- **Using a fast/general hash (MD5, SHA-1, SHA-256) for passwords.** Fast means brute-forceable at billions/sec; unsalted means rainbow-table-able. Wrong tool entirely — use bcrypt/argon2/scrypt.
-- **Reusing one global salt, or no salt.** A shared or missing salt lets precomputation and cross-user matching succeed. Salts must be unique per user (bcrypt/argon2 do this for you).
-- **Comparing hashes with `===`.** Naive comparison leaks timing. Use the library's `compare`/`verify` or `crypto.timingSafeEqual`.
-- **Cost factor too low (or never revisited).** A cost tuned for 2013 hardware is cheap to crack today. Pick a cost that takes a few hundred milliseconds now and raise it over time.
-- **Leaking account existence via timing or messages.** Skipping the hash when the user is missing makes "no such user" faster to detect. Always compare against a dummy hash and return one generic error.
-- **bcrypt's 72-byte input limit.** bcrypt silently truncates input beyond 72 bytes, which matters for very long passwords or pre-hashing schemes — a known gotcha; argon2 has no such limit.
-- **Hashing on the client and sending the hash.** That just makes the hash *be* the password. Hash server-side over TLS.
+- **Plaintext or reversible passwords.** If you can recover the original, a breach is a full compromise. Authentication passwords are one-way hashes.
+- **MD5, SHA-1, or SHA-256 as the password store.** Fast means brute force. Unsalted means rainbow tables. Use bcrypt, argon2, or scrypt.
+- **One global salt, or no salt.** Precomputation and cross-user matching work again. Salts are unique per user. The libraries do this.
+- **Comparing with `===`.** That leaks timing. Use the library compare or `crypto.timingSafeEqual`.
+- **A cost frozen in 2013.** Pick a cost that takes a few hundred milliseconds now, and raise it later.
+- **Telling attackers which emails exist.** Skipping the hash when the user is missing makes "no such user" faster. Always compare, and return one error.
+- **bcrypt's 72-byte cap.** Input past 72 bytes is silently truncated. argon2 has no such cap.
+- **Hashing in the browser and sending the hash.** The hash becomes the password. Hash on the server, over TLS.
 
 ## Best practices
 
-- **Use argon2id for new systems, bcrypt where already established** — both are salted, slow, and vetted. Avoid MD5/SHA for passwords entirely.
-- **Let the library handle the salt** (unique per user, embedded in the output). Never invent your own salting scheme.
-- **Tune the cost to your hardware** so a single hash takes roughly 200-300ms, and increase it as hardware improves; re-hash on login to upgrade legacy hashes.
-- **Always use timing-safe comparison** — the library's `compare`/`verify`, and `crypto.timingSafeEqual` for other secrets.
-- **Prevent account enumeration**: uniform response for unknown-user and wrong-password, and always run a hash comparison.
-- **Hash server-side over HTTPS**; enforce a sensible minimum length and check against breached-password lists rather than complex composition rules.
-- **Consider a pepper** (a secret added on top, stored outside the DB) for defense in depth, and rate-limit login attempts to slow online guessing.
+- **argon2id for new systems. bcrypt where you already have it.** Both are salted, slow, and vetted. Do not use MD5 or SHA for passwords.
+- **Let the library make the salt** and embed it. Do not invent a salting scheme.
+- **Tune cost so one hash is about 200 to 300 milliseconds,** and raise it as hardware improves. Re-hash on login to upgrade old hashes.
+- **Constant-time compare** via the library, and `crypto.timingSafeEqual` for other secrets.
+- **One response for unknown user and wrong password,** and always run a hash compare.
+- **Hash on the server over HTTPS.** Prefer a minimum length and checks against breached-password lists over clever composition rules.
+- **A pepper is optional defense in depth,** stored outside the database. Rate-limit login to slow online guessing.
 
 ## ⭐ Interview lens
 
 > **Q: Why not just hash passwords with SHA-256? (trap)**  
-> Two reasons. SHA-256 is *fast* — attackers compute billions of guesses per second on GPUs — whereas password storage needs a deliberately *slow*, tunable function so guessing is expensive. And SHA-256 has no salting, so identical passwords hash identically and fall to precomputed rainbow tables. Password KDFs like bcrypt and argon2 are slow, salted, and cost-tunable. SHA-256 isn't "broken"; it's the wrong tool for this job.
+> A: SHA-256 is a fast integrity hash, and password storage needs the opposite. Attackers with a dumped hash database guess on GPUs at billions of hashes a second, so a fast function makes a wordlist cheap. SHA-256 also has no salt, so the same password always produces the same hash and falls to a precomputed rainbow table. A password key derivation function, bcrypt or argon2, mixes in a unique salt and is deliberately slow, with a cost you can raise. SHA-256 is not "broken" as a hash. It is the wrong tool for this job. For example, two users who both picked the same common password would be obvious in a SHA-256 column and not in a bcrypt column. The limit of switching algorithms is the hashes you already stored: you re-hash on the next successful login, because you cannot reverse the old SHA-256 either.
 
 > **Q: What is a salt and what problem does it solve?**  
-> A salt is a unique random value mixed into each password before hashing. It ensures two users with the same password get different stored hashes, which (a) defeats precomputed rainbow tables — an attacker would have to rebuild them per salt — and (b) hides the fact that users share a password. The salt is not secret; its purpose is uniqueness, and bcrypt/argon2 generate and embed it automatically.
+> A: A salt is a unique random value mixed into each password before hashing, and you store it with the hash. Its job is uniqueness, not secrecy, so it does not need to be encrypted. Two users who chose hunter2 then get different stored strings, which does two things: an attacker cannot see that they share a password, and a rainbow table built for unsalted hashes does not match. Rebuilding that table once per salt is not practical. bcrypt and argon2 generate the salt and embed it in the output string, which is why you keep one column. For example, the bcrypt string starts with the algorithm and the cost, then the salt, then the digest, and compare reads those back. The limit is that salt does not make guessing slow. A unique salt on a fast hash still falls to a GPU. You need the slow function as well. A pepper, if you add one, is the secret that stays outside the database.
 
 > **Q: What does the bcrypt cost factor do, and how do you pick it?**  
-> It sets the work: cost N means 2^N iterations, so each increment doubles the time. You pick the highest cost your servers can tolerate for a single login — commonly targeting ~200-300ms — which stays trivial for one real user but multiplies the attacker's brute-force cost enormously. Because it's tunable, you raise it as hardware improves.
+> A: The bcrypt cost factor sets the work. Cost N means 2 to the N iterations of the key setup, so each step up doubles the time. You pick the highest cost a real login can tolerate, commonly aiming at about 200 to 300 milliseconds on your servers. One user waits a blink. An attacker guessing offline multiplies that cost by every guess. Because it is a parameter, you raise it when hardware gets faster, and you can re-hash an old password on the next good login because the stored string records the cost it was made with. For example, cost 12 is 4096 iterations, and cost 13 is twice that. The limit is bcrypt's 72-byte input cap: bytes past that are silently dropped, which matters for very long passwords or for schemes that pre-hash. argon2 does not have that cap.
 
 > **Q: bcrypt vs argon2 — which and why?**  
-> Both are salted, slow, and battle-tested. bcrypt is older, extremely well-vetted, and fine to keep. argon2id (the PHC winner) is the modern recommendation for new systems because it's additionally *memory-hard* — it forces attackers to spend RAM, neutralising the parallel-compute advantage of GPUs and ASICs. Also note bcrypt truncates input at 72 bytes; argon2 has no such limit.
-
-> **Q: What is a timing attack in the context of password/token comparison?**  
-> A naive comparison (`===` / byte-by-byte) returns as soon as it finds a mismatched byte, so the response time reveals how many leading bytes were correct — enough to reconstruct a secret over many attempts. Constant-time comparison (bcrypt's `compare`, `crypto.timingSafeEqual`) always examines the full value, leaking no positional information.
-
-> **Q: Where do you store the salt, and should it be encrypted?**  
-> The salt is stored right alongside the hash — in fact bcrypt/argon2 embed it inside the single hash string. It does not need to be secret or encrypted because its only role is to be unique per user and defeat precomputation. If you want an additional secret component, that's a *pepper*, stored separately from the database (e.g. in a secret manager), not the salt.
+> A: Both bcrypt and argon2 are salted, slow, and appropriate password hashes. bcrypt is older, heavily reviewed, and fine to keep. argon2id is the modern default for a new system because it is also memory-hard: computing it needs a configurable amount of RAM, which removes the advantage of GPUs and custom chips that have huge parallel compute and little memory per core. You tune argon2's time, memory, and parallelism. bcrypt only tunes the cost factor. For example, a new service would call argon2 with an explicit memory setting and store the one string it returns. The limit of "always migrate everything to argon2 tomorrow" is operational. Existing bcrypt hashes stay valid, and you upgrade a user when they next log in. Also remember bcrypt truncates at 72 bytes and argon2 does not.
 
 ## Cheat-card
 
-- **Never** store plaintext or reversible passwords; hash one-way.
-- **Not** MD5/SHA (fast + unsalted → GPU brute force + rainbow tables).
-- **Salted + slow**: salt kills precomputation, slowness kills mass guessing.
-- **bcrypt**: cost factor 2^N, embeds salt; output `$2b$12$salt+hash`; 72-byte input cap.
-- **argon2id**: modern default, memory-hard (defeats GPU/ASIC); tune memory+time.
-- Salt = unique, public, per-user. **Pepper** = optional secret stored outside DB.
-- **Timing-safe compare**: `bcrypt.compare`/`argon2.verify`, `crypto.timingSafeEqual`.
-- Tune cost to ~200-300ms, raise over time, re-hash on login; block user enumeration.
+- Never store plaintext or reversible passwords. Hash one way.
+- Not MD5 or SHA for passwords. Fast and unsalted means GPU guessing and rainbow tables.
+- Salt kills precomputation. Slowness kills mass guessing.
+- **bcrypt:** cost is 2 to the N, salt embedded, output starts `$2b$12$`, 72-byte input cap.
+- **argon2id:** modern default, memory-hard, tune memory and time.
+- Salt is unique, public, per user. A pepper is an optional secret stored outside the database.
+- Compare with `bcrypt.compare`, `argon2.verify`, or `crypto.timingSafeEqual`.
+- Tune toward about 200 to 300 milliseconds, raise it over time, re-hash on login, and do not reveal which accounts exist.
+
+## Good to know
+
+- **What is a timing attack on a password or token compare?** A naive compare returns as soon as one byte differs, so the time leaks how many leading bytes were correct. Constant-time compare, `bcrypt.compare` or `crypto.timingSafeEqual`, always looks at the whole value.
+- **Where is the salt stored, and should it be encrypted?** It sits inside the bcrypt or argon2 string next to the hash. It is not a secret. An extra secret stored outside the database is a pepper, not the salt.
 
 ---
 

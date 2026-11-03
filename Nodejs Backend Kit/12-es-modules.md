@@ -13,15 +13,21 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+ES modules are JavaScript's own module system, the `import` and `export` syntax, and Node loads them in three steps: it parses every file to find the imports, links those names together, then runs the files. The binding is live. The importer sees the exporter's variable, not a copy taken at load time.
+
+Node has them so the same module syntax can run on the server and in the browser, and so tools can see the dependency graph before any code runs. The trade-off is strictness. A relative import needs the file extension, there is no `__dirname`, and a static `import` cannot sit inside an `if`.
+
+A live binding means the name stays attached to the exporter's variable. Static means the engine reads the import before it runs the file.
+
 ## Why it matters
 
-ES Modules (ESM) are the official, standardized module system of JavaScript — the same `import` and `export` syntax that runs in browsers. For years Node had only CommonJS; today Node fully supports ESM, and a large and growing slice of the ecosystem is ESM-only or dual-published. If you are writing new backend code, publishing a library, or sharing code between a Node server and a browser bundle, you need to be fluent in ESM. Just as importantly, the boundary between ESM and CommonJS is where a huge number of real-world errors live — `ERR_REQUIRE_ESM`, `Cannot use import statement outside a module`, `__dirname is not defined`. Understanding both systems and how they interoperate is what makes those errors instantly diagnosable instead of terrifying.
-
-ESM is not just "new syntax for the same thing." It changes *when* dependencies are resolved (statically, before execution), *how* bindings behave (live, not copied), and *what* is available (top-level `await`, but no `__dirname`). Those differences have practical consequences the moment you switch.
+For new backend code, a published library, or code shared with a browser bundle, you need ESM. The boundary with CommonJS is where the real errors live: `ERR_REQUIRE_ESM`, `Cannot use import statement outside a module`, and `__dirname is not defined`. ESM is not new syntax for the same mechanism. It changes when dependencies are resolved, how bindings behave, and which names exist.
 
 ## The concept, simply
 
-Instead of `require`/`module.exports`, ESM uses declarative `import` and `export` statements:
+Instead of `require` and `module.exports`, you write `import` and `export`:
 
 javascript
 
@@ -35,19 +41,19 @@ export default function multiply(a, b) { return a * b; }
 import multiply, { add, PI } from './math.mjs';
 ```
 
-The key mental shift: `import`/`export` are not function calls that run line by line — they are *static declarations* that the engine reads before any code executes. Node parses the whole dependency graph first, links it, and only then runs module bodies. That is why `import` must appear at the top level (not inside an `if`) and why the specifier must be a string literal, not a computed expression. For genuinely dynamic loading, ESM offers `await import(expr)`, which is an async function returning a promise.
+`import` and `export` are declarations the engine reads before any code runs. Node parses the graph, links it, then runs module bodies. That is why `import` must be at the top level, and why the specifier must be a string literal. For a computed or conditional load, `await import(expr)` returns a promise.
 
 ![Side-by-side comparison table of CommonJS and ES Modules covering file types, loading, exports, timing, bindings and top-level await](assets/i09_01_73d3711b.svg)
 
-CommonJS and ES Modules differ in more than syntax: loading model (sync vs async), binding semantics (copied values vs live references), and available globals all change when you switch.
+CommonJS loads synchronously and hands you a copy of `module.exports`. ESM links live bindings, can use top-level `await`, and does not provide `__dirname`.
 
 ## How it works
 
-**Telling Node a file is ESM.** Node decides a file's module system by three signals, in order: a `.mjs` extension is always ESM; a `.cjs` extension is always CommonJS; a plain `.js` file follows the nearest `package.json`'s `"type"` field — `"type": "module"` makes `.js` ESM, `"type": "commonjs"` (or absent) makes it CommonJS. So the same `.js` source can be interpreted either way depending on the package it lives in.
+**How Node decides.** `.mjs` is always ESM. `.cjs` is always CommonJS. A `.js` file follows the nearest `package.json` `"type"`. `"module"` means ESM. `"commonjs"`, or no field, means CommonJS.
 
-**Three phases: parse, link, evaluate.** ESM loading is not a single synchronous read like `require`. Node (1) *parses* every module in the graph to discover its imports and exports without running any code, (2) *links* them — connecting each import to the exact exported binding it refers to — and (3) *evaluates* module bodies in dependency order. This static, ahead-of-time analysis is what enables bundler tree-shaking and what makes circular ESM graphs behave more predictably than CommonJS ones.
+**Parse, link, evaluate.** Node parses every module to discover imports and exports without running code, links each import to the exported binding, then evaluates bodies in dependency order. That ahead-of-time graph is what bundlers tree-shake, and it is why ESM cycles are more predictable than CommonJS ones.
 
-**Live bindings, not copies.** A CommonJS `require` gives you a snapshot of `module.exports` at require time. An ESM `import` gives you a *live, read-only view* of the exporter's binding. If the exporting module later reassigns an exported `let`, importers see the new value. You cannot reassign an imported binding — imports are constant references into the source module.
+**Live bindings.** `require` snapshots `module.exports`. `import` is a read-only view of the exporter's binding. If the exporter later assigns an exported `let`, importers see the new value. You cannot assign to an import.
 
 javascript
 
@@ -64,13 +70,13 @@ console.log(count); // 1  — live binding reflects the change
 // count = 5;       // TypeError: Assignment to constant variable-like binding
 ```
 
-**Top-level await.** ESM module bodies may use `await` at the top level. Node treats such a module as asynchronous: any module importing it waits for its top-level awaits to settle before its own body runs. This is impossible in CommonJS and is a major reason `require` cannot synchronously load an ESM module that uses it.
+**Top-level `await`.** An ESM body may `await` at the top. Any module that imports it waits for those awaits before its own body runs. CommonJS cannot do this, which is why a synchronous `require` cannot load an ESM graph that uses it.
 
-**Evaluated once, then cached.** Like CommonJS, ESM keeps a module map (the module registry) keyed by the resolved URL, so a given module's body runs exactly once per process no matter how many files import it. The difference is what the cache holds: CommonJS caches the finished `module.exports` object, whereas ESM caches a *Module Record* whose exported bindings stay live. Import the same module from ten places and every importer shares one instance — the same singleton guarantee that makes a shared config or connection pool work, and the same trap if you mutate module-level state expecting isolation. One subtlety: the registry key is the fully-resolved URL including any query string, so `import './x.js?v=1'` and `import './x.js?v=2'` are two *separate* instances — the closest thing ESM has to cache-busting, since there is no `delete require.cache` equivalent.
+**Once, then cached.** Like CommonJS, a given module runs once per process. The registry key is the resolved URL. CommonJS caches the finished `module.exports` object. ESM caches a module record whose bindings stay live. The key includes the query string, so `import './x.js?v=1'` and `import './x.js?v=2'` are two instances. There is no `delete require.cache` for ESM.
 
-**`import.meta` — per-module metadata.** `import.meta` is an object the host populates with information about the current module. Node always provides `import.meta.url` (the module's absolute `file:` URL) and, on Node 20.11+/21.2+, the convenience properties `import.meta.dirname` and `import.meta.filename`. It also exposes `import.meta.resolve(specifier)`, the ESM counterpart to `require.resolve`, which returns the URL a specifier would resolve to without loading it — handy for locating an asset shipped beside your code. Because `import.meta.url` is a real URL string, the idiomatic way back to a filesystem path is always `fileURLToPath(import.meta.url)`; slicing off the `file://` prefix by hand breaks on Windows drive letters and on paths containing spaces or non-ASCII characters, which is exactly why the `node:url` helper exists.
+**`import.meta`.** Node provides `import.meta.url`, the module's `file:` URL. On Node 20.11 and 21.2 and later, `import.meta.dirname` and `import.meta.filename` are there too. `import.meta.resolve(specifier)` is the ESM form of `require.resolve`. It returns the URL without loading. Turn the URL into a path with `fileURLToPath`. Slicing off `file://` by hand breaks on Windows drive letters and on spaces.
 
-**No `__dirname`, no `require`.** ESM files do not get the CommonJS wrapper, so `require`, `module`, `exports`, `__filename`, and `__dirname` do not exist. Instead you get `import.meta.url` (the module's URL). Reconstruct the old values with the `url` module, or on modern Node use the built-in helpers:
+**No `__dirname`, no `require`.** There is no CommonJS wrapper.
 
 javascript
 
@@ -83,11 +89,11 @@ const __dirname = path.dirname(__filename);
 // Node 20.11+ / 21.2+ also expose import.meta.dirname and import.meta.filename directly.
 ```
 
-**ESM ↔ CJS interop.** The two systems meet under clear rules:
+**Interop.**
 
-- **ESM importing CJS:** allowed. The CommonJS `module.exports` object becomes the ESM *default* export. So `import pkg from 'some-cjs-lib'` gives you `module.exports`. Node also tries to statically detect named exports (`import { readFile } from 'node:fs'` works for builtins and many packages), but detection is best-effort — when it fails, import the default and destructure.
-- **CJS importing ESM:** historically forbidden — `require()` of an ESM file threw `ERR_REQUIRE_ESM`. The universal escape hatch is dynamic `await import()`, which works in both worlds. (Recent Node versions can `require()` a synchronous ESM module — one with no top-level await — but `import()` remains the portable answer.)
-- File extensions are mandatory in relative ESM specifiers: `import './util.js'`, not `import './util'`. CommonJS's extension guessing does not apply.
+- ESM may import CommonJS. `module.exports` becomes the default export. `import pkg from 'some-cjs-lib'` is that object. Node also tries to detect named exports, which works for built-ins and many packages. When detection fails, import the default and destructure.
+- CommonJS calling `require()` on ESM used to throw `ERR_REQUIRE_ESM`. `await import()` works from both sides. Current Node can `require()` an ESM graph that has no top-level `await`. `import()` is still the portable answer. Lesson 11 has the versions.
+- Relative ESM specifiers need the extension. `import './util.js'`, not `import './util'`.
 
 ## Code examples
 
@@ -107,7 +113,8 @@ import * as shapes from './shapes.mjs';          // namespace object
 console.log(shapes.PI, shapes.default);          // 3.14159, [class Circle]
 ```
 
-**2. Top-level await at module scope.**
+
+**2. Top-level await.**
 
 javascript
 
@@ -121,7 +128,8 @@ import { config } from './config.mjs';
 console.log('Loaded config:', config);
 ```
 
-**3. Loading a CommonJS module from ESM.**
+
+**3. Load CommonJS from ESM.**
 
 javascript
 
@@ -133,7 +141,8 @@ legacy.greet('world');
 import { greet } from 'legacy-lib'; // best-effort static analysis
 ```
 
-**4. Loading ESM from CommonJS with dynamic import.**
+
+**4. Load ESM from CommonJS with dynamic import.**
 
 javascript
 
@@ -146,55 +155,61 @@ async function main() {
 main();
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Omitting the file extension.** `import './util'` throws `ERR_MODULE_NOT_FOUND` in ESM — write `'./util.js'`.
-- **Using `__dirname` in ESM.** Not defined — reconstruct from `import.meta.url` or use `import.meta.dirname`.
-- **`require` of an ESM package.** Classic `ERR_REQUIRE_ESM`. Use `await import()` instead, or make your own file ESM.
-- **Forgetting `"type": "module"`.** A `.js` file using `import` in a default package throws `Cannot use import statement outside a module`.
-- **Expecting `import` to run conditionally.** Static `import` is hoisted and always evaluated. For conditional/dynamic loading use `await import()`.
-- **Assuming named imports always exist on a CJS package.** Node's named-export detection is heuristic; import the default and destructure when it fails.
-- **Trying to reassign an import.** Imports are read-only live bindings — assignment is a syntax/type error.
-- **Mixing `module.exports` and `export` in one file.** A file is one system or the other; you cannot use both.
+- **No file extension.** `import './util'` throws `ERR_MODULE_NOT_FOUND`. Write `'./util.js'`.
+- **`__dirname` in ESM.** It is not defined. Use `import.meta.dirname`, or rebuild it from `import.meta.url`.
+- **`require` of an ESM-only package.** The classic error is `ERR_REQUIRE_ESM`. Use `await import()`, or make the caller ESM. On current Node, `require` works only when the graph has no top-level `await`.
+- **Forgetting `"type": "module"`.** A `.js` file that uses `import` in a default package throws `Cannot use import statement outside a module`.
+- **A conditional static `import`.** It is hoisted and always evaluated. Use `await import()` for a real condition.
+- **Named imports from every CJS package.** Detection is a heuristic. Import the default and destructure when it fails.
+- **Assigning to an import.** Imports are read-only live bindings.
+- **`module.exports` and `export` in one file.** A file is one system or the other.
 
 ## Best practices
 
-- For new projects, prefer ESM: set `"type": "module"` and use `.js` with `import`/`export`.
-- Always include explicit file extensions in relative imports.
-- Replace `__dirname` with `import.meta.dirname` (or `fileURLToPath(import.meta.url)` for older Node).
-- When publishing a library, ship **dual** builds and wire them with the `exports` field's `import`/`require` conditions so both worlds work.
-- Use `await import()` as the portable bridge whenever you must load ESM from CJS or load a module conditionally/lazily.
-- Keep top-level `await` deliberate — it delays every importer; do not use it for work that could be a lazily-called async function.
-- Prefer named exports for tree-shakeable, discoverable APIs; reserve `default` for a single primary export.
+- For a new project, set `"type": "module"` and use `import` and `export`.
+- Write the extension on every relative import.
+- Replace `__dirname` with `import.meta.dirname`, or `fileURLToPath` on older Node.
+- A published library that must serve both worlds uses the `exports` field with `import` and `require` conditions. Lesson 13.
+- Use `await import()` when you must load ESM from CommonJS, or load conditionally.
+- Top-level `await` delays every importer. If the work can be a function, make it a function.
+- Prefer named exports. Keep `default` for one primary value.
 
 ## ⭐ Interview lens
 
-> **Q: Name three concrete differences between ESM and CommonJS beyond syntax.** (1) Loading: `require` is synchronous and runtime; `import` is statically analysed and async. (2) Bindings: CJS gives a copied snapshot of exports; ESM gives live read-only bindings. (3) Environment: ESM has top-level `await` and `import.meta` but no `__dirname`/`require`.
+> **Q: Name three concrete differences between ESM and CommonJS beyond syntax.**
+> First, loading. `require` runs at the moment you call it and blocks until the file returns. `import` is read before any code runs, and the graph can be asynchronous. Second, bindings. CommonJS hands you a copy of `module.exports` at that moment. ESM gives you a live read-only view of the exporter's variable, so a later assignment is visible. Third, the environment. ESM has top-level `await` and `import.meta`, and it does not have `__dirname` or `require`. For example, `import './util'` fails until you write `./util.js`, because ESM does not guess extensions. The limit is treating "ESM is just `require` with different punctuation" as the whole answer. The load time and the binding are different mechanisms.
 
-> **Q: What does "live binding" mean?** An imported name is a reference into the exporting module's variable, not a copy. If the exporter reassigns an exported `let` later, importers observe the new value. In CommonJS you would have captured the old value at require time.
+> **Q: What does "live binding" mean?**
+> An imported name points at the exporter's variable. It is not a copy of the value at import time. If the exporting module later assigns that `let`, importers see the new value, and they cannot assign to the import themselves. In CommonJS, `const x = require('./m').n` captured whatever `n` was when `require` returned. Change `n` afterward and `x` stays old, unless you kept the exports object and read the property again. The limit is a `const` export. A live binding of a `const` cannot change, because the exporter cannot reassign it either.
 
-> **Q: How does Node decide whether a `.js` file is ESM or CJS?** The nearest `package.json`'s `"type"` field: `"module"` → ESM, `"commonjs"` or absent → CJS. `.mjs` is always ESM and `.cjs` always CJS regardless of `"type"`.
+> **Q: How does Node decide whether a `.js` file is ESM or CJS?**
+> It looks at the nearest `package.json`. `"type": "module"` makes `.js` ESM. `"type": "commonjs"`, or no `type` field, makes `.js` CommonJS. The extension overrides that. `.mjs` is always ESM and `.cjs` is always CommonJS. For example, the same source with `import` works in a folder whose package says `"type": "module"` and throws `Cannot use import statement outside a module` next door. The limit is syntax detection. Since v22.7.0 and v20.19.0, a `.js` file with no `"type"` can still be treated as ESM if it contains `import` or `export`. Do not infer the system from the extension alone.
 
-> **Q: You get `ERR_REQUIRE_ESM`. What is happening and how do you fix it?** Code is calling `require()` on an ESM-only package. Options: convert the calling file to ESM, or use `const mod = await import('pkg')` which works from both systems. Trap: interviewers may ask why you can't "just require it" — because ESM may use top-level await, which cannot resolve synchronously.
-
-> **Q: How do you get `__dirname` in an ES module?** `const __dirname = path.dirname(fileURLToPath(import.meta.url))`, or directly `import.meta.dirname` on Node 20.11+.
-
-> **Q: When you `import x from` a CommonJS module, what is `x`?** The module's entire `module.exports` object, bound as the default export. Named imports may additionally work if Node's static analysis detects them.
+> **Q: You get `ERR_REQUIRE_ESM`. What is happening and how do you fix it?**
+> A CommonJS file called `require()` on a package that is ESM only. `require` is synchronous, and an ES module may use top-level `await`, which cannot finish synchronously. Fix it by making the caller ESM, or by writing `const mod = await import('pkg')`, which works from both systems. On Node since v22.12.0 and v20.19.0, `require()` of an ESM graph succeeds when that graph has no top-level `await`. The limit of "just require it" is that await. Add top-level `await` later and the same `require` throws `ERR_REQUIRE_ASYNC_MODULE`.
 
 ## Cheat-card
 
-- **ESM signals:** `.mjs`, or `.js` + `"type":"module"`. **CJS:** `.cjs`, or `.js` default.
-- **Syntax:** `export` / `export default` / `import x, { y } from './f.js'`.
-- **Extensions required** in relative ESM specifiers.
-- **Live bindings** (read-only) vs CJS copied snapshot.
-- **Top-level await** allowed in ESM only; makes the module async.
-- **No `__dirname`** → use `import.meta.dirname` / `fileURLToPath(import.meta.url)`.
-- **Interop:** ESM imports CJS as default; CJS loads ESM via `await import()`.
-- **`await import(expr)`** = dynamic/conditional loading, works in both systems.
-- **JSON:** `import x from './x.json' with { type: 'json' }`, default export only. `assert { … }` was removed in v22.0.0.
-- **Hooks:** `module.registerHooks({ resolve, load })` (sync, in-thread, RC since v24.13.1), loaded via `--import`. `module.register()` is deprecated (DEP0205, v24.15.0).
-- **TypeScript:** `node file.ts` strips types, and imports use `.ts` extensions. See [TypeScript with Node](95-typescript-with-node.md).
-- **For `require()` callers:** no top-level `await`. Export `"module.exports"` to choose what `require()` returns. `"module-sync"` serves one ESM file to `require` and `import`.
+- ESM: `.mjs`, or `.js` with `"type": "module"`. CommonJS: `.cjs`, or `.js` by default.
+- `export`, `export default`, `import x, { y } from './f.js'`.
+- Relative ESM specifiers need the extension.
+- Live read-only bindings. CommonJS copied the exports object.
+- Top-level `await` is ESM only, and it makes the module async.
+- No `__dirname`. Use `import.meta.dirname` or `fileURLToPath(import.meta.url)`.
+- ESM imports CommonJS as the default. CommonJS loads ESM with `await import()`, or with `require` when the graph has no top-level `await`.
+- `await import(expr)` is the dynamic load, in both systems.
+
+## Good to know
+
+- Q: How do you get `__dirname` in an ES module? `path.dirname(fileURLToPath(import.meta.url))`, or `import.meta.dirname` on Node 20.11 and later. `import.meta.filename` arrived in the same versions.
+- Q: When you `import x from` a CommonJS module, what is `x`? The whole `module.exports` object, as the default export. Named imports may also work if Node's static analysis detects them. When it does not, import the default and destructure.
+- JSON: `import x from './x.json' with { type: 'json' }`. Default export only. `assert { type: 'json' }` was removed in v22.0.0 and is a syntax error on v24. Import assertions existed from v17.1.0 and v16.14.0. Attributes, the `with` form, arrived in v21.0.0, v20.10.0, and v18.20.0. JSON modules left experimental in v23.1.0, v22.12.0, v20.18.3, and v18.20.5. Text modules on v24.19.0 need `--experimental-import-text`, added in v24.19.0.
+- `module.registerHooks({ resolve, load })` was added in v23.5.0 and v22.15.0, and it has been a release candidate since v24.13.1. The hooks are synchronous and on the same thread, and they apply to `import` and `require`. `module.register()` was added in v20.6.0 and v18.19.0 and is deprecated since v24.15.0, DEP0205. Load hooks with `--import`, not from a sibling static import.
+- `"module.exports"` as an export name, so `require()` returns that value, has been supported since v23.0.0 and v22.12.0. The `"module-sync"` exports condition was added in v22.10.0 and v20.19.0. On v22.10 and v22.11 it needs `--experimental-require-module`.
+- Type stripping of `.ts` files is stable since v24.12.0. `.mts` is always ESM. A `.ts` file follows `"type"`. Relative imports use the `.ts` extension. `import type` is required for type-only imports, because every other import stays a runtime import. Nothing is type-checked. Lesson 95.
 
 ---
 
@@ -207,29 +222,22 @@ main();
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### Import attributes: `with { type: 'json' }`
 
-An import attribute is a key-value list written after the specifier (`import data from './x.json' with { type: 'json' }`) that tells the loader which format the importer expects. Node supports one key, `type`. It accepts `'json'` (JSON modules) and `'text'` (text modules, which on v24.19.0 need `--experimental-import-text`, added in v24.19.0, Stability 1.0). The attribute exists because a file extension alone is not proof of format. Requiring `type: 'json'` means a JSON import can never be evaluated as JavaScript, and the attribute is part of the module cache key. Without the attribute, a JSON import fails with `ERR_IMPORT_ATTRIBUTE_MISSING`.
+An import attribute is a key-value list after the specifier, `import data from './x.json' with { type: 'json' }`. It tells the loader which format the importer expects. Node supports one key, `type`. It accepts `'json'`, and `'text'` which on v24.19.0 still needs `--experimental-import-text`. The attribute exists because an extension is not proof of format. Requiring `type: 'json'` means a JSON import cannot be evaluated as JavaScript, and the attribute is part of the module cache key. Without it, a JSON import fails with `ERR_IMPORT_ATTRIBUTE_MISSING`. The version history is in Good to know.
 
-Version history (from the ESM docs' History tables):
+1. The parser reads the `with` clause with the specifier. For dynamic `import()`, the attributes go in the second argument: `import(spec, { with: { type: 'json' } })`.
+2. The loader checks the format against the attribute. A JSON file without `type: 'json'` throws `ERR_IMPORT_ATTRIBUTE_MISSING`.
+3. The JSON is parsed once and exposed as the default export only. There are no named exports.
+4. The parsed object is also stored in the CommonJS cache, so `require()` of the same path returns the same object.
 
-- v17.1.0 / v16.14.0: experimental *import assertions*, `assert { type: 'json' }`.
-- v21.0.0 / v20.10.0 / v18.20.0: switched to *import attributes*, `with { type: 'json' }`.
-- v22.0.0: dropped support for import assertions. On v24.19.0, `assert { … }` is a syntax error.
-- v23.1.0 / v22.12.0 / v20.18.3 / v18.20.5: import attributes and JSON modules are no longer experimental.
-
-How it works:
-
-1. The parser reads the `with` clause along with the specifier. For dynamic `import()`, the attributes go in the second argument: `import(spec, { with: { type: 'json' } })`.
-2. The loader determines the file's format (`.json` → `json`) and checks that the attribute matches. A JSON file without `type: 'json'` throws `ERR_IMPORT_ATTRIBUTE_MISSING`.
-3. The JSON text is parsed once and exposed as the module's **default** export only. There are no named exports.
-4. The parsed object is also stored in the CommonJS cache, so a `require()` of the same path returns the same object.
-
-**Example — static and dynamic JSON imports.** With `config.json` = `{ "port": 4300, "features": ["a", "b"] }` and a `package.json` of `{ "name": "l12-demo", "version": "1.4.0" }`:
+**Example. Static and dynamic JSON imports.** `config.json` is `{ "port": 4300, "features": ["a", "b"] }`. `package.json` is `{ "name": "l12-demo", "version": "1.4.0" }`.
 
 javascript
 
@@ -248,6 +256,7 @@ console.log(pkg.name, pkg.version);
 const require = createRequire(import.meta.url);
 console.log('same object as require():', require('./config.json') === config);
 ```
+
 
 bash
 
@@ -281,22 +290,18 @@ SyntaxError: The requested module './config.json' does not provide an export nam
 …
 ```
 
+
 ### Module customization hooks: `module.registerHooks()` and `module.register()`
 
-Customization hooks are functions you put into Node's module loader. A `resolve` hook turns a specifier into a URL, and a `load` hook turns a URL into `{ format, source }`. They exist so tools can teach Node new things without a build step: TypeScript loaders (tsx registers hooks), mocking, import maps, loading `.sql` or `.yaml` files as modules. `node:module` has two APIs:
+A `resolve` hook turns a specifier into a URL. A `load` hook turns a URL into `{ format, source }`. Tools use them to teach Node new file types without a build step: TypeScript loaders, mocks, import maps, `.sql` or `.yaml`. The version and stability notes are in Good to know.
 
-- **`module.registerHooks({ resolve, load })`.** Added in v23.5.0 / v22.15.0, **Stability 1.2 - Release candidate** since v24.13.1. The hooks are plain synchronous functions that run on the same thread as your code. They apply to `import`, `import()` and `require()` alike, and the returned object has `deregister()`.
-- **`module.register(specifier, parentURL)`.** Added in v20.6.0 / v18.19.0. It loads a *module* of async hooks and runs them on a separate loader thread. It is **deprecated since v24.15.0** (DEP0205, documentation-only, Stability 0). The docs give its reasons (worker-thread orchestration, caveats with CommonJS) and say to migrate to `registerHooks()`. On v24.19.0 it still works and prints no warning, even with `--pending-deprecation`.
-
-How a load goes through the hook chain:
-
-1. You register hooks before the code they should affect is loaded, usually with `node --import ./hooks.mjs app.mjs` (or `--require`).
-2. For each `import` or `require`, Node calls the last-registered `resolve` hook with `(specifier, context, nextResolve)`. Each hook either returns `{ url }` or calls `nextResolve` to pass the work down the chain, ending at Node's default resolver.
-3. Node then calls the `load` chain with `(url, context, nextLoad)`. A hook can return its own `{ format, source }`. `format` is one of `'module'`, `'commonjs'`, `'json'`, `'module-typescript'`, `'commonjs-typescript'`, `'wasm'`, `'builtin'` or `'addon'`.
-4. A hook that returns without calling `next…()` must set `shortCircuit: true`, or Node throws. That rule catches hooks that break the chain by accident.
+1. Register hooks before the code they should affect, usually `node --import ./hooks.mjs app.mjs`, or `--require`.
+2. For each `import` or `require`, Node calls the last-registered `resolve` hook with `(specifier, context, nextResolve)`. The hook returns `{ url }` or calls `nextResolve`.
+3. Node then calls the `load` chain with `(url, context, nextLoad)`. A hook may return `{ format, source }`. `format` is one of `module`, `commonjs`, `json`, `module-typescript`, `commonjs-typescript`, `wasm`, `builtin`, or `addon`.
+4. A hook that returns without calling `next` must set `shortCircuit: true`, or Node throws `ERR_INVALID_RETURN_PROPERTY_VALUE`.
 5. Node evaluates the returned source in that format.
 
-**Example — a tiny `load` hook that makes `.sql` files importable.**
+**Example. A `load` hook that makes `.sql` files importable.**
 
 javascript
 
@@ -319,6 +324,7 @@ registerHooks({
 });
 ```
 
+
 javascript
 
 ```
@@ -329,6 +335,7 @@ console.log('import :', getUser.trim());
 const require = createRequire(import.meta.url);
 console.log('require:', require('./get-user.sql').default.trim());
 ```
+
 
 bash
 
@@ -342,24 +349,22 @@ TypeError [ERR_UNKNOWN_FILE_EXTENSION]: Unknown file extension ".sql" for /…/g
 …
 ```
 
-The same synchronous hook served both `import` and `require()`. The `require()` call returned a namespace (hence `.default`), because the hook said the format is `'module'` and `require(esm)` returns the namespace object.
+The same synchronous hook served both `import` and `require()`. The `require()` result needed `.default`, because the format was `'module'` and `require` of ESM returns the namespace.
 
 ### TypeScript files
 
-On v24.19.0, Node runs `.ts`, `.mts` and `.cts` files directly by stripping type annotations (stable since v24.12.0). This follows the same ESM rules as this lesson. `.mts` is always ESM, `.ts` follows `"type"`, and relative imports need the real extension (`import './env.ts'`). Type-only imports must be marked `import type`, because Node keeps every other import as a runtime import. Nothing is type-checked. The full setup (`tsconfig.json` with `nodenext`, `erasableSyntaxOnly`, `verbatimModuleSyntax`, `tsc --noEmit`, typed Express handlers) is in [TypeScript with Node](95-typescript-with-node.md).
+On v24.19.0, Node runs `.ts`, `.mts`, and `.cts` by stripping type annotations. The rules match this lesson. `.mts` is always ESM. `.ts` follows `"type"`. Relative imports need the real extension, `import './env.ts'`. Mark type-only imports with `import type`, because every other import stays a runtime import. Nothing is type-checked. The `tsconfig` setup is in lesson 95.
 
 ### `require(esm)` from the ES module author's side
 
-Since v22.12.0 / v20.19.0 (unflagged), and stable since v24.15.0, a CommonJS file can `require()` your ES module. This works only while your module's graph is synchronous. What CommonJS callers receive is therefore part of your package's API, and you control three things: the shape they get, whether `require()` is allowed at all (top-level `await`), and which file they get (the `"module-sync"` condition).
+Since v22.12.0 and v20.19.0, unflagged, and stable since v24.15.0, CommonJS can `require()` your ES module while the graph is synchronous. What those callers receive is part of the package API. You control the shape, whether top-level `await` forbids `require()`, and which file they get through `"module-sync"`.
 
-How it works for the author:
+1. By default, `require()` returns the namespace. Named exports are properties. The default is under `.default`. `__esModule: true` is set when a default exists.
+2. `export { log as 'module.exports' }` makes `require()` return that value, like `module.exports = log`. Other named exports are then invisible to `require()` unless you attach them to that value. `import` callers still see everything.
+3. Top-level `await` in your module, or in anything it statically imports, makes every `require()` throw `ERR_REQUIRE_ASYNC_MODULE`. Adding it later is a breaking change for CommonJS users.
+4. In `"exports"`, `"module-sync"` matches `import`, `import()`, and `require()`, but only on Node versions where `require(esm)` is enabled. List it before a CommonJS `"default"` and new Node gets one ESM file, while older Node still gets the CommonJS build. That file must not use top-level `await`.
 
-1. **Default shape.** `require()` returns your module namespace object: named exports as properties, the default export under `.default`, and `__esModule: true` when a default exists.
-2. **Custom shape.** Export a binding under the string name `"module.exports"` (`export { log as 'module.exports' }`, supported since v23.0.0 / v22.12.0) and `require()` returns that value itself, like a CommonJS `module.exports = log`. Your other named exports are then invisible to `require()` callers unless you attach them to that value. `import` callers still see everything.
-3. **Top-level `await` is the line.** If your module, or anything it statically imports, uses top-level `await`, every `require()` of it throws `ERR_REQUIRE_ASYNC_MODULE`. Adding top-level `await` is therefore a breaking change for CommonJS users.
-4. **`"module-sync"` condition.** In `"exports"`, `"module-sync"` matches for `import`, `import()` *and* `require()`, but only on Node versions where `require(esm)` is enabled. It was added in v22.10.0 / v20.19.0, and on v22.10 and v22.11 it is active only with `--experimental-require-module`. List it before a CommonJS `"default"` and every caller on new Node gets one ESM file, while older Node keeps getting the CommonJS build. The file must not use top-level `await`.
-
-**Example — the `"module.exports"` export.**
+**Example. The `"module.exports"` export.**
 
 javascript
 
@@ -369,6 +374,7 @@ export default function log(msg) { console.log(`[log] ${msg}`); }
 export const level = 'info';                     // lost to require() callers
 export { log as 'module.exports' };
 ```
+
 
 javascript
 
@@ -380,6 +386,7 @@ console.log(typeof log, log.level);
 import('./logger.mjs').then((ns) => console.log(Object.keys(ns)));
 ```
 
+
 bash
 
 ```
@@ -389,7 +396,8 @@ function undefined
 [ 'default', 'level', 'module.exports' ]
 ```
 
-**Example — one ESM file for everyone with `"module-sync"`.** `node_modules/greet/package.json`:
+
+**Example. One ESM file for everyone, with `"module-sync"`.** `node_modules/greet/package.json`:
 
 json
 
@@ -412,6 +420,7 @@ javascript
 export function greet(name) { return `hi ${name} (from index.mjs)`; }
 ```
 
+
 javascript
 
 ```
@@ -430,6 +439,7 @@ console.log('require:', greet('Ada'));
 import('greet').then((m) => console.log('import :', m.greet('Ada')));
 ```
 
+
 bash
 
 ```
@@ -444,19 +454,19 @@ require: hi Ada (from index.cjs)
 import : hi Ada (from index.cjs)
 ```
 
-Both callers get the same `index.mjs`, so there is one module instance and no dual-package hazard (two copies of the package's state). Where `require(esm)` is off, Node skips `"module-sync"` and falls back to `"default"`.
+Both callers get the same `index.mjs`, so there is one module instance and no dual-package hazard, meaning two copies of the package's state. Where `require(esm)` is off, Node skips `"module-sync"` and uses `"default"`.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **Still writing `assert { type: 'json' }`.** Removed in v22.0.0. It is now `SyntaxError: Unexpected identifier 'assert'`. Use `with`.
+- **`assert { type: 'json' }`.** Removed in v22.0.0. It is `SyntaxError: Unexpected identifier 'assert'`. Use `with`.
 - **Named imports from JSON.** `import { port } from './config.json' with { type: 'json' }` fails. JSON modules have only a default export.
-- **Building new hooks on `module.register()` or `--loader`.** `register()` is deprecated (DEP0205), and `--experimental-loader` prints a warning telling you to use `register()` instead. Use `module.registerHooks()`.
-- **Hooks that end the chain silently.** A `load` hook that returns `{ format, source }` without calling `nextLoad()` or setting `shortCircuit: true` throws `TypeError [ERR_INVALID_RETURN_PROPERTY_VALUE]: Expected true to be returned for the "shortCircuit" from the "load" hook but got undefined.`
-- **Using `"module.exports"` and expecting named exports to survive.** `require()` callers get only that value: `log.level` was `undefined` above.
+- **New hooks on `module.register()` or `--loader`.** `register()` is deprecated, DEP0205. `--experimental-loader` warns you to use `register()` instead. Use `module.registerHooks()`.
+- **A `load` hook that does not continue the chain.** Returning `{ format, source }` without `nextLoad()` or `shortCircuit: true` throws `ERR_INVALID_RETURN_PROPERTY_VALUE` because `shortCircuit` was undefined.
+- **`"module.exports"` plus an expectation that named exports survive.** `require()` callers get only that value. In the example, `log.level` was `undefined`.
 
 ### Edge case worked through: registering hooks in the file that needs them
 
-Static `import` declarations are all loaded and linked *before* any code in the importing module runs. A hook registered by one static import therefore does not exist yet while its sibling imports load:
+Static `import` declarations are loaded and linked before any code in the importing module runs. A hook registered by one static import does not exist yet while its sibling imports load.
 
 javascript
 
@@ -467,6 +477,7 @@ import query from './get-user.sql';      // static: linked BEFORE any code above
 console.log(query);
 ```
 
+
 javascript
 
 ```
@@ -475,6 +486,7 @@ import './sql-hooks.mjs';
 const { default: query } = await import('./get-user.sql');
 console.log(query.trim());
 ```
+
 
 bash
 
@@ -487,12 +499,12 @@ $ node inline-fixed.mjs
 SELECT id, name FROM users WHERE id = $1;
 ```
 
-`sql-hooks.mjs` appears first, but Node has to load `get-user.sql` during linking, before `sql-hooks.mjs` has been evaluated. Register hooks with `--import`/`--require`, or load the affected modules with `import()` / `require()` after registering.
+`sql-hooks.mjs` appears first, but Node has to load `get-user.sql` during linking, before `sql-hooks.mjs` has been evaluated. Register hooks with `--import` or `--require`, or load the affected modules with `import()` or `require()` after you register.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “Why does importing JSON need `with { type: 'json' }`, and what happened to `assert`?”**  
-> A: The attribute states the format the importer expects, so the loader checks it before evaluating anything, and a JSON import can never run as code. It is also part of the module cache key. The older `assert` syntax (import assertions) was replaced by `with` (import attributes) in v21.0.0 / v20.10.0 and removed in v22.0.0. JSON modules expose only a default export.
+> The attribute says which format the importer expects. The loader checks it before evaluating anything, so a JSON import cannot run as code, and the attribute is part of the module cache key. The older `assert` syntax, import assertions, was replaced by `with`, import attributes, in v21.0.0 and v20.10.0, and removed in v22.0.0. JSON modules expose only a default export. The limit is a named import. `import { port } from './config.json' with { type: 'json' }` does not work.
 
 > **Q: “You maintain an ESM-only package. How do you keep CommonJS users working?”**  
-> A: Keep the module graph free of top-level `await`, so `require(esm)` works on v20.19+ / v22.12+. Decide what `require()` should return: either the namespace (callers use `.default`) or a value exported as `"module.exports"`. If you must also support older Node, publish a CommonJS build under `"default"` and put `"module-sync"` before it, pointing at the ESM file. *Trap:* adding top-level `await` later. That breaks every `require()` caller with `ERR_REQUIRE_ASYNC_MODULE`.
+> Keep the graph free of top-level `await`, so `require(esm)` works on v20.19 and v22.12 and later. Decide what `require()` returns: the namespace, so callers use `.default`, or a value exported as `"module.exports"`. If you also support older Node, publish a CommonJS build under `"default"` and put `"module-sync"` before it, pointing at the ESM file. The trap is adding top-level `await` later. Every `require()` caller then fails with `ERR_REQUIRE_ASYNC_MODULE`.

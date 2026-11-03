@@ -13,47 +13,44 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+libuv is the C library inside Node that runs the event loop on your one JavaScript thread, and that also keeps a pool of four background worker threads by default. Network sockets do not use those workers. The operating system watches them and wakes the loop. File reads, some crypto, compression, and `dns.lookup` do use a worker, because the operating system call would otherwise block.
+
+The pool exists so those blocking calls can look asynchronous. The trade-off is the size. Four slow jobs fill the pool, and the next file read waits in line behind them.
+
+A thread here is a worker the operating system can run at the same time as your JavaScript. The event loop is the scheduler on the JavaScript thread.
+
 ## Why it matters
 
-"Node.js is single-threaded" is the most repeated — and most misleading — sentence in backend interviews. Your *JavaScript* runs on a single thread. Node as a whole is emphatically multi-threaded: underneath your code sits **libuv**, a C library that owns the event loop *and* a pool of worker threads, plus it hands as much work as possible straight to the operating system's own asynchronous machinery. Understanding this layer is what lets you answer the real questions: why does reading 4 files concurrently sometimes serialise into two batches? Why does `crypto.pbkdf2` scale to exactly 4 parallel calls and then stall? Why is a DNS lookup mysteriously slow while an HTTP request to the same host is fast?
-
-Every one of those has the same root: some operations are truly async at the OS level and cost no thread, while others are only *faked* as async by running them on libuv's small thread pool. Knowing which is which is the difference between an application that scales and one that intermittently freezes under load for reasons nobody can explain.
+"Node is single-threaded" describes your JavaScript, not the process. libuv owns the event loop and a small thread pool, and it hands network I/O to the kernel. That split is why four concurrent file reads can fall into two batches, why `crypto.pbkdf2` stalls on the fifth call, and why a DNS lookup can be slow while an HTTP request to the same host is not. Some operations are really asynchronous in the kernel and cost no thread. Others are only asynchronous because a worker thread blocks on your behalf.
 
 ## The concept, simply
 
-Picture Node as three cooperating layers. At the top, **V8** runs your JavaScript on one thread. In the middle, **libuv** is the plumbing: it runs the event loop on that same main thread, and it also manages a separate **thread pool** (four background worker threads by default). At the bottom is the **operating system kernel**, which has its own efficient event notification systems (`epoll` on Linux, `kqueue` on macOS/BSD, IOCP on Windows).
+Three layers. **V8** runs your JavaScript on one thread. **libuv**, in the middle, runs the event loop on that same thread and manages the thread pool, four workers by default. The **kernel** underneath has its own readiness systems: `epoll` on Linux, `kqueue` on macOS and BSD, IOCP on Windows.
 
 ![Layered diagram showing the single main JS thread with the event loop, libuv bridging to the OS kernel for network I/O and to a four-worker thread pool for file and crypto work](assets/i04_01_4d0a93cc.svg)
 
-One JS thread runs your code; libuv gives Node real concurrency via the OS kernel and a worker thread pool.
+Asynchronous work takes one of two paths.
 
-When your code does something asynchronous, libuv routes it down one of two paths:
-
-- **The kernel path (free concurrency):** network sockets — TCP, UDP, HTTP, HTTPS — are natively asynchronous in the OS. libuv just registers interest and the kernel notifies the poll phase when data arrives. *No thread is consumed.* You can have tens of thousands of idle connections for almost no cost.
-- **The thread pool path (borrowed concurrency):** some operations have no async kernel API, or their API is blocking. The filesystem is the classic case. For these, libuv hands the work to one of its worker threads, which performs the blocking call and then posts the result back to the loop. Because there are only four workers by default, only four such operations run truly in parallel.
+- **Kernel path.** TCP, UDP, HTTP, and HTTPS sockets are non-blocking in the operating system. libuv registers interest. The kernel notifies the poll phase when data arrives. No pool thread is used. Tens of thousands of idle connections are cheap.
+- **Thread pool path.** Some calls have no non-blocking kernel version. The file system is the usual case. libuv gives the call to a worker, the worker blocks, then posts the result back. Only four such calls run at once unless you change the pool size.
 
 ## How it works
 
-**What actually uses the thread pool.** The list is short and worth memorising because it is exactly what interviewers probe:
-
-- **File system** — almost all of `fs.*` (`readFile`, `writeFile`, `stat`, etc.). The POSIX file API is synchronous, so libuv offloads it.
-- **crypto** — CPU-heavy async crypto: `crypto.pbkdf2`, `crypto.scrypt`, `crypto.randomBytes`, key generation.
-- **zlib** — asynchronous compression/decompression (gzip, deflate, brotli).
-- **`dns.lookup`** — because it calls the system resolver `getaddrinfo`, which is blocking. This is the sneaky one: it is what `http.get('http://example.com')` uses under the hood to resolve the hostname.
+**What uses the pool.** File system calls such as `readFile`, `writeFile`, and `stat`. CPU-heavy async crypto: `crypto.pbkdf2`, `crypto.scrypt`, `crypto.randomBytes`, and key generation. Async zlib, including gzip, deflate, and brotli. And `dns.lookup`, because it calls the blocking system resolver `getaddrinfo`. `http.get('http://example.com')` uses that lookup to resolve the host.
 
 ![Two columns comparing kernel-async operations like TCP, HTTP, pipes and dns.resolve against thread-pool operations like fs, crypto.pbkdf2, zlib and dns.lookup](assets/i04_02_51406ab8.svg)
 
-Network I/O rides the kernel for free; file, crypto, zlib and dns.lookup borrow one of four worker threads.
+**What does not use the pool.** Network I/O. A thousand HTTP requests are not a thousand threads. They are watched by the kernel and handled in poll. `dns.resolve` is the confusing twin. It queries DNS itself through the bundled c-ares library over a socket, so it does not touch the pool. `dns.lookup` does.
 
-**What does NOT use the thread pool.** All network I/O. A thousand concurrent HTTP requests do not consume a thousand threads — they are multiplexed through the kernel and serviced in the poll phase. Confusingly, `dns.resolve()` (which speaks DNS directly via the bundled c-ares library over a socket) is kernel-async and does *not* touch the pool, while `dns.lookup()` (the default that `getaddrinfo` backs) *does*. Same-sounding functions, opposite thread behaviour.
+**Four slots.** `UV_THREADPOOL_SIZE` sets the count, maximum 1024, and it must be set before the pool is created. In practice, set it in the environment before Node starts. Five `crypto.pbkdf2` calls at once means four run and the fifth waits. Latency stays flat up to four concurrent operations, then steps up.
 
-**The pool has exactly four slots by default.** The environment variable `UV_THREADPOOL_SIZE` controls it (max 1024, and it must be set before the pool is created — practically, before you do any pool work). If you fire five `crypto.pbkdf2` calls at once, four start immediately and the fifth waits in a queue until a worker frees up. This produces a very recognisable performance signature: latency that is flat up to four concurrent operations, then rises in steps.
-
-**Why the "single-thread myth" is half true and half dangerous.** It is true that your JS logic never runs on two threads at once — you get memory safety for free, no locks, no data races on your objects. It is dangerous when people conclude "so Node can't do parallel work". It can: I/O is parallel via the kernel, and heavy filesystem/crypto/zlib work is parallel via the pool. What is *not* parallel is your own CPU-bound JavaScript — a `for` loop crunching numbers occupies the one JS thread and blocks the loop (see the blocking topic, and use `worker_threads` for genuine JS parallelism).
+**What "single-threaded" gets right.** Your JavaScript never runs on two threads at once, so you do not lock your own objects. What it gets wrong is "Node cannot do parallel work." Network I/O is parallel in the kernel. File, crypto, and zlib work is parallel up to the pool size. Your own CPU-bound JavaScript is not parallel. A tight loop blocks the one JavaScript thread. That belongs in `worker_threads`, which are separate V8 isolates, not pool workers.
 
 ## Code examples
 
-**Example 1 — the four-slot ceiling is observable.**
+**Example 1. The four-slot ceiling is visible.**
 
 javascript
 
@@ -77,9 +74,9 @@ for (let i = 1; i <= 6; i++) {
 //   hash 6 done in ~360ms   <- next two wait for a free worker
 ```
 
-The first four run in parallel on the four workers; calls five and six queue and only start once a worker is free — so they finish in roughly double the time. This is the thread pool made visible.
+The first four run together. Calls five and six start only when a worker is free, so they finish in about twice the time.
 
-**Example 2 — raise the ceiling with `UV_THREADPOOL_SIZE`.**
+**Example 2. Raise the ceiling with `UV_THREADPOOL_SIZE`.**
 
 javascript
 
@@ -93,7 +90,8 @@ console.log(process.env.UV_THREADPOOL_SIZE); // '8'
 // once the pool has been created.
 ```
 
-**Example 3 — network I/O ignores the pool entirely.**
+
+**Example 3. Network I/O ignores the pool.**
 
 javascript
 
@@ -112,7 +110,8 @@ for (let i = 0; i < 50; i++) {
 // the pool default of 4 does not cap network concurrency.
 ```
 
-**Example 4 — the hidden DNS cost.**
+
+**Example 4. The hidden DNS cost.**
 
 javascript
 
@@ -126,54 +125,54 @@ dns.resolve4('example.com', () => {}); // uses c-ares over a socket, no worker
 // on the pool. If DNS feels slow, dns.resolve() often sidesteps it.
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Believing all async work is thread-pool work.** Network I/O is kernel-async and does not touch the pool; assuming otherwise leads people to raise `UV_THREADPOOL_SIZE` hoping to serve more HTTP connections — it does nothing for that.
-- **Assuming the pool is unlimited.** Four workers by default. Heavy concurrent `fs` + `crypto` + `zlib` compete for the same four slots and can serialise.
-- **Forgetting `dns.lookup` uses the pool.** A burst of outbound HTTP can flood the pool with `getaddrinfo` calls and slow down unrelated file reads.
-- **Setting `UV_THREADPOOL_SIZE` too late.** It must be set in the environment before the first pool operation; mutating `process.env` mid-run after the pool exists has no effect.
-- **Thinking `worker_threads` and the libuv thread pool are the same thing.** They are not. The pool is internal to libuv for I/O-ish native work; `worker_threads` are separate V8 isolates you use to run *your own* CPU-bound JavaScript in parallel.
-- **Expecting `fs` to be "free" like sockets.** Filesystem calls are blocking under the hood; concurrency is bounded by the pool, not the disk.
+- **All async work is not pool work.** Network I/O does not use the pool. Raising `UV_THREADPOOL_SIZE` does not serve more HTTP connections.
+- **The pool is not unlimited.** The default is four workers. Heavy `fs`, `crypto`, and zlib compete for the same slots.
+- **`dns.lookup` uses the pool.** A burst of outbound HTTP can fill the pool with `getaddrinfo` and slow unrelated file reads.
+- **Setting `UV_THREADPOOL_SIZE` too late.** Change it in the environment before the first pool operation. Setting `process.env` after the pool exists does nothing.
+- **The libuv pool is not `worker_threads`.** The pool runs native I/O-style work inside libuv. `worker_threads` are extra V8 isolates for your own JavaScript.
+- **`fs` is not free like a socket.** The call blocks a worker. Concurrency is the pool size, not "as many as the disk allows" for free.
 
 ## Best practices
 
-- **Match `UV_THREADPOOL_SIZE` to your workload,** not blindly to CPU count. If you do heavy concurrent `fs`/`crypto`/`zlib`, a larger pool (e.g. 8–16) can help; measure before and after.
-- **Use `dns.resolve()` instead of `dns.lookup()`** when you need many name resolutions and want to keep them off the pool.
-- **Push genuine CPU-bound JavaScript to `worker_threads`** (or a separate process), never onto the libuv pool — the pool is for native I/O-style work.
-- **Watch for the "flat then stepped" latency signature** under load; it usually means you have saturated the pool.
-- **Do not conflate connection scaling with pool size.** To serve more sockets, tune the app and OS limits — the pool is irrelevant to network concurrency.
+- Set `UV_THREADPOOL_SIZE` for the workload you measured. Heavy concurrent `fs`, crypto, or zlib may want 8 or 16. Measure before and after.
+- Prefer `dns.resolve()` when you need many lookups and want them off the pool.
+- Put your own CPU-bound JavaScript on `worker_threads` or in another process. The pool is not a place to run that JavaScript.
+- Flat latency that then steps up under load usually means the pool is full.
+- To serve more sockets, tune the app and the operating system limits. The pool size is the wrong knob.
 
 ## ⭐ Interview lens
 
 > **Q: Is Node.js single-threaded?**  
-> Your JavaScript executes on a single main thread, so there are no data races on your objects. But Node itself is multi-threaded: libuv runs a thread pool (4 by default) for blocking native work like `fs` and `crypto`, and network I/O is handled asynchronously by the OS kernel. So "single-threaded" describes JS execution, not the whole runtime.
+> Your JavaScript runs on one main thread, one callback at a time, so your objects do not race. The process is not single-threaded. libuv runs a thread pool, four workers by default, for blocking native work such as `fs` and `crypto.pbkdf2`. Network sockets do not take a worker. The kernel watches them. The limit of the slogan is a tight JavaScript loop. That still blocks every connection, because it occupies the only thread that can run your callbacks.
 
 > **Q: Which operations use the libuv thread pool?**  
-> Filesystem (`fs.*`), CPU-heavy crypto (`pbkdf2`, `scrypt`, `randomBytes`, key generation), `zlib`, and `dns.lookup` (because it wraps blocking `getaddrinfo`). Network sockets do *not* — they are kernel-async.
+> Almost all of `fs`, CPU-heavy async crypto (`pbkdf2`, `scrypt`, `randomBytes`, key generation), async zlib, and `dns.lookup`, because `getaddrinfo` blocks. TCP, UDP, and HTTP sockets do not. `dns.resolve` does not either. It speaks DNS over a socket through c-ares. The limit is assuming "async" means "pool." Async only means the JavaScript callback returned. The wait might be a kernel registration or a worker.
 
 > **Q: You run 6 `pbkdf2` calls concurrently and the last two are twice as slow. Why?**  
-> The default pool has 4 workers. The first four run in parallel; the fifth and sixth queue until a worker frees up, so they complete in roughly double the time. Raising `UV_THREADPOOL_SIZE` to ≥6 fixes it (given enough CPU cores).
+> The default pool has four workers. The first four run together. The fifth and sixth sit in a queue until a worker finishes, so they complete in about twice the time. Setting `UV_THREADPOOL_SIZE` to at least 6 lets all six start, if the machine has the CPU. The limit is that the variable must be set before the pool is created. Assigning `process.env.UV_THREADPOOL_SIZE` after the first pool job does nothing. And a bigger pool does not make network sockets faster.
 
 > **Q: Does increasing `UV_THREADPOOL_SIZE` let my server handle more concurrent HTTP connections?**  
-> No. HTTP/TCP is serviced via the kernel in the poll phase and does not consume pool threads. The pool size only affects `fs`/`crypto`/`zlib`/`dns.lookup` throughput.
-
-> **Q: What is the difference between `dns.lookup` and `dns.resolve`?**  
-> `dns.lookup` calls the OS resolver `getaddrinfo`, which is blocking, so it runs on the thread pool. `dns.resolve` (and its variants) queries DNS servers directly via c-ares over a socket — kernel-async, no pool thread. Under heavy pool load, `lookup` can queue while `resolve` stays fast.
-
-> **Q: Thread pool vs `worker_threads` — same thing?**  
-> No. The libuv pool is internal, runs native I/O-style work, and you cannot put arbitrary JS on it. `worker_threads` are separate V8 isolates you create explicitly to run your own CPU-bound JavaScript in parallel, communicating via message passing or `SharedArrayBuffer`.
+> No. HTTP and TCP are handled by the kernel in the poll phase. They do not take pool threads. The pool size only changes throughput of `fs`, crypto, zlib, and `dns.lookup`. The limit of that answer is the hidden lookup. `http.get` to a hostname uses `dns.lookup`, so a burst of new hosts can fill the pool even though the sockets themselves do not.
 
 ## Cheat-card
 
-- **1 JS thread** (V8) + **libuv** (event loop + thread pool) + **OS kernel**.
-- **Kernel-async, no thread:** TCP/UDP/HTTP sockets, pipes, `dns.resolve`.
-- **Thread pool (4 default):** `fs.*`, `crypto.pbkdf2/scrypt/randomBytes`, `zlib`, `dns.lookup`.
-- Tune with `UV_THREADPOOL_SIZE` (max 1024); set it before any pool work.
-- Pool ≠ network concurrency. Raising it won't serve more sockets.
-- Real JS parallelism → `worker_threads`, not the pool.
-- "Single-threaded" = JS execution only; the runtime is multi-threaded.
-- **io_uring on Node 24:** files still go through the thread pool. The only ring is a non-SQPOLL one that batches `epoll_ctl`. `UV_USE_IO_URING=1` has no effect (CVE-2024-22017 fix, libuv ≥ 1.49).
-- **Pool sizing:** `os.availableParallelism()` (added in v19.4.0) respects affinity and the cgroup quota; `os.cpus().length` reports the whole host.
+- One JavaScript thread, plus libuv (event loop and thread pool), plus the kernel.
+- **No pool thread:** TCP, UDP, HTTP, pipes, `dns.resolve`.
+- **Pool, four by default:** `fs`, `crypto.pbkdf2`, `scrypt`, `randomBytes`, zlib, `dns.lookup`.
+- `UV_THREADPOOL_SIZE`, maximum 1024. Set it before any pool work.
+- A bigger pool does not mean more sockets.
+- JavaScript parallelism is `worker_threads`, not the pool.
+
+## Good to know
+
+- Q: What is the difference between `dns.lookup` and `dns.resolve`? `dns.lookup` calls blocking `getaddrinfo` on the thread pool. `dns.resolve` queries DNS through c-ares over a socket and does not use the pool. Under pool load, `lookup` queues and `resolve` stays fast.
+- Q: Thread pool vs `worker_threads`, same thing? No. The pool is internal, for native I/O-style work, and you cannot put arbitrary JavaScript on it. `worker_threads` are separate V8 isolates you create for your own CPU-bound JavaScript, using message passing or `SharedArrayBuffer`.
+- On Node 24, file I/O still uses the thread pool. The only io_uring ring is a non-SQPOLL ring that batches `epoll_ctl`. `UV_USE_IO_URING=1` has no effect. That default is the CVE-2024-22017 fix. libuv 1.45 (Node 20.3) had turned SQPOLL file I/O on. Node 20.11.1 and 21.6.2 turned it off on 14 Feb 2024. libuv 1.49 (Sept 2024) made SQPOLL off the upstream default.
+- `os.availableParallelism()` was added in v19.4.0 and v18.14.0. It respects the affinity mask and the cgroup CPU quota. `os.cpus()` was added in v0.3.3 and reports the whole machine. A quota of 1.5 CPUs rounds down to 1. Neither function changes `UV_THREADPOOL_SIZE`, which stays 4 unless you set it.
+- `setuid` and the related calls throw `ERR_INVALID_STATE` only when the linked libuv is from 1.45.0 up to but not including 1.49.0. Node 24's bundled libuv 1.52.1 does not throw.
 
 ---
 
@@ -186,26 +185,28 @@ dns.resolve4('example.com', () => {}); // uses c-ares over a socket, no worker
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### io_uring on Linux: what Node 24 actually uses
 
-**What it is.** io_uring is a Linux kernel interface (5.1+) made of two ring buffers shared between a process and the kernel. The process writes I/O requests into a *submission queue*, and the kernel posts results to a *completion queue*. With the SQPOLL mode, a kernel thread polls the submission queue, so the process does not even need a syscall per request. For files this offers real kernel-async I/O, which could replace the thread-pool path described above (a worker thread making a blocking `read()`).
+io_uring is a Linux kernel interface, from 5.1 on, made of two shared ring buffers. The process writes requests to a submission queue. The kernel posts results to a completion queue. In SQPOLL mode a kernel thread polls the submission queue, so the process does not make a syscall per request. For files, that would be real kernel-async I/O and could replace a worker blocked in `read()`.
 
-**Why it matters, and why it is off.** libuv 1.45.0 (May 2023, shipped in Node 20.3.0) started sending file operations through an SQPOLL io_uring ring. Two kinds of trouble followed. The first was kernel bugs: libuv's ChangeLog has a run of entries such as "disable io_uring on 32 bits arm systems", "don't use io_uring on pre-5.10.186 kernels" and "disable io_uring on ppc64 and ppc64le". The second was a security hole. **CVE-2024-22017** (High), fixed in the 14 Feb 2024 security releases (Node 20.11.1 and 21.6.2): an io_uring ring created *before* `process.setuid()` kept the old credentials, so file operations could still run with root privileges after the process had "dropped" them. Node's fix was two commits: "deps: disable io_uring support in libuv by default", and "src,deps: disable setuid() etc if io_uring enabled". libuv 1.49.0 (Sept 2024) then made the opt-out official upstream: "linux: disable SQPOLL io_uring by default".
+libuv 1.45.0, May 2023, shipped in Node 20.3.0, started sending file operations through an SQPOLL ring. Kernel bugs followed. The libuv ChangeLog records disabling it on 32-bit ARM, on kernels before 5.10.186, and on ppc64 and ppc64le. Then a security hole. CVE-2024-22017, rated High, fixed in the 14 Feb 2024 releases, Node 20.11.1 and 21.6.2. A ring created before `process.setuid()` kept the old credentials, so file operations could still run as root after the process had dropped them. Node disabled io_uring in libuv by default, and disabled `setuid` and the related calls if io_uring was enabled. libuv 1.49.0, September 2024, made "SQPOLL off by default" the upstream behavior.
 
-**The state on Node v24.19.0 (libuv 1.52.1), from its source:**
+On Node v24.19.0, libuv 1.52.1, from that source:
 
-1. Every libuv loop creates one small io_uring ring without SQPOLL (the `ctl` ring) and uses it only to batch `epoll_ctl` calls. libuv 1.50.0's ChangeLog says "always use io_uring for epoll batching". No file I/O goes through it.
-2. The SQPOLL ring that would carry file operations is created lazily, and only if **both** of these hold: the embedder calls `uv_loop_configure(loop, UV_LOOP_USE_IO_URING_SQPOLL)` (a loop option added in libuv 1.49.0), **and** the `UV_USE_IO_URING` environment variable is a positive number.
-3. Node v24.19.0 calls `uv_loop_configure` only with `UV_LOOP_BLOCK_SIGNAL` and `UV_METRICS_IDLE_TIME`, never with the SQPOLL option. So **on Node 24, `fs` always uses the thread pool, and setting `UV_USE_IO_URING=1` changes nothing**.
-4. `process.setuid()`, `setgid()`, `seteuid()`, `setegid()`, `setgroups()` and `initgroups()` check `uv_version()`. They throw `ERR_INVALID_STATE` ("io_uring may be enabled. See CVE-2024-22017.") only for libuv versions from 1.45.0 up to (not including) 1.49.0. This guards against a Node build linked to such a shared libuv. With the bundled 1.52.1 they work normally.
+1. Every libuv loop creates one small io_uring ring without SQPOLL and uses it only to batch `epoll_ctl`. libuv 1.50.0 says it always uses io_uring for epoll batching. File I/O does not go through it.
+2. The SQPOLL ring that would carry files is created lazily, and only if the embedder calls `uv_loop_configure(loop, UV_LOOP_USE_IO_URING_SQPOLL)` and `UV_USE_IO_URING` is a positive number. That loop option was added in libuv 1.49.0.
+3. Node v24.19.0 calls `uv_loop_configure` only with `UV_LOOP_BLOCK_SIGNAL` and `UV_METRICS_IDLE_TIME`. So on Node 24, `fs` always uses the thread pool, and `UV_USE_IO_URING=1` changes nothing.
+4. `process.setuid()`, `setgid()`, `seteuid()`, `setegid()`, `setgroups()`, and `initgroups()` check `uv_version()`. They throw `ERR_INVALID_STATE` ("io_uring may be enabled. See CVE-2024-22017.") only for libuv from 1.45.0 up to but not including 1.49.0. That guards a Node build linked to such a shared libuv. With the bundled 1.52.1 they work.
 
-> ⚠️ Unverified: `UV_USE_IO_URING` is **not documented** on https://nodejs.org/api/cli.html (searched on 7 Oct 2026: the v24.x and current v26.10.0 pages mention `UV_THREADPOOL_SIZE` only). Everything above comes from the libuv ChangeLog, libuv v1.52.1 `src/unix/linux.c`, Node v24.19.0 `src/node.cc` / `src/node_credentials.cc`, and the strace run below, not from a Node doc page.
+> ⚠️ Unverified: `UV_USE_IO_URING` is not documented on https://nodejs.org/api/cli.html (searched on 7 Oct 2026: the v24.x and current v26.10.0 pages mention `UV_THREADPOOL_SIZE` only). The points above come from the libuv ChangeLog, libuv v1.52.1 `src/unix/linux.c`, Node v24.19.0 `src/node.cc` and `src/node_credentials.cc`, and the strace run below, not from a Node doc page.
 
-**Example — strace shows no SQPOLL ring and file reads on four pool threads, with or without the variable.**
+**Example. strace shows no SQPOLL ring, and file reads on four pool threads, with or without the variable.**
 
 javascript
 
@@ -215,6 +216,7 @@ const fs = require('node:fs');
 let n = 0;
 for (let i = 0; i < 20; i++) fs.readFile(__filename, () => { if (++n === 20) console.log('20 reads done'); });
 ```
+
 
 bash
 
@@ -252,22 +254,20 @@ $ grep -o 'io_uring_setup(256, {flags=[A-Z_|]*' trace0.txt | sort | uniq -c
       3 io_uring_setup(256, {flags=IORING_SETUP_NO_SQARRAY
 ```
 
-How to read it: the single open on the main thread (the lowest id) is the CommonJS loader reading the script. The 20 async opens are spread over four other thread ids, which are the four default pool workers (5/5/5/5 in this run; a rerun gave 6/4/6/4 and 3/2/6/9, but always four threads). The three rings all have 256 entries and no SQPOLL flag; these are the `epoll_ctl` batching rings. The output has the same shape with `UV_USE_IO_URING=1`. (Linux 7.0.0, `kernel.io_uring_disabled = 0`, strace 6.19; thread ids change every run.)
+The single open on the main thread, the lowest id, is the CommonJS loader reading the script. The 20 async opens spread over four other thread ids, the default pool workers. This run was 5, 5, 5, and 5. A rerun gave 6, 4, 6, 4 and 3, 2, 6, 9, always four threads. The three rings have 256 entries and no SQPOLL flag. Those are the `epoll_ctl` batching rings. The shape is the same with `UV_USE_IO_URING=1`. Linux 7.0.0, `kernel.io_uring_disabled = 0`, strace 6.19. Thread ids change every run.
 
 ### `os.availableParallelism()` vs `os.cpus().length`
 
-**What they are.** `os.cpus()` (added in v0.3.3) returns one object per logical CPU the *machine* has, read from `/proc` on Linux. `os.availableParallelism()` (added in v19.4.0 and v18.14.0) wraps libuv's `uv_available_parallelism()`, which estimates how many CPUs *this process* may actually use. On Linux it counts the CPUs in the process's affinity mask (`sched_getaffinity`), then lowers that to the cgroup CPU quota if there is one. libuv 1.49.0 lists "fix uv_available_parallelism using cgroup".
+`os.cpus()` returns one object per logical CPU the machine has, read from `/proc` on Linux. `os.availableParallelism()` wraps libuv's `uv_available_parallelism()`, an estimate of how many CPUs this process may actually use. On Linux it counts the CPUs in the affinity mask from `sched_getaffinity`, then lowers that to the cgroup CPU quota if there is one. libuv 1.49.0 lists the cgroup fix.
 
-**Why it matters.** Containers and CPU pinning restrict the CPUs a process can use, but `os.cpus()` still reports the whole machine. If you size a worker pool or a cluster from `os.cpus().length` inside a `--cpus=2` container on a 64-core host, you start 64 CPU-bound workers that share 2 CPUs of quota. They spend their time being throttled and context-switching. Piscina's default `maxThreads` is derived from `os.availableParallelism()` for this reason (lesson 10).
+`os.cpus()` still reports the whole machine inside a container or a CPU pin. Size a worker pool from that number inside a `--cpus=2` container on a 64-core host and you start 64 CPU-bound workers onto 2 CPUs of quota. Piscina's default `maxThreads` uses `os.availableParallelism()` for this reason. Lesson 10 covers the pool.
 
-How it works:
+1. `uv_available_parallelism()` calls `sched_getaffinity` and counts the bits. `taskset -c 0` limits that mask to one CPU.
+2. It reads the process cgroup and its `cpu.max`. A quota of `200000 100000` means 2 CPUs.
+3. It returns the smaller of the two, and never less than 1. A fractional quota rounds down. 1.5 CPUs gives 1.
+4. Neither value changes the libuv thread pool. `UV_THREADPOOL_SIZE` still defaults to 4.
 
-1. `uv_available_parallelism()` calls `sched_getaffinity(0, …)` and counts the bits set. `taskset -c 0 node …` limits that mask to one CPU.
-2. It reads the process's cgroup (`/proc/self/cgroup`) and its `cpu.max` (quota and period). A quota of `200000 100000` means 2 CPUs.
-3. It returns the smaller of the two, and never less than 1. A fractional quota rounds down: 1.5 CPUs gives 1.
-4. Neither value changes the libuv thread pool. `UV_THREADPOOL_SIZE` still defaults to 4, whatever these functions return.
-
-**Example — same machine, three restrictions.**
+**Example. The same machine, three restrictions.**
 
 javascript
 
@@ -276,6 +276,7 @@ javascript
 const os = require('node:os');
 console.log(`availableParallelism=${os.availableParallelism()} cpus().length=${os.cpus().length}`);
 ```
+
 
 bash
 
@@ -290,21 +291,21 @@ $ systemd-run --user --scope -q -p CPUQuota=200% node par.js
 availableParallelism=2 cpus().length=8
 ```
 
-`systemd-run --user --scope` runs the command in a temporary cgroup whose `cpu.max` was `200000 100000` (quota and period in microseconds). The cgroup is removed when the command exits, so nothing on the host changes.
+`systemd-run --user --scope` runs the command in a temporary cgroup whose `cpu.max` was `200000 100000`, quota and period in microseconds. The cgroup is removed when the command exits.
 
 > ⚠️ Unverified: that `docker run --cpus=2` and Kubernetes CPU limits write the same `cpu.max` file, so they give the same result. No Docker daemon or cluster was available to run it.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **"Node 20+ uses io_uring for files."** That was only true for the releases between 20.3.0 and 20.11.1. Node 24 sends `fs` through the thread pool, and `UV_USE_IO_URING=1` does not change that, because Node never enables the SQPOLL loop option.
-- **Seeing `io_uring_setup` in strace and concluding files use it.** Those rings have no SQPOLL flag and only batch `epoll_ctl`. Look at which thread made the `openat`/`read` calls.
-- **Following old advice to set `UV_USE_IO_URING=0` "for security".** It is harmless, but on Node 24 it does nothing. The CVE fix is the libuv default plus the `setuid()` guard.
-- **Sizing pools from `os.cpus().length` in containers.** It reports the host's CPUs. Use `os.availableParallelism()`, which respects affinity and cgroup quota.
-- **Assuming `availableParallelism()` tunes `UV_THREADPOOL_SIZE`.** It does not. The pool stays at 4 unless you set the variable.
+- **"Node 20 and later uses io_uring for files."** That was only true between 20.3.0 and 20.11.1. Node 24 sends `fs` through the thread pool. `UV_USE_IO_URING=1` does not change that, because Node never enables the SQPOLL loop option.
+- **Seeing `io_uring_setup` in strace and concluding files use it.** Those rings have no SQPOLL flag and only batch `epoll_ctl`. Look at which thread made the `openat` and `read` calls.
+- **Setting `UV_USE_IO_URING=0` "for security" on Node 24.** It is harmless and it does nothing. The CVE fix is the libuv default plus the `setuid()` guard.
+- **Sizing pools from `os.cpus().length` in containers.** That is the host's CPU count. Use `os.availableParallelism()`.
+- **Assuming `availableParallelism()` sets `UV_THREADPOOL_SIZE`.** It does not. The pool stays at 4 unless you set the variable.
 
 ### Edge case worked through: a fractional CPU quota
 
-Take a CPU quota of 1.5 CPUs (`CPUQuota=150%`, which is `cpu.max` = `150000 100000`). `os.availableParallelism()` rounds it down:
+A quota of 1.5 CPUs (`CPUQuota=150%`, `cpu.max` of `150000 100000`) rounds down:
 
 bash
 
@@ -313,12 +314,12 @@ $ systemd-run --user --scope -q -p CPUQuota=150% node par.js
 availableParallelism=1 cpus().length=8
 ```
 
-So code that does `Math.max(1, os.availableParallelism() - 1)` to "leave one core for the main thread" gets 1 worker under a 1.5-CPU limit, and also under a 1-CPU limit. If you want your pool to use the extra half CPU (for example under a container limit of 1.5 CPUs), size it yourself (for example from an environment variable set by the deployment), and measure it.
+So `Math.max(1, os.availableParallelism() - 1)`, meant to leave one core for the main thread, returns 1 under a 1.5 CPU limit and also under a 1 CPU limit. If you want the extra half CPU, size the pool yourself, for example from an environment variable set by the deployment, and measure it.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “Does Node use io_uring for file I/O today?”**  
-> A: Not by default, and on Node 24 not at all. libuv added it in 1.45 (Node 20.3). After kernel bugs and CVE-2024-22017 (a ring created before `setuid()` kept root's credentials), Node 20.11.1 turned it off, and libuv 1.49 made "SQPOLL off" the upstream default. On Node 24, file operations still run on the four-thread pool. The only io_uring use left is a non-SQPOLL ring that batches `epoll_ctl` calls. *Trap:* citing `UV_USE_IO_URING=1` as the switch. Node 24 never sets the loop option it needs.
+> Not for files, on Node 24. libuv added an SQPOLL file path in 1.45, which shipped in Node 20.3. After kernel bugs and CVE-2024-22017, a ring created before `setuid()` kept root's credentials, Node 20.11.1 turned it off, and libuv 1.49 made SQPOLL off the upstream default. On Node 24, `fs` still runs on the four-thread pool. The only io_uring left is a non-SQPOLL ring that batches `epoll_ctl`. The trap is citing `UV_USE_IO_URING=1` as the switch. Node 24 never sets the loop option that variable needs. The variable is also absent from the Node CLI docs. See the unverified note above.
 
 > **Q: “Why use `os.availableParallelism()` instead of `os.cpus().length`?”**  
-> A: `cpus()` lists the machine's logical CPUs. `availableParallelism()` counts the CPUs in the process's affinity mask, capped by the cgroup CPU quota. In a container limited to 2 CPUs on an 8-core host it returns 2, while `cpus().length` returns 8.
+> `cpus()` lists the machine's logical CPUs. `availableParallelism()` counts the CPUs in this process's affinity mask, then caps that by the cgroup CPU quota. In a container limited to 2 CPUs on an 8-core host it returns 2, while `cpus().length` returns 8. The limit is that it does not resize libuv's pool, and a fractional quota such as 1.5 rounds down to 1.

@@ -13,57 +13,41 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Modern Node ships built-in replacements for jobs that used to need a package: running package scripts, tests, restart-on-save, env files, command-line flags, HTTP and WebSocket clients, a small database, and a single executable. A feature usually lands behind a flag, then turns on by default while its API can still change, then becomes stable so a breaking change needs a new major version. The trade-off is that the replacement is smaller than the package: `node --run` has no pre and post hooks, and Node ships a WebSocket client but not a server.
+
 ## Why it matters
 
-Between Node 18 and Node 24 the runtime took over jobs that used to need an npm package: running `package.json` scripts (`npm run`), running tests (Jest, Mocha), restarting on save (nodemon), loading `.env` files (dotenv), parsing CLI flags (yargs, commander), making HTTP and WebSocket client calls (axios, node-fetch, ws), embedding a database (better-sqlite3), packaging an app as one binary (pkg) and restricting what a script may touch. Each built-in replacement removes a dependency to install, audit and upgrade.
+Between Node 18 and Node 24 the runtime took over jobs that used to need an npm package: `npm run`, Jest or Mocha for simple suites, nodemon, dotenv, yargs or commander, axios or node-fetch, the `ws` client, better-sqlite3, pkg, and a way to restrict what a script may touch. Each built-in removes a dependency to install, audit, and upgrade.
 
-The catch is that each feature arrived behind a flag, changed while it was experimental, and became stable in a different release. Code written for Node 20 can fail on Node 24 and the other way round: the permission flag was spelled `--experimental-permission` on Node 20, `require()` of an ES module threw `ERR_REQUIRE_ESM` until v22.12.0, and `import … assert { type: 'json' }` is now a syntax error. If you know when each feature landed and how stable it is, you can tell which features you can rely on in production, which ones need a version check in `engines`, and which errors mean "wrong Node version" and not "bug in my code".
+Each feature arrived behind a flag, changed while it was experimental, and became stable in a different release. Code written for Node 20 can fail on Node 24 and the other way round. If you know when a feature landed and how stable it is, you can say which ones production can rely on, which need an `engines` check, and which errors mean the wrong Node version.
 
 ## The concept, simply
 
-Each feature in this tour is one of three kinds of thing:
+Each feature in this tour is one of three kinds.
 
-1. **A CLI flag** read by the `node` binary before your code runs: `--run`, `--test`, `--watch`, `--watch-path`, `--env-file`, `--permission` and the `--allow-*` flags, `--experimental-sea-config`.
-2. **A built-in module or API** you load from code: `node:sqlite`, `util.parseArgs`, `process.loadEnvFile`, `node:sea`.
-3. **A global or a module-loader rule**: the `fetch`, `WebSocket` and `URLPattern` globals, `require()` of ES modules, and import attributes for JSON.
+1. **A command-line flag** the `node` binary reads before your code runs: `--run`, `--test`, `--watch`, `--watch-path`, `--env-file`, `--permission` and the `--allow-*` flags, and `--experimental-sea-config`.
+2. **A built-in module or API** you load from code: `node:sqlite`, `util.parseArgs`, `process.loadEnvFile`, and `node:sea`.
+3. **A global or a loader rule:** the `fetch`, `WebSocket`, and `URLPattern` globals, `require()` of ES modules, and import attributes for JSON.
 
-Every one of them carries a **stability index** in the docs: `1` Experimental (with sub-levels 1.0 early development, 1.1 active development, 1.2 release candidate), `2` Stable, `3` Legacy. The **History** table under each API lists the release where it was added, where its flag was removed ("unflagged"), and where it stopped being experimental. Those two pieces, the stability index and the History table, are the "Added in" lines below.
+Every one carries a **stability index** in the docs. `1` is experimental, with 1.0 early development, 1.1 active development, and 1.2 release candidate. `2` is stable. `3` is legacy. The History table under each API lists where it was added, where its flag was removed, and where it stopped being experimental. Those rows are in Good to know.
 
 ## How it works
 
-A feature normally goes through these steps between landing and becoming stable:
+A feature normally moves through five steps.
 
-1. **Lands behind a flag.** The code ships in a release but only runs if you pass a flag such as `--experimental-sqlite`. Without it, the module or global does not exist.
-2. **Unflagged but experimental.** The flag is removed (or flipped to an opt-out such as `--no-experimental-websocket`). The feature is available by default and may print an `ExperimentalWarning` on first use. Its API can still change in a minor release.
-3. **Release candidate (1.2).** The API is believed final; only fixes are expected.
-4. **Stable (2).** Semver applies: breaking changes need a new major version.
-5. **Backports.** Many features are backported to older LTS lines, which is why History tables list two or three versions per row (for example `v23.5.0, v22.13.0`).
+1. **It lands behind a flag.** Nothing exists unless you pass something like `--experimental-sqlite`.
+2. **The flag goes away, and it is still experimental.** It is on by default and may print an ExperimentalWarning. The API can still change in a minor release.
+3. **Release candidate, stability 1.2.** The API is believed final.
+4. **Stable, stability 2.** Breaking changes need a new major version.
+5. **Backports.** History tables often list two or three versions on one row, because the change also landed on an older long-term-support line.
 
-Where each feature in this tour stood on **v24.19.0**, taken from the History tables in the v24.19.0 API docs:
+**How the flags reach your code.** The C++ side parses them before the JavaScript environment exists. `--env-file` reads its files before the permission model starts, which is why the permission docs say it is not subject to those rules. `--watch` does not run your script itself. It starts a supervisor process that spawns your script as a child and kills and respawns it when a watched file changes. In a test run, the script's `process.ppid` was the process id of the `node --watch` process. `--test` spawns one child process per test file by default, test isolation `'process'`, and collects the results. `--run` does not start a JavaScript environment at all. `node --require ./pre.js --run build` never ran `pre.js`. It reads `package.json`, prepends every `node_modules/.bin` folder from the current directory up to the root onto `PATH`, and hands the script string to the shell.
 
-| Feature | Added in | Unflagged | Status in v24.19.0 |
-| --- | --- | --- | --- |
-| `node --run` | v22.0.0 | (no flag) | no stability marker (treated as stable); folder traversal added v22.3.0 |
-| `node --test` | v18.1.0, v16.17.0 | (no flag) | Stable since v20.0.0 |
-| `--watch`, `--watch-path` | v18.11.0, v16.19.0 | (no flag) | Stable since v22.0.0, v20.13.0 |
-| `--env-file` | v20.6.0 | (no flag) | Stable since v24.10.0 |
-| `process.loadEnvFile()` | v21.7.0, v20.12.0 | (no flag) | Stable since v24.10.0 |
-| `--permission`, `--allow-fs-read/-write` | v20.0.0 (as `--experimental-permission`) | renamed `--permission` | Stable since v23.5.0, v22.13.0 |
-| `--allow-child-process`, `--allow-worker`, `--allow-addons`, `--allow-wasi` | v20.0.0 (addons v21.6.0, wasi v22.3.0) | — | 1.1 Active development |
-| `node:sqlite` | v22.5.0 (`--experimental-sqlite`) | v23.4.0, v22.13.0 | 1.2 Release candidate since v24.15.0 |
-| `require(esm)` | v22.0.0, v20.17.0 (`--experimental-require-module`) | v23.0.0, v22.12.0, v20.19.0 | Stable since v24.15.0 |
-| Import attributes (`with { type: 'json' }`) | v17.1.0, v16.14.0 (as `assert`) | — | `assert` → `with` in v21.0.0, v20.10.0, v18.20.0; JSON modules stable since v23.1.0, v22.12.0 |
-| `URLPattern` | v23.8.0 (`node:url`), global in v24.0.0 | (no flag) | 1 Experimental |
-| Single executable applications | v19.7.0, v18.16.0 | (no flag) | 1.1 Active development |
-| `util.parseArgs()` | v18.3.0, v16.17.0 | (no flag) | Stable since v20.0.0 |
-| `fetch` | v17.5.0, v16.15.0 (`--experimental-fetch`) | v18.0.0 | Stable since v21.0.0 |
-| `WebSocket` (client) | v21.0.0, v20.10.0 (`--experimental-websocket`) | v22.0.0 | Stable since v22.4.0 |
+**How the globals are provided.** `fetch`, `Request`, `Response`, `Headers`, `FormData`, and `WebSocket` come from undici, an HTTP client written in JavaScript and bundled into Node. They follow the browser specifications, so a `fetch` response is a web `ReadableStream`, not a Node stream, and a `WebSocket` uses `addEventListener`, not `.on()`. Node ships only the WebSocket client. Accepting connections still needs a server library.
 
-**How the flags reach your code.** CLI flags are parsed by the C++ side of Node before the JavaScript environment exists. Some act before any module loads: `--env-file` reads its files before the permission model starts, which is why the permission docs list it as not subject to permission rules. `--watch` does not run your script itself: it starts a supervisor process that spawns your script as a child (in a test run, the script's `process.ppid` was the PID of the `node --watch` process) and kills and respawns it when a watched file changes. `--test` spawns one child process per test file by default (test isolation `'process'`) and collects their results. `--run` does not start a JavaScript environment at all (`node --require ./pre.js --run build` never ran `pre.js`): it reads `package.json`, prepends every `node_modules/.bin` folder from the current directory up to the root to `PATH`, and hands the script string to the shell.
-
-**How the globals are provided.** `fetch`, `Request`, `Response`, `Headers`, `FormData` and `WebSocket` come from **undici**, an HTTP/1.1 client written in JavaScript and bundled into Node (`process.versions.undici` is `7.29.0` on v24.19.0). They follow the WHATWG (browser) specifications, so a `fetch` response is a web `ReadableStream`, not a Node stream, and a `WebSocket` uses `addEventListener`, not `.on()`. Node ships only the WebSocket *client*; to accept WebSocket connections you still need a server library (the examples use `ws` 8.22.0).
-
-**How the module rules changed.** Since v22.12.0 / v20.19.0 the CommonJS loader can load an ES module synchronously, as long as the ES module graph contains no top-level `await`. If it does, `require()` throws `ERR_REQUIRE_ASYNC_MODULE`, because a synchronous call cannot wait for a promise. For JSON, the ES module loader requires the attribute `with { type: 'json' }`. The attribute exists for safety: a file served as `.json` cannot then be run as JavaScript.
+**How the module rules changed.** The CommonJS loader can load an ES module synchronously when the module graph has no top-level `await`. If it does, `require()` throws `ERR_REQUIRE_ASYNC_MODULE`, because a synchronous call cannot wait for a promise. For JSON, the ES module loader requires the attribute `with { type: 'json' }`. The attribute exists so a file served as JSON cannot then be run as JavaScript. The older spelling `assert` is now a syntax error.
 
 ## Code examples
 
@@ -842,60 +826,75 @@ Two edge cases are in that output. A 404 **resolves**: `fetch` rejects only when
 
 ## Common mistakes & gotchas
 
-- **Expecting `node --run` to behave like `npm run`.** It does not run `pre`/`post` hooks and does not set `npm_package_*` or other `npm_*` variables. A `prestart` that builds assets is silently skipped.
+- **Expecting `node --run` to behave like `npm run`.** It does not run `pre` and `post` hooks and does not set `npm_package_*` or other `npm_*` variables. A `prestart` that builds assets is silently skipped.
 - **Naming tests `*.spec.js` and running bare `node --test`.** Zero spec files run and nothing warns you. Pass a quoted glob or rename the files.
-- **Expecting `--watch` to see files read with `fs`.** Config, templates and `.env` files are not in the module graph. Add `--watch-path` for them, and remember that `--watch-path` turns graph tracking off, so list your source folder too.
-- **Assuming `--env-file` overrides the shell.** A variable already set in the environment (by Docker, CI or your shell profile) wins over the file, and `process.loadEnvFile()` never overwrites one either.
-- **Treating `--permission` as a sandbox.** It is a seat belt for trusted code: it has no network scope in v24, and it does not cover symlink escapes or file descriptors that are already open. Use OS isolation (containers, separate users) for untrusted code.
-- **`require()` of an ESM package that uses top-level `await`.** You get `ERR_REQUIRE_ASYNC_MODULE` even on v24. Use `await import()` instead.
-- **Reading `.default` off the wrong thing.** `require('./esm.mjs')` returns the namespace object; the default export is `.default`, unless the module exports `'module.exports'`.
-- **Copying `assert { type: 'json' }` from old tutorials.** It is a `SyntaxError` now; write `with`.
-- **Building a SEA from an unbundled project.** `require('./x')` inside the binary throws `ERR_UNKNOWN_BUILTIN_MODULE`. Bundle first.
+- **Expecting `--watch` to see files read with `fs`.** Config, templates, and `.env` files are not in the module graph. Add `--watch-path` for them. `--watch-path` turns graph tracking off, so list your source folder too.
+- **Assuming `--env-file` overrides the shell.** A variable already set by Docker, CI, or your shell wins over the file, and `process.loadEnvFile()` never overwrites one either.
+- **Treating `--permission` as a sandbox.** It is a seat belt for trusted code. It has no network scope in v24, and it does not cover symlink escapes or file descriptors that are already open. Use OS isolation for untrusted code.
+- **`require()` of an ES module that uses top-level `await`.** You get `ERR_REQUIRE_ASYNC_MODULE`. Use `await import()` instead.
+- **Reading `.default` off the wrong thing.** `require('./esm.mjs')` returns the namespace object. The default export is `.default`, unless the module exports `'module.exports'`.
+- **Copying `assert { type: 'json' }` from old tutorials.** It is a `SyntaxError` now. Write `with`.
+- **Building a single executable from an unbundled project.** `require('./x')` inside the binary throws `ERR_UNKNOWN_BUILTIN_MODULE`. Bundle first.
 - **Treating a non-2xx `fetch` response as an exception.** It is not one. Check `res.ok`.
-- **Parsing numbers with `parseArgs`.** There is no number type; `values.port` is `'8080'`. Convert it and validate it.
+- **Parsing numbers with `parseArgs`.** There is no number type. `values.port` is the string `'8080'`. Convert it and validate it.
 
 ## Best practices
 
-- **Read the History table before relying on a feature.** It tells you the minimum version, and that version belongs in `engines.node` (for example `>=22.12.0` for an ESM-only package that CommonJS users will `require()`).
-- **Prefer the stable features in production:** `--test`, `--watch` (dev only), `--env-file`, `parseArgs`, `fetch`, `WebSocket`, `require(esm)` and the fs permission flags. Pin exact Node versions when you use `node:sqlite` (release candidate), `URLPattern` (experimental) or SEA (active development).
-- **Use `node --run` for hot dev loops and `npm run` when you need hooks.** Keep `npm run` in CI scripts that depend on `pre`/`post` hooks.
-- **Grant permissions narrowly:** `--allow-fs-read=./config --allow-fs-write=./logs`, not `=*`. Check grants at run time with `process.permission.has()` so you can fail with a clear message.
-- **Validate after loading the environment.** `--env-file` only puts strings into `process.env`; parse them into a typed config object at start-up (lesson 04 shows this with zod).
-- **Wrap `fetch` once.** Write one helper that checks `res.ok`, sets a timeout with `AbortSignal.timeout(ms)` and logs `err.cause`, and use it everywhere.
-- **Bundle before you build a SEA,** and build the blob with the same Node binary you inject it into: the docs require the versions to match.
+- **Read the History table before you rely on a feature,** and put the minimum version in `engines.node`.
+- **Prefer the stable features in production:** `--test`, `--watch` in development, `--env-file`, `parseArgs`, `fetch`, `WebSocket`, `require()` of ES modules, and the file-system permission flags. Pin an exact Node when you use `node:sqlite`, `URLPattern`, or single executables.
+- **Use `node --run` for hot dev loops and `npm run` when you need hooks.** Keep `npm run` in CI scripts that depend on `pre` and `post` hooks.
+- **Grant permissions narrowly,** for example read on `./config` and write on `./logs`, not a star. Check grants with `process.permission.has()` so you can fail with a clear message.
+- **Validate after loading the environment.** `--env-file` only puts strings into `process.env`. Parse them into a typed config at start-up.
+- **Wrap `fetch` once.** Check `res.ok`, set a timeout with `AbortSignal.timeout`, and log `err.cause`.
+- **Bundle before you build a single executable,** and build the blob with the same Node binary you inject it into. The docs require the versions to match.
 
 ## ⭐ Interview lens
 
 > **Q: “Which npm packages can modern Node replace, and from which version?”**  
-> A: `npm run` → `node --run` (v22), Jest/Mocha for simple suites → `node --test` (stable v20), nodemon → `--watch` (stable v22.0.0/v20.13.0), dotenv → `--env-file`/`process.loadEnvFile` (stable v24.10.0), yargs/commander → `util.parseArgs` (stable v20), node-fetch/axios → global `fetch` (unflagged v18, stable v21), the `ws` client → global `WebSocket` (stable v22.4.0), better-sqlite3 → `node:sqlite` (release candidate in v24.15.0). *Trap:* claiming they are drop-in replacements. `node --run` has no hooks, and Node has no WebSocket server.
+> A: Node grew built-ins for jobs that used to be packages, and each one became stable on its own schedule, listed in Good to know. `node --run` stands in for `npm run` when you only need the script. `node --test` covers a simple suite. `--watch` restarts on save the way nodemon did. `--env-file` and `process.loadEnvFile` load env files. `util.parseArgs` parses flags. Global `fetch` is the HTTP client. Global `WebSocket` is the client. `node:sqlite` is the embedded database, and on the Node this lesson used it is still a release candidate. They are not drop-in copies. `node --run` does not run `pre` and `post` hooks and does not set `npm_*` variables, because it never starts a JavaScript environment for your app. It reads `package.json`, puts `node_modules/.bin` on `PATH`, and hands the script to the shell. Node has a WebSocket client that uses `addEventListener`, and no WebSocket server, so a server still needs a library. The limit is treating "stable" as "the same API as the package." Check the History table and set `engines.node` to the version you actually need.
 
 > **Q: “What does `--permission` restrict, and is it a security boundary?”**  
-> A: In v24 it restricts fs reads and writes, child processes, worker threads, native addons, WASI and the inspector, each re-opened with an `--allow-*` flag. A violation throws `ERR_ACCESS_DENIED` with `permission` and `resource` properties. It is not a sandbox: the docs call it a seat belt for trusted code, it has no network scope in v24, and symlinks and open file descriptors can get around it. *Trap:* saying it isolates untrusted plugins.
+> A: `--permission` is a seat belt for trusted code, not a sandbox for untrusted plugins. On the Node this lesson used, it can restrict file reads and writes, child processes, worker threads, native addons, WASI, and the inspector. You open each one back up with an `--allow-*` flag. A violation throws `ERR_ACCESS_DENIED` with `permission` and `resource` properties. The C++ side applies this before your JavaScript runs. `--env-file` is special: it is read before the permission model starts, so the permission docs say it is not subject to those rules. For example, allow read on `./config` and write on `./logs`, and check `process.permission.has()` so a missing grant fails with a clear message. The limit is what it does not cover. There is no network scope in v24. Symlinks and file descriptors that are already open can get around it. Untrusted code still needs operating-system isolation, such as a container or a separate user. The child-process, worker, addon, and WASI allows were still active development in this lesson's docs.
 
 > **Q: “Can CommonJS `require()` an ES module now?”**  
-> A: Yes. Since v22.12.0 / v20.19.0 it works without a flag, and it is stable since v24.15.0. The module is loaded synchronously and `require` returns its namespace object, with the default export under `.default` unless the module exports `'module.exports'`. It fails with `ERR_REQUIRE_ASYNC_MODULE` if the graph uses top-level await, because a synchronous call cannot wait for a promise.
+> A: Yes. The CommonJS loader can load an ES module synchronously, with no flag, as long as that module's graph has no top-level `await`. `require` returns the module namespace object. The default export sits on `.default`, unless the module exports the string `'module.exports'`, in which case you have been reading `.default` on the wrong shape. If any module in the graph uses top-level await, `require()` throws `ERR_REQUIRE_ASYNC_MODULE`, because a synchronous call cannot wait for a promise. You then use `await import()`. For example, `require('./esm.mjs')` gives you the namespace, and `require('./esm.mjs').default` is the default export. The limit is top-level await and the older mental model that `require` of an ES module always throws `ERR_REQUIRE_ESM`. That error was the story before the feature was unflagged. JSON is a separate rule: `import` needs `with { type: 'json' }`, and the old `assert` spelling is a syntax error, so a `.json` file cannot be executed as JavaScript by accident.
 
 > **Q: “Why does `fetch` not throw on a 500?”**  
-> A: It follows the WHATWG spec: the promise rejects only on network failure (no response). Any HTTP response, including 4xx and 5xx, resolves with `ok === false`. On rejection the message is the generic `fetch failed`, and the real reason is on `err.cause`.
-
-> **Q: “How does a Node single executable application work?”**  
-> A: `node --experimental-sea-config` serialises one CommonJS script plus its assets into a blob. postject injects that blob into a copy of the `node` binary as a new section and flips a sentinel fuse string. At start-up Node finds the flipped fuse and runs the embedded script. Only built-in modules can be `require`d inside it, so you bundle first. The feature is 1.1 Active development in v24.
+> A: Global `fetch` comes from undici, bundled into Node, and it follows the browser spec. The promise rejects only when no HTTP response arrives at all, a network failure. Any response, including 404 and 500, resolves, and you have to check `res.ok` or `res.status` yourself. When it does reject, the message is always the generic `fetch failed`. The real reason, such as `ECONNREFUSED`, `ENOTFOUND`, or `UND_ERR_SOCKET`, is on `err.cause`. The body is a web `ReadableStream`, not a Node stream. For example, a missing server rejects with `fetch failed` and a cause of `ECONNREFUSED`, while a 404 from a live server resolves with `ok` false. The limit is a wrapper you forget to write. Check `res.ok`, set a timeout with `AbortSignal.timeout`, and log `err.cause`. The same global family includes `Request`, `Response`, `Headers`, and `FormData`. `WebSocket` is client-only and uses `addEventListener`, not `.on()`.
 
 ## Cheat-card
 
-- **`node --run <script> -- args`:** runs a `package.json` script without npm; no pre/post hooks; walks up to the nearest `package.json` (v22.3.0).
-- **`node --test`:** default globs are `*.test.*`, `*-test.*`, `*_test.*`, `test-*.*`, `test.*`, `test/**`. `*.spec.js` is not included, so quote your own glob.
-- **`--watch`:** watches the module graph only. **`--watch-path=dir`:** watches given paths and turns graph tracking off.
-- **`--env-file`:** later files override earlier ones; the real environment beats every file; missing file → exit 9. `--env-file-if-exists` skips a missing file.
-- **`process.loadEnvFile(path)`:** never overwrites a variable that is already set; `util.parseEnv(text)` only parses.
-- **`--permission` + `--allow-fs-read/-write`** (stable), `--allow-child-process`, `--allow-worker`, `--allow-addons`, `--allow-wasi`; violation → `ERR_ACCESS_DENIED`; no network scope in v24.
-- **`node:sqlite`:** `DatabaseSync`, `prepare().run/get/all`, synchronous, release candidate; `setReadBigInts(true)` for values above 2^53.
-- **`require(esm)`:** stable v24.15.0; returns the namespace; top-level await → `ERR_REQUIRE_ASYNC_MODULE`.
-- **JSON import:** `with { type: 'json' }`, default export only; `assert` is a SyntaxError.
-- **`URLPattern`:** global since v24.0.0, experimental; object form wildcards the parts you leave out.
-- **SEA:** blob + postject + fuse; one CommonJS file; bundle first.
-- **`util.parseArgs`:** string/boolean only; strict by default; `allowNegative` for `--no-x`.
-- **`fetch`:** resolves on 404/500; rejects with `fetch failed` + `err.cause`. **`WebSocket`:** client only, event-target API.
+- **`node --run`:** runs a `package.json` script without npm. No pre or post hooks. No `npm_*` variables.
+- **`node --test`:** default globs are `*.test.*`, `*-test.*`, `*_test.*`, `test-*.*`, `test.*`, and `test/**`. `*.spec.js` is not included.
+- **`--watch`** follows the module graph. **`--watch-path`** watches given paths and turns graph tracking off.
+- **`--env-file`:** later files override earlier ones. The real environment beats every file. `process.loadEnvFile` never overwrites a variable that is already set. `util.parseEnv` only parses.
+- **`--permission`** plus allow flags. A violation is `ERR_ACCESS_DENIED`. No network scope in v24. Not a sandbox.
+- **`node:sqlite`:** `DatabaseSync`, synchronous, release candidate on the Node this lesson used. `setReadBigInts(true)` for values above 2^53.
+- **`require` of an ES module:** returns the namespace. Top-level await throws `ERR_REQUIRE_ASYNC_MODULE`.
+- **JSON import:** `with { type: 'json' }`, default export only. `assert` is a SyntaxError.
+- **`util.parseArgs`:** string and boolean only. Strict by default.
+- **`fetch`:** resolves on 404 and 500. Rejects with `fetch failed` and `err.cause`. **`WebSocket`:** client only.
+
+## Good to know
+
+- **How does a Node single executable work?** `node --experimental-sea-config` serialises one CommonJS script plus its assets into a blob. postject injects that blob into a copy of the `node` binary and flips a sentinel fuse. At start-up Node runs the embedded script. Only built-in modules can be required, so you bundle first. The feature is stability 1.1, active development, in v24.
+- **`node --run`** was added in v22.0.0 with no flag. No stability marker, treated as stable. Folder traversal was added in v22.3.0. It walks up to the nearest `package.json`.
+- **`node --test`** was added in v18.1.0 and v16.17.0. Stable since v20.0.0.
+- **`--watch` and `--watch-path`** were added in v18.11.0 and v16.19.0. Stable since v22.0.0 and v20.13.0.
+- **`--env-file`** was added in v20.6.0. Stable since v24.10.0. A missing file exits 9. `--env-file-if-exists` skips a missing file.
+- **`process.loadEnvFile()`** was added in v21.7.0 and v20.12.0. Stable since v24.10.0.
+- **`--permission` and `--allow-fs-read` / `--allow-fs-write`** were added in v20.0.0 as `--experimental-permission`, then renamed `--permission`. Stable since v23.5.0 and v22.13.0.
+- **`--allow-child-process`, `--allow-worker`, `--allow-addons`, and `--allow-wasi`** date from v20.0.0, with addons in v21.6.0 and WASI in v22.3.0. On v24.19.0 they are stability 1.1, active development.
+- **`node:sqlite`** was added in v22.5.0 behind `--experimental-sqlite`, unflagged in v23.4.0 and v22.13.0, and is stability 1.2, release candidate, since v24.15.0.
+- **`require` of an ES module** was added in v22.0.0 and v20.17.0 behind `--experimental-require-module`, unflagged in v23.0.0, v22.12.0, and v20.19.0, and stable since v24.15.0. Before that, it threw `ERR_REQUIRE_ESM`.
+- **Import attributes** were added in v17.1.0 and v16.14.0 as `assert`. `assert` became `with` in v21.0.0, v20.10.0, and v18.20.0. JSON modules have been stable since v23.1.0 and v22.12.0.
+- **`URLPattern`** was added in v23.8.0 on `node:url` and as a global in v24.0.0. It is stability 1, experimental. The object form wildcards the parts you leave out.
+- **Single executable applications** were added in v19.7.0 and v18.16.0. Stability 1.1, active development, in v24.19.0.
+- **`util.parseArgs()`** was added in v18.3.0 and v16.17.0. Stable since v20.0.0. `allowNegative` enables `--no-x`.
+- **`fetch`** was added in v17.5.0 and v16.15.0 behind `--experimental-fetch`, unflagged in v18.0.0, and stable since v21.0.0.
+- **`WebSocket` client** was added in v21.0.0 and v20.10.0 behind `--experimental-websocket`, unflagged in v22.0.0, and stable since v22.4.0.
+- **`process.versions.undici` is `7.29.0`** on v24.19.0. The lesson's WebSocket server examples use `ws` 8.22.0.
+- **An ESM-only package that CommonJS callers will `require()`** needs `engines.node` of at least `>=22.12.0`.
 
 ---
 

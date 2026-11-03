@@ -13,41 +13,45 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+API versioning lets an old client keep calling the old contract while you ship a breaking change as a new version, usually a `/v1` or `/v2` path. A breaking change is one that can make an existing client fail, such as renaming a field or adding a required input. The same product needs one error shape, a rate limit that answers 429 when a client calls too fast, and an OpenAPI document so other people can call the API without reading your code. The trade-off is that every live version is maintenance you keep paying, so you version only when the change actually breaks someone.
+
 ## Why it matters
 
-The moment your API has a single external consumer you cannot control, you have lost the freedom to change it freely. Rename a field, tighten a validation rule, or change a response shape, and somewhere a mobile app in a user's pocket — running a build from six months ago — breaks. **Versioning** is the discipline that lets a server evolve while old clients keep working. Interviewers ask about it because it reveals whether you have maintained a real API over time or only built greenfield toys.
+The moment one external client is outside your deploy, you cannot rename a field or change a response shape freely. A phone running a six-month-old build will break. Versioning is how the server evolves while old clients keep working.
 
-The other three topics here — error shape, rate limiting, and documentation — are the difference between an API developers *enjoy* using and one they curse. A **consistent error shape** means every client can write one error handler instead of guessing which of five formats today's endpoint uses. **Rate limiting** protects you from abuse, runaway clients, and cost blowups — and is a near-guaranteed system-design question ("how would you stop one user from hammering this endpoint?"). And **documentation**, specifically OpenAPI, is what makes an API discoverable and testable without reading your source; "have you used OpenAPI/Swagger?" is a common screening question because it signals you've worked on APIs meant for others.
+A consistent error shape means every client writes one error handler. Rate limiting is how you stop one user from hammering an endpoint, and it is a standard system-design question. OpenAPI, the spec that used to be called Swagger, is a machine-readable description of the API. Docs, client libraries, and contract tests can be generated from it.
 
-Together these four turn a working endpoint into a *product*: stable, safe, self-describing, and pleasant to integrate against.
+Together these four turn a working route into something other people can rely on.
 
 ## The concept, simply
 
-**Versioning** lets multiple contract versions coexist so a breaking change ships as "v2" without forcing every client to upgrade at once. There are three mainstream strategies.
+Versioning lets two contracts exist at once, so a breaking change ships as v2 and old clients stay on v1.
 
 ![Three versioning strategies URI path custom header and media type with trade-offs](assets/i39_01_e26206d8.svg)
 
-Three ways to version. URI-path versioning wins in practice for its visibility and simple routing.
+Three ways to version. The path is the one you can see in a browser and in logs.
 
-- **URI path:** `/v1/users` vs `/v2/users`. Visible, cache-friendly, trivial to route. The most common choice.
-- **Custom header:** `API-Version: 2`. Keeps URLs clean but is invisible and harder to test in a browser.
-- **Media type (content negotiation):** `Accept: application/vnd.myapp.v2+json`. The most "RESTful," the least tooled and understood.
+- **URI path:** `/v1/users` and `/v2/users`. Visible, cacheable, and easy to route. This is the common choice.
+- **Custom header:** `API-Version: 2`. The URL stays clean. You cannot paste a versioned URL into a browser, and caches must vary on the header.
+- **Media type:** `Accept: application/vnd.myapp.v2+json`. This is the most REST-shaped, and the least supported by tools.
 
-A **breaking change** is one that could break an existing client: removing/renaming a field, changing a type, adding a required input, or changing status-code semantics. *Additive* changes — adding an optional field or a new endpoint — are backward-compatible and do *not* need a new version. The golden rule: version only on breaking changes; add fields freely.
+A **breaking change** can break an existing client: removing or renaming a field, changing a type, adding a required input, or changing what a status code means. An **additive change**, such as a new optional field or a new endpoint, is backward compatible and does not need a new version.
 
-A **consistent error shape** is a single JSON structure every error returns — e.g. `{ error: { code, message, details } }` — so clients parse errors uniformly. **Rate limiting** caps how many requests a client may make in a window, returning **429 Too Many Requests** when exceeded. **OpenAPI** (formerly Swagger) is a machine-readable YAML/JSON spec describing your endpoints, from which docs, client SDKs, and test tools are generated.
+A **consistent error shape** is one JSON structure for every error, for example `{ error: { code, message, details } }`. Clients branch on a machine-readable `code`, not on the human sentence. **Rate limiting** caps how many requests a client may make in a window and returns **429 Too Many Requests** when the cap is hit. **OpenAPI** is a YAML or JSON document of paths, methods, schemas, and auth.
 
 ## How it works (deep)
 
-**Versioning strategy trade-offs.** URI-path versioning wins in practice despite purists objecting that `/v1/` means the "same" resource has two URIs (technically un-RESTful). It wins because it is *visible* (you can see the version in logs and browsers), *routable* (mount `v1Router` and `v2Router` separately), and *cacheable* (different URLs cache independently). Header and media-type versioning keep URLs "pure" but pay for it in tooling: you cannot paste a versioned URL into a browser, CDNs need to vary on the header, and debugging is harder. A senior answer names URI-path as the pragmatic default while acknowledging the REST-purity critique.
+**Path versioning wins in practice** even though a strict reading of REST says the same resource should not have two URIs. It wins because you can see the version in logs and in a browser, you can mount `v1Router` and `v2Router` separately, and each URL caches on its own. Header and media-type versioning keep the URL "pure" and cost you tooling: a CDN has to vary on the header, and debugging is harder.
 
-The deeper skill is *minimizing* versions. Each live version is maintenance forever. So: design responses to be extensible from day one (return objects, not bare arrays, so you can add fields), treat new fields as additive, and only cut a new version for genuinely breaking changes. When you do, run old and new side by side, announce a *deprecation* timeline (often via a `Deprecation` / `Sunset` header), and give clients months to migrate.
+Each live version is maintenance forever, so design responses so you rarely need a new one. Return objects, not bare arrays, so you can add fields later. Add optional fields freely. Cut a new version only for a real break. Then run old and new side by side, announce a sunset, often with a `Deprecation` or `Sunset` header, and give clients months.
 
-**Error shape.** The failure mode to avoid is every endpoint inventing its own error format — one returns `{ error: "..." }`, another `{ message: "..." }`, a third a bare string. Standardize on one envelope with a *machine-readable* `code` (so clients branch on `code === 'EMAIL_TAKEN'` rather than string-matching human text), a human `message`, and optional `details` for field-level validation errors. Centralize it in a single Express **error-handling middleware** (the four-argument `(err, req, res, next)` signature) so no handler formats errors ad hoc, and so you can map error *types* to status codes in one place. Critically, never leak stack traces or raw DB errors to clients — log those server-side, return a clean generic message for 5xx.
+**One error envelope, formatted in one place.** The failure mode is every route inventing a shape: `{ error }`, `{ message }`, or a bare string. Put a machine-readable `code`, a human `message`, and optional `details` for field errors in a single Express error middleware. That middleware is a function of four arguments, `(err, req, res, next)`. Express only treats it as an error handler when it has exactly those four. Map error types to status codes there. For a 5xx, log the real cause on the server and return a generic message. Never send a stack trace or a raw database error to the client.
 
-**Rate limiting algorithms.** The common ones: *fixed window* (count requests per clock minute — simple but allows bursts at window edges, up to 2× the limit across a boundary); *sliding window* (smooths that edge burst); *token bucket* (a bucket refills at a steady rate and each request spends a token — allows controlled bursts, the most popular); and *leaky bucket* (processes at a fixed rate, smoothing output). For a single Node process an in-memory counter works, but the moment you run multiple instances you need a *shared store* — typically Redis — because each instance otherwise keeps its own count and the real limit becomes N× your intended value. Always return **429** plus `Retry-After` and the `RateLimit-*` headers so well-behaved clients back off.
+**Rate-limit algorithms.** A fixed window counts requests per clock minute. It is simple, and a burst at the boundary can reach about twice the limit, because the last second of one window and the first second of the next each have a full budget. A sliding window smooths that edge. A token bucket refills tokens at a steady rate and each request spends one, so you allow a controlled burst and then an average rate. A leaky bucket processes at a fixed rate and smooths output. One Node process can count in memory. Several instances cannot: each keeps its own count, and the real limit becomes N times what you intended. Put the counter in a shared store, usually Redis. Key by user id when you have one, and fall back to IP. Return 429 plus `Retry-After` and the `RateLimit-*` headers so a well-behaved client backs off.
 
-**OpenAPI.** The spec is a contract written in YAML/JSON describing paths, methods, request/response schemas, and auth. Its value is that it is machine-readable: Swagger UI renders interactive docs from it, code generators produce typed client SDKs and server stubs, and contract-testing tools verify your implementation matches the spec. You can hand-write it or generate it from code annotations. The interview-relevant point is *why* it matters: a single source of truth that keeps docs, clients, and tests in sync, so the documentation cannot silently drift from the real API.
+**OpenAPI is the contract.** It describes paths, methods, request and response schemas, and auth. Swagger UI renders interactive docs from it. Generators produce typed clients and server stubs. Contract tests check that the implementation matches the spec. You can write the file by hand or generate it from annotations. The point is one source of truth, so the docs cannot drift from the routes.
 
 ## Code examples
 
@@ -174,62 +178,61 @@ app.use('/docs', swaggerUi.serve, swaggerUi.setup(spec)); // interactive docs
 
 ## Common mistakes & gotchas
 
-- **Versioning for additive changes:** adding an optional field doesn't need v2. Over-versioning multiplies maintenance for nothing.
-- **Never deprecating old versions:** without a sunset date, v1 lives forever. Announce timelines and use `Deprecation`/`Sunset` headers.
-- **Inconsistent error shapes:** different formats per endpoint force clients to write N error handlers. Standardize one envelope.
-- **Leaking stack traces / DB errors** to clients on 5xx: an information-disclosure risk. Log server-side, return a generic message.
-- **Error middleware with three args:** Express only treats a middleware as an error handler if it has *four* parameters. Drop `next` and errors silently bypass it.
-- **In-memory rate limiting across multiple instances:** each process counts separately, so the real limit becomes N× intended. Use Redis.
-- **Rate limiting by IP only:** corporate NAT/mobile networks share IPs; prefer per-user (with IP fallback) where you have identity.
-- **Docs that drift from code:** hand-maintained docs rot. Generate from or contract-test against the OpenAPI spec.
-- **Returning a bare array** as the top-level response: you can't later add pagination/metadata without breaking clients. Wrap in an object.
+- **A new version for an additive change.** An optional field does not need v2. Extra versions are maintenance.
+- **No sunset.** Without a date, v1 lives forever. Announce it, and send `Deprecation` and `Sunset`.
+- **A different error shape per route.** Clients then need a handler per endpoint.
+- **Stack traces and database errors on 5xx.** Log them on the server. Return a generic message.
+- **An error middleware with three arguments.** Express detects an error handler by its length. Three parameters means normal middleware, and thrown errors skip it.
+- **An in-memory counter on several instances.** Each process counts alone, so the real limit is N times the setting. Use Redis.
+- **Keying only by IP.** A corporate NAT or a mobile network shares one address. Prefer the user id, with IP as the fallback.
+- **Docs maintained by hand.** They rot. Generate them from the OpenAPI spec, or contract-test against it.
+- **A bare array as the whole response.** You cannot add pagination later without breaking clients. Wrap it in an object.
 
 ## Best practices
 
-- Default to **URI-path versioning** (`/v1`, `/v2`); version only on **breaking** changes, add fields freely.
-- Design responses as **extensible objects** (never bare arrays) so additive changes stay backward-compatible.
-- Publish a **deprecation policy**: overlap versions, send `Deprecation`/`Sunset` headers, give clients months.
-- Standardize **one error envelope** with a machine-readable `code`, human `message`, and optional `details`; format it in one central error-handling middleware.
-- On 5xx, **log the real cause, return a generic message** — never leak internals.
-- **Rate-limit** with a shared store (Redis) across instances, key by user then IP, and return **429** + `Retry-After` + `RateLimit-*` headers.
-- Maintain an **OpenAPI** spec as the single source of truth; serve Swagger UI and generate clients/tests from it so docs can't drift.
+- Default to path versions, `/v1` and `/v2`. Version only on a breaking change. Add fields freely.
+- Return objects, never a bare array, so additive changes stay compatible.
+- Overlap versions, send `Deprecation` and `Sunset`, and give clients months.
+- One error envelope, with `code`, `message`, and optional `details`, built in one four-argument error middleware.
+- On 5xx, log the cause and return a generic message.
+- Rate-limit with Redis across instances, key by user then IP, and return 429 with `Retry-After` and `RateLimit-*`.
+- Keep an OpenAPI spec as the source of truth, serve Swagger UI, and generate clients and tests from it.
 
 ## ⭐ Interview lens
 
 > **Q: Which API versioning strategy would you choose and why?**  
-> URI-path (`/v1`) in practice: visible in logs/browsers, trivial to route (mount separate routers), and cacheable per-URL. Purists note it's technically un-RESTful (same resource, two URIs) and prefer media-type versioning — but that's poorly tooled. Naming the trade-off, not just the choice, is what scores.
+> I would put the version in the path, `/v1/users` and `/v2/users`. A path is visible in logs and in a browser, you can mount a separate router for each version, and caches treat the URLs as different resources. A custom header such as `API-Version: 2`, or a media type such as `Accept: application/vnd.myapp.v2+json`, keeps a single URL, which is closer to a strict reading of REST, and it is harder to test and to cache because the cache has to vary on that header. For example, a mobile app on v1 and a new web app on v2 can share one host, and a log line tells you which contract failed. The limit is that every live version is code you maintain. Version only for a breaking change, run the old and new side by side, and send `Deprecation` and `Sunset` so v1 has an end date.
 
 > **Q: What counts as a breaking change requiring a new version?**  
-> Removing/renaming a field, changing a field's type, adding a required request param, or changing status-code semantics. Adding an *optional* field or a new endpoint is additive and backward-compatible — no new version needed. Version only on breaking changes.
+> A breaking change is one that can make an existing client fail. Removing or renaming a field, changing a field's type, adding a required request field, and changing what a status code means are breaking. Adding an optional response field, or adding a new endpoint, is additive: old clients ignore what they do not know. For example, renaming `name` to `fullName` needs a v2, and adding optional `nickname` does not. The limit is a response that is a bare array. You cannot later wrap it in `{ data, pagination }` without breaking every client, so the compatible shape from day one is an object. Design so you add fields instead of cutting versions.
 
 > **Q: How would you rate-limit an endpoint across a horizontally-scaled service?**  
-> A shared counter in Redis (token bucket or sliding window), keyed by user id (IP fallback), returning 429 with `Retry-After`. The trap is in-memory counters: with N instances each keeps its own count, so the effective limit becomes N× the intended value.
+> A shared counter in Redis, using a token bucket or a sliding window, keyed by user id with the IP as a fallback. A token bucket refills tokens at a steady rate and each request spends one, so a short burst is allowed and the average rate holds. When the bucket is empty, answer 429 with `Retry-After` and the `RateLimit-*` headers. For example, 100 requests a minute per user, stored in Redis, stays 100 even when ten app instances are running. The limit of an in-memory counter is that each process has its own count, so ten instances allow about 1,000. Also do not key only by IP when users share a NAT. And do not set `trust proxy` to `true` behind a load balancer: the client can then pick the address that the limiter sees.
 
 > **Q: Why must your Express error handler take four arguments?**  
-> Express identifies error-handling middleware by arity — only a function with exactly `(err, req, res, next)` is treated as one. Write three params and Express treats it as normal middleware, so thrown errors skip it and fall through to the default handler.
-
-> **Q: What does a good error response look like?**  
-> A single consistent envelope: a machine-readable `code` (clients branch on it, not on message text), a human `message`, and optional `details` for validation. Formatted in one central middleware; on 5xx it hides internals and logs the real cause server-side. Consistency lets clients write one handler.
-
-> **Q: What is OpenAPI and why use it?**  
-> A machine-readable spec (YAML/JSON) describing paths, schemas, and auth. From it you generate interactive docs (Swagger UI), typed client SDKs, and contract tests — one source of truth so docs can't drift from the implementation. Saying "Swagger" and OpenAPI are the same lineage (Swagger was renamed OpenAPI) shows familiarity.
-
-> **Q: Fixed window vs token bucket — what's the difference?**  
-> Fixed window counts per clock interval; it's simple but permits a burst of up to 2× the limit straddling a boundary. Token bucket refills tokens at a steady rate and each request spends one, allowing controlled bursts up to the bucket size while enforcing an average rate — smoother, and the common production choice.
+> Express decides that a middleware function is an error handler by counting its parameters. Only `(err, req, res, next)` is an error handler. A function with three parameters is ordinary middleware, so a thrown error skips it and falls through to Express's default handler, which may send an HTML stack trace. You put one four-argument function after the routes and build every error body there: a machine-readable `code`, a human `message`, and optional `details`. For example, a validation error becomes 422 with `EMAIL_TAKEN`, and an unexpected throw becomes 500 with a generic message while the stack stays in the server log. The limit is that the parameter has to be present in the source even if you never call `next`. Dropping it to silence a linter turns the handler back into normal middleware.
 
 ## Cheat-card
 
-- **Version on breaking changes only**; add optional fields freely. Default: URI-path `/v1`, `/v2`.
-- **Breaking** = remove/rename field, change type, new required input, changed status semantics.
-- Deprecate with overlap + `Deprecation`/`Sunset` headers and a migration window.
-- **One error envelope:** `{ error: { code, message, details } }`; central 4-arg middleware; hide internals on 5xx.
-- Express error handler needs **4 args** `(err, req, res, next)` or it's skipped.
-- **Rate limit:** Redis-shared across instances, key by user/IP, return **429** + `Retry-After`. Token bucket = smooth bursts.
-- **OpenAPI/Swagger:** one spec → docs + SDKs + contract tests; keeps docs from drifting.
-- Return **objects, not bare arrays**, so responses stay extensible.
-- **RFC 9457 Problem Details:** `application/problem+json` with `type` (default `about:blank`), `title`, `status` (advisory), `detail`, `instance`, plus extension members; set `res.type()` before `res.json()`.
-- **Behind a proxy:** `app.set('trust proxy', 1)` (or the proxy subnet) so `req.ip` is the client; unset = everyone shares the proxy's bucket; `true` = client-chosen IP via `X-Forwarded-For` (lesson 52).
-- **Custom `keyGenerator`** skips express-rate-limit's `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` / `ERR_ERL_PERMISSIVE_TRUST_PROXY` checks; test the proxy setup yourself.
+- Version on a breaking change only. Add optional fields freely. Default to `/v1` and `/v2`.
+- Breaking means a removed or renamed field, a changed type, a new required input, or a changed status meaning.
+- Deprecate with an overlap, `Deprecation` and `Sunset` headers, and a migration window.
+- One error envelope: `{ error: { code, message, details } }`, built in four-argument middleware. Hide internals on 5xx.
+- An Express error handler needs `(err, req, res, next)`. Three parameters and it is skipped.
+- Rate limit with a shared store across instances, key by user or IP, return 429 and `Retry-After`. A token bucket allows a controlled burst.
+- OpenAPI, formerly Swagger, is one spec for docs, SDKs, and contract tests.
+- Return objects, not bare arrays, so you can add fields later.
+
+## Good to know
+
+- RFC 9457 Problem Details uses `application/problem+json` with `type` (default `about:blank`), `title`, `status` (advisory), `detail`, `instance`, and extension members. Set `res.type()` before `res.json()`.
+- Behind a proxy, `app.set('trust proxy', 1)` or the proxy subnet makes `req.ip` the client. Left unset, everyone shares the proxy's bucket. `true` lets the client choose an IP through `X-Forwarded-For` (lesson 52).
+- A custom `keyGenerator` skips express-rate-limit's `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR` and `ERR_ERL_PERMISSIVE_TRUST_PROXY` checks. Test the proxy setup yourself.
+- Q: What does a good error response look like? One envelope: a machine-readable `code`, a human `message`, and optional `details`. Build it in one middleware. On 5xx, log the cause and hide it. Clients then write one handler.
+- Q: What is OpenAPI and why use it? A YAML or JSON spec of paths, schemas, and auth. From it you generate Swagger UI, typed clients, and contract tests, so the docs cannot drift from the routes. Swagger is the old name of that spec.
+- Q: Fixed window or token bucket? A fixed window counts per clock interval and can allow about twice the limit across the boundary. A token bucket refills at a steady rate and each request spends a token, so the burst is capped by the bucket and the average rate holds.
+- Q: What is RFC 9457 and what does `about:blank` mean? The standard JSON error, `application/problem+json`, with `type`, `title`, `status`, `detail`, and `instance`, plus extension members clients must ignore if they do not know them. Omitting `type` means `about:blank`: nothing beyond the HTTP status, and `title` should be the reason phrase. The body's `status` is advisory. The status line is what clients act on. Hide `detail` on 5xx.
+- Q: The rate limiter blocks everyone after a deploy behind a load balancer. Why? `trust proxy` is false, so `req.ip` is the balancer and every user shares one bucket. Set `app.set('trust proxy', 1)` or the balancer subnet so Express takes the client address the balancer appended. Never use `true`: `req.ip` is then the left-most `X-Forwarded-For` entry, which the client controls. The app must be reachable only through the balancer.
 
 ---
 
@@ -589,8 +592,4 @@ That is why `app.cjs` listens on `127.0.0.1` only, so nothing outside the machin
 
 ### ⭐ Interview lens (additional topics)
 
-> **Q: “What is RFC 9457 and what does `about:blank` mean?”**  
-> A: The standard JSON error format, `application/problem+json`, with `type`, `title`, `status`, `detail` and `instance`, plus any extension members, which clients must ignore if they do not know them. `type` is the machine-readable key. Omitting it means `about:blank`: "nothing beyond the HTTP status", with the reason phrase as the `title`. Generate it in one Express error handler, hide `detail` on 5xx, and keep the status line correct, since the body's `status` is advisory.
-
-> **Q: “Your rate limiter blocks everyone at once after a deploy behind a load balancer. Why, and what is the fix?”**  
-> A: `trust proxy` is `false`, so `req.ip` is the balancer's address and every user shares one bucket. Set `app.set('trust proxy', 1)` (or the balancer's subnet) so Express takes the client address the balancer appended to `X-Forwarded-For`. Never use `true`: then `req.ip` is the left-most entry, which the client controls, and an attacker rotates it to dodge the limit. Also make sure the app is only reachable through the balancer.
+The questions from this section are under Good to know, one line each.

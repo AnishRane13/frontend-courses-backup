@@ -13,25 +13,29 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A browser uploads a file as one part of a multipart body, and Express's JSON parser does not read that format. You add middleware, usually multer, which is built on a streaming parser called busboy. Multer checks the field name and your size limits, then either keeps the bytes in memory or writes them to disk, and your route sees `req.file`. Uploads need this because the filename and the content type are text the client chose, and one request can be enormous. The trade-off is where the bytes sit. Memory is simple and dies with the request. Disk survives a crash in your handler unless you delete the file, and proxying every upload through your server ties up a connection that a presigned URL to object storage would not.
+
 ## Why it matters
 
-A browser sends a file as one part of a `multipart/form-data` request body. Express's built-in parsers (`express.json()`, `express.urlencoded()`) do not read that format, so with Express alone `req.body` stays `undefined` and the file bytes are never read. You need a multipart parser, and every choice you make around it changes what can go wrong:
+A browser sends a file as one part of a `multipart/form-data` body. `express.json()` and `express.urlencoded()` do not read that format. With Express alone, `req.body` stays `undefined` and the file bytes are never read. You need a multipart parser, and the choices around it are the failure modes.
 
-- **Where the bytes go.** Kept in memory, a 2 GB upload needs 2 GB of RAM. Written to disk, every failed request can leave a file behind.
-- **What the file really is.** The filename and the `Content-Type` of the part are text the client chose. A text file named `cat.png` with `type=image/png` passes any check that reads only those two.
-- **How big it is allowed to get.** Without limits, one request can send an unbounded number of parts or bytes.
-- **Who carries the bytes.** Proxying uploads through your server to S3 keeps a socket and some memory busy per upload. Presigned URLs let the browser send the bytes to S3 directly while your server only signs permission.
-- **What happens when the client goes away.** A phone that loses signal halfway leaves a half-written file, or an unfinished S3 multipart upload, unless something removes it.
+- **Where the bytes go.** Kept in memory, a 2 GB upload needs 2 GB of RAM. Written to disk, a failed request can leave a file behind.
+- **What the file really is.** The filename and the part's `Content-Type` are text the client chose. A text file named `cat.png` with type `image/png` passes any check that reads only those two.
+- **How big it may get.** Without limits, one request can send an unbounded number of parts or bytes.
+- **Who carries the bytes.** Proxying an upload through your server to S3 holds a socket and some memory per upload. A presigned URL lets the browser send the bytes to S3, and your server only signs permission.
+- **A client that leaves.** A phone that drops halfway leaves a half-written file, or an unfinished S3 multipart upload, unless something deletes it.
 
-This lesson builds each piece on Express 5.3.0 and runs it: multer for the common case, magic-byte checks for the real type, busboy streamed into S3 with `@aws-sdk/lib-storage`, presigned PUT and POST URLs, and cleanup on every failure path.
+This lesson runs each piece on Express 5.3.0: multer for the common case, magic-byte checks for the real type, busboy streamed into S3 with `@aws-sdk/lib-storage`, presigned PUT and POST, and cleanup on every failure path.
 
 ## The concept, simply
 
-A `multipart/form-data` body is a list of **parts** separated by a boundary string that the client picks and announces in the `Content-Type` header (`multipart/form-data; boundary=…`). Each part has its own small header block (`Content-Disposition: form-data; name="avatar"; filename="me.png"` and usually a `Content-Type`), a blank line, then the raw bytes. A text field is a part without a `filename`. Lesson 41 parses this format by hand and then with busboy (see [the busboy appendix in lesson 41](41-parsing-requests-writing-responses.md#the-same-upload-with-busboy)); this lesson does not repeat that.
+A `multipart/form-data` body is a list of parts, separated by a boundary string the client picks and announces in `Content-Type`, as `multipart/form-data; boundary=...`. Each part has a small header block, often `Content-Disposition: form-data; name="avatar"; filename="me.png"` and a `Content-Type`, then a blank line, then the raw bytes. A text field is a part with no `filename`. Lesson 41 parses this by hand and then with busboy. This lesson does not repeat that.
 
-**busboy** (1.6.0) is the streaming parser: you pipe the request into it, and it emits a `'field'` event per text field and a `'file'` event per file, where each file is its own `Readable` stream.
+busboy 1.6.0 is the streaming parser. You pipe the request into it. It emits `'field'` for a text field and `'file'` for a file, and each file is its own readable stream.
 
-**multer** (2.4.0, the current `latest` on npm; it depends on `busboy ^1.6.0`) is Express middleware built on busboy. You create it with a **storage engine** and options, then pick one of four middleware factories for a route:
+multer 2.4.0 is Express middleware on busboy. It depends on `busboy ^1.6.0`. You create it with a storage engine and options, then pick one of four factories for a route.
 
 | Factory | Accepts | Result |
 |---|---|---|
@@ -40,12 +44,9 @@ A `multipart/form-data` body is a list of **parts** separated by a boundary stri
 | `upload.fields([{ name, maxCount }, …])` | several named file fields | `req.files` (object of arrays) |
 | `upload.none()` | text fields only | any file → `LIMIT_UNEXPECTED_FILE` |
 
-Text fields always end up in `req.body` (an object with a `null` prototype). The two built-in storage engines are:
+Text fields always land in `req.body`, an object with a null prototype. The two built-in storage engines are `multer.memoryStorage()`, which collects the file into `file.buffer`, and that is what `multer()` with no `storage` uses, and `multer.diskStorage({ destination, filename })`, which writes `destination/filename` and sets `file.path`. The default destination is `os.tmpdir()`. The default name is 16 random bytes in hex, with no extension.
 
-- **`multer.memoryStorage()`**: the file is collected into `file.buffer`. Calling `multer()` with no `storage` uses this one.
-- **`multer.diskStorage({ destination, filename })`**: the file is written to `destination/filename` and `file.path` points at it. The default destination is `os.tmpdir()` and the default name is 16 random bytes in hex, with no extension.
-
-For S3, there are two ways to get the bytes there:
+Two ways to get the bytes to S3:
 
 text
 
@@ -66,28 +67,28 @@ A. Through your server (stream)              B. Direct to S3 (presigned URL)
 
 ## How it works
 
-What happens when a request reaches `upload.single('avatar')`:
+When a request reaches `upload.single('avatar')`:
 
-1. **Is this multipart?** multer checks `Content-Type` with `type-is`. If it is not `multipart/*`, multer calls `next()` at once and does not touch `req.body` (on Express 5 it stays `undefined`).
-2. **Start busboy.** multer sets `req.body` to a `null`-prototype object, creates a busboy parser with your `limits`, and runs `req.pipe(busboy)`.
-3. **Text fields** are written into `req.body` as they arrive. Bracket names such as `tags[]` become arrays.
-4. **Each file part** is checked against the field list of the factory you chose. A field that is not allowed, or one more file than `maxCount`, fails with `LIMIT_UNEXPECTED_FILE`.
-5. **`fileFilter(req, file, cb)`** runs next. At this point `file` has `fieldname`, `originalname`, `encoding` and `mimetype`, but no bytes yet. `cb(null, true)` accepts, `cb(null, false)` skips the file silently, `cb(err)` aborts the request with that error.
-6. **The storage engine** receives the file stream: memory storage collects it into a `Buffer`, disk storage pipes it into `fs.createWriteStream()`.
-7. **Limits** are enforced while bytes flow. When one trips, multer stops reading, **removes every file it already stored for this request**, and calls `next(err)` with a `MulterError`.
-8. **When busboy closes and all writes are done**, multer sets `req.file`/`req.files` and calls `next()`. From here on the files are your responsibility, including deleting them.
+1. multer checks `Content-Type` with `type-is`. If it is not `multipart/*`, multer calls `next()` immediately and does not touch `req.body`. On Express 5 it stays `undefined`.
+2. multer sets `req.body` to a null-prototype object, creates a busboy parser with your `limits`, and runs `req.pipe(busboy)`.
+3. Text fields are written into `req.body` as they arrive. A bracket name such as `tags[]` becomes an array.
+4. Each file part is checked against the factory you chose. A field that is not allowed, or one more file than `maxCount`, fails with `LIMIT_UNEXPECTED_FILE`.
+5. `fileFilter(req, file, cb)` runs next. At this point `file` has `fieldname`, `originalname`, `encoding`, and `mimetype`, but no bytes yet. `cb(null, true)` accepts. `cb(null, false)` skips the file with no error. `cb(err)` aborts with that error.
+6. The storage engine gets the stream. Memory storage collects a Buffer. Disk storage pipes into `fs.createWriteStream`.
+7. Limits are enforced while bytes flow. When one trips, multer stops reading, removes every file it already stored for this request, and calls `next(err)` with a `MulterError`.
+8. When busboy closes and the writes finish, multer sets `req.file` or `req.files` and calls `next()`. From here the files are yours, including deleting them.
 
-**Limits and error codes.** `limits` is passed to busboy: `fileSize` (bytes per file), `files`, `fields`, `parts`, `fieldNameSize`, `fieldSize` (default 1 MB) and `headerPairs` (default 2000). multer 2.4.0's README also lists `fieldNestingDepth` and `fieldArrayIndexLimit` for bracket field names. multer passes `fileSize + 1` to busboy, so a file of exactly `fileSize` bytes is accepted (Example 1). Limits apply to the whole request; there is no per-field file size. Each failure is a `MulterError` with a `code`: `LIMIT_FILE_SIZE`, `LIMIT_FILE_COUNT`, `LIMIT_FIELD_COUNT`, `LIMIT_PART_COUNT`, `LIMIT_FIELD_KEY`, `LIMIT_FIELD_VALUE`, `LIMIT_UNEXPECTED_FILE`, plus `MISSING_FIELD_NAME`, `LIMIT_FIELD_NESTING`, `LIMIT_FIELD_ARRAY_INDEX`, `INVALID_FIELD_NAME` and `STREAM_DESTROYED` (the list in `lib/multer-error.js`). `err.field` names the field when there is one. Check `err instanceof multer.MulterError` and `err.code` in an error handler; the message text is not an API.
+`limits` is passed to busboy: `fileSize` in bytes per file, `files`, `fields`, `parts`, `fieldNameSize`, `fieldSize` which defaults to 1 MB, and `headerPairs` which defaults to 2000. multer also documents `fieldNestingDepth` and `fieldArrayIndexLimit` for bracket names. multer passes `fileSize + 1` to busboy, so a file of exactly `fileSize` bytes is accepted. Example 1 shows 1024 passing and 1025 failing. Limits apply to the whole request. There is no per-field file size. Check `err instanceof multer.MulterError` and `err.code` in an error handler. The message text is not an API. `err.field` names the field when there is one.
 
-**The real type is in the bytes.** Many formats start with a fixed signature ("magic bytes"): PNG with `89 50 4E 47 0D 0A 1A 0A`, JPEG with `FF D8 FF`, PDF with `25 50 44 46 2D` (`%PDF-`). Reading the first few bytes and comparing them is a check the client cannot fake by renaming a file. It does not prove the rest of the file is valid or harmless; it only tells you which format the file claims to be from the inside. The `file-type` package (22.1.1) does the same for a long list of formats. It is ESM-only (`"type": "module"`, no CommonJS build, `engines.node >= 22`). In an ES module, `import { fileTypeFromBuffer } from 'file-type'`. From CommonJS on Node 24, `require('file-type')` also works because `require()` of a synchronous ES module is unflagged since v22.12.0 / v20.19.0 (and no longer experimental since v24.15.0).
+**The real type is in the bytes.** Many formats start with a fixed signature, the magic bytes. PNG starts with `89 50 4E 47 0D 0A 1A 0A`. JPEG starts with `FF D8 FF`. PDF starts with `25 50 44 46 2D`, which is `%PDF-`. Comparing the first bytes is a check the client cannot fake by renaming the file. It does not prove the rest of the file is valid or harmless. It only says which format the start of the file claims. The `file-type` package, 22.1.1, does this for a long list of formats. It is ESM-only, with `"type": "module"`, no CommonJS build, and `engines.node` at least 22. In an ES module, `import { fileTypeFromBuffer } from 'file-type'`. From CommonJS on Node 24, `require('file-type')` also works, because requiring a synchronous ES module has been unflagged since v22.12.0 and v20.19.0, and is no longer experimental since v24.15.0.
 
-**Streaming to S3.** `Upload` from `@aws-sdk/lib-storage` accepts a stream as `Body`. It reads the stream into parts of `partSize` bytes (default and minimum 5 MiB), and for a body bigger than one part it runs an S3 multipart upload: `CreateMultipartUpload`, then `UploadPart` for each part with up to `queueSize` (default 4) parts in flight, then `CompleteMultipartUpload`. A body that fits in one part is sent with a single `PutObject`. Each of the `queueSize` concurrent uploaders holds one part's buffer at a time (from lib-storage's source), so the file is never read into memory as a whole; the stream waits behind backpressure until a part slot is free. If the upload fails or you call `upload.abort()`, `done()` rejects (`AbortError` for an abort). lib-storage sends `AbortMultipartUpload` (unless `leavePartsOnError: true`) only once its loop that reads the body has stopped, so the body stream must end or be destroyed too (Example 8).
+**Streaming to S3.** `Upload` from `@aws-sdk/lib-storage` accepts a stream as `Body`. It reads the stream into parts of `partSize` bytes. The default and the minimum are 5 MiB. A body bigger than one part uses an S3 multipart upload: `CreateMultipartUpload`, then `UploadPart` for each part, with up to `queueSize` parts in flight, default 4, then `CompleteMultipartUpload`. A body that fits in one part is a single `PutObject`. Each of those concurrent uploaders holds one part's buffer, so the file is never one big allocation. The stream waits on backpressure until a part slot is free. If the upload fails, or you call `upload.abort()`, `done()` rejects. An abort rejects with `AbortError`. lib-storage sends `AbortMultipartUpload`, unless `leavePartsOnError` is true, only once the loop that reads the body has stopped, so the body stream must end or be destroyed too. Example 8 shows it.
 
-**Presigned URLs.** A presigned URL carries an AWS Signature Version 4 in its query string: an HMAC over the method, bucket, key, expiry and signed headers, computed with your secret key. Anyone holding the URL can make exactly that request until it expires, without credentials. `getSignedUrl(client, new PutObjectCommand({ Bucket, Key }), { expiresIn })` from `@aws-sdk/s3-request-presigner` produces such a URL for a `PUT`. A presigned PUT cannot limit the size of the body. A **presigned POST** (`createPresignedPost` from `@aws-sdk/s3-presigned-post`) instead signs a **policy document**: a base64 JSON list of conditions (`content-length-range`, `starts-with`, exact field values) that S3 checks against the form the browser submits. That is the way to put an upper size limit on a direct upload.
+**Presigned URLs.** A presigned URL carries an AWS Signature Version 4 in the query string. That is an HMAC over the method, the bucket, the key, the expiry, and the signed headers, computed with your secret key. Anyone holding the URL can make exactly that request until it expires, with no credentials of their own. `getSignedUrl(client, new PutObjectCommand({ Bucket, Key }), { expiresIn })` from `@aws-sdk/s3-request-presigner` builds a URL for PUT. A presigned PUT cannot limit the body size. A presigned POST, `createPresignedPost` from `@aws-sdk/s3-presigned-post`, signs a policy document instead. That is a base64 JSON list of conditions, such as `content-length-range`, `starts-with`, and exact field values, which S3 checks against the form the browser submits. That is how you cap the size of a direct upload.
 
-**Cleanup.** multer removes its own files when it fails. It cannot know about checks that run later, in your handler: a wrong magic number, a failed database insert, a thrown error. With disk storage each of those leaves the temp file behind unless your handler deletes it. Delete before you send the error response, so the next request (or a test) never sees the file.
+**Cleanup.** multer removes its own files when it fails. It cannot know about checks you run later: a wrong magic number, a failed database insert, a thrown error. With disk storage, each of those leaves the temp file unless your handler deletes it. Delete before you send the error response, so the next request does not see the file.
 
-**Client aborts.** When the client closes the connection mid-body, Node emits `'aborted'` (deprecated, still emitted) and then `'close'` with `req.readableEnded === false` on the request. multer listens for these, destroys busboy, deletes the partial file and calls `next(new Error('Request aborted'))`. The error handler runs, but the socket is gone, so there is nobody to answer.
+**Client aborts.** When the client closes the connection mid-body, Node emits `'aborted'`, which is deprecated and still emitted, and then `'close'` with `req.readableEnded === false`. multer destroys busboy, deletes the partial file, and calls `next(new Error('Request aborted'))`. That error is a plain `Error`, not a `MulterError`. The error handler runs, but the socket is gone, so there is nobody to answer.
 
 ## Code examples
 
@@ -880,61 +881,59 @@ Presigned PUT                                   Presigned POST
 
 ## Common mistakes & gotchas
 
-- **Trusting `file.mimetype` or the extension.** Both come from the client. Example 3 accepted 19 bytes of text as `image/png`; Example 4 caught it by reading the first bytes.
-- **Using `originalname` as a path.** It is attacker input and can contain `../`. Generate the stored name (a UUID) and keep `originalname` only as display text.
-- **No `limits`.** Every limit defaults to `Infinity` except `fieldSize` and `headerPairs`. With memory storage and no `fileSize`, one request can fill the heap.
-- **Error handler that only knows `MulterError`.** A client abort arrives as a plain `Error('Request aborted')` and a `fileFilter` error as whatever you passed to `cb(err)` (Examples 3 and 6). Handle the generic case too.
-- **Forgetting the temp file after your own checks fail.** multer only removes files on its own errors. Example 5 leaked one file per rejected request until the handler deleted it.
-- **Deleting after responding.** A delete in a `finally` that runs after `res.json()` races the client; in one run the client read the directory first and saw the file. Await the delete, then respond.
-- **Two files for `.single()`.** The second file fails the whole request (`LIMIT_UNEXPECTED_FILE`, or `LIMIT_FILE_COUNT` if `files: 1` trips first); it is not silently dropped.
-- **`req.body.hasOwnProperty`.** multer's `req.body` has a `null` prototype, so that call throws. Use `Object.hasOwn()`.
-- **A presigned PUT has no size limit.** Anyone with the URL can upload any size until it expires. Use a presigned POST with `content-length-range` when size matters (Example 10).
-- **A presigned PUT URL that carries an empty-body checksum.** With SDK 3.1149.0's default `requestChecksumCalculation: 'WHEN_SUPPORTED'`, the URL contained `x-amz-checksum-crc32=AAAAAA%3D%3D` and the real upload failed with `400 BadDigest` (Example 9). Create the presigning client with `requestChecksumCalculation: 'WHEN_REQUIRED'`.
-- **`upload.abort()` alone after a client disconnect.** `done()` rejects, but in Example 8 the multipart upload stayed open until the busboy file stream was destroyed as well.
-- **A `partSize` under 5 MiB.** The `Upload` constructor throws `EntityTooSmall: Your proposed upload part size [1048576] is smaller than the minimum allowed size [5242880] (5MB)` (checked with `partSize: 1024 * 1024`) before anything is sent.
+- **Trusting `file.mimetype` or `file.originalname`.** Both are client text. Example 3 accepts `cat.png` that is 19 bytes of text. Check magic bytes. Example 4 shows `fake.png`.
+- **No `limits`.** One request can exhaust memory or disk. Set `fileSize`, and set `files` or `maxCount`.
+- **A check after disk storage, with no delete.** multer already wrote the file. Your 415 or your thrown error leaves it in the temp directory. Example 5 shows the leak, and a `catch` that deletes before rethrowing.
+- **Deleting in `finally` after `res.json`.** The client can read the directory before the delete finishes. Await the delete, then send the error.
+- **An error handler that only checks `MulterError`.** A client abort is `new Error('Request aborted')`, not a `MulterError`, so it falls through to the generic branch.
+- **`req.body.hasOwnProperty`.** `req.body` has a null prototype, so that call throws. Use `Object.hasOwn(req.body, name)`.
+- **An app-wide JSON parser in front of the upload route.** It does not parse multipart, but order still matters for any route that shares the stack. Mount the upload parser on the route that needs it.
+- **Leaving an aborted S3 multipart upload.** If the body stream is not destroyed, lib-storage may not send `AbortMultipartUpload`. Set that up, or pass `leavePartsOnError` only when you mean to keep the parts.
 
 ## Best practices
 
-- Set `limits` on every multer instance: at least `fileSize`, `files`, `fields` and `parts`.
-- Choose storage by size: memory for small files you check and forward at once, disk for larger files you process locally, streaming or presigned URLs for anything that ends up in object storage.
-- Store under a generated name; never under `originalname`.
-- Check the type from the first bytes (your own signature table or `file-type`), and keep an allow-list of formats, not a deny-list.
-- Put the post-multer work in one `try`/`catch` that deletes the temp file and rethrows (Example 5); answer only after the delete finished.
-- Handle every error shape in the upload error handler: `MulterError` (`err.code`), plain errors from aborts, and your own `fileFilter` errors.
-- For direct uploads, presign a short-lived POST with `content-length-range` and a fixed key per upload, then verify the object (size, type by bytes) before you use it.
-- When the client disconnects or a limit trips, destroy the file stream and call `upload.abort()`, then confirm with `ListMultipartUploads` in tests that nothing stays open. A bucket lifecycle rule that aborts incomplete multipart uploads catches what slips through.
+- Prefer memory storage for small, checked files, such as an avatar under a `fileSize` you can afford. Prefer disk, or a stream to object storage, when the file can be large.
+- Set `limits.fileSize`, and a file count, on every upload route.
+- Decide the type from the first bytes, not from the filename or `mimetype`. Reject with 415.
+- On disk storage, delete the temp file in the same `catch` that turns a late failure into an error response, and await the delete first.
+- Generate the stored name yourself. The default is 16 random bytes in hex, with no extension. Do not use `originalname` as the path.
+- For large objects, let the browser upload with a presigned POST when you need a size cap, or stream through busboy and `Upload` when the bytes must pass your process.
+- Treat `'aborted'` as cleanup only. Do not try to write a response after the socket is gone.
 
 ## ⭐ Interview lens
 
 > **Q: “Why can't you trust `req.file.mimetype`, and what do you check instead?”**  
-> A: It is the `Content-Type` the client wrote into the part header, and curl or a browser derive it from the file extension. I check the first bytes against known signatures (`89 50 4E 47 …` for PNG, `FF D8 FF` for JPEG, `%PDF-` for PDF), either with a small table or the `file-type` package, and reject anything not on my allow-list. *Trap:* a matching signature says which format the file claims to be; it does not prove the file is harmless or well-formed.
+> A: `req.file.mimetype` is the `Content-Type` the client put on that multipart part, and `originalname` is the filename the client sent. Neither is checked by multer. A 19-byte text file named `cat.png` and sent as `image/png` passes a filter that only looks at `file.mimetype`. Read the first bytes instead. PNG starts with `89 50 4E 47 0D 0A 1A 0A`, JPEG with `FF D8 FF`, PDF with `25 50 44 46 2D`. You can compare those yourself, or call `fileTypeFromBuffer` from the `file-type` package. In Example 4, `fake.png` claimed `image/png` and its first bytes were `6a 75 73 74`, the word "just", so both checks rejected it with 415. The limit is that magic bytes only identify the start of the file. They do not prove the rest is a valid image or that it is safe to serve from your origin.
 
 > **Q: “Memory storage or disk storage in multer?”**  
-> A: Memory storage puts the bytes in `file.buffer`, so it suits small files I inspect and forward right away, with a strict `fileSize`. Disk storage writes to `file.path`, which suits bigger files, but every failure after multer must delete the file or it leaks. For S3 I avoid both and stream the busboy file stream into lib-storage's `Upload`, or let the browser upload with a presigned URL.
+> A: Memory storage, which is the default when you call `multer()` with no `storage`, collects the file into `file.buffer`. That is simple for a small avatar, and the bytes disappear with the request if you reject them. It costs RAM equal to the upload, so a 2 GB file needs 2 GB of memory, and several concurrent uploads add up. Disk storage writes to `destination` and `filename`, defaulting to the OS temp directory and a 16-byte random hex name with no extension, and sets `file.path`. The file survives your handler. multer deletes it when a limit or a busboy error fires. It does not delete it when your own later check fails, so you must. Use memory when the cap is small and you will inspect the bytes immediately. Use disk, or a stream onward to S3, when the file can be large.
 
 > **Q: “What happens in multer when the client disconnects mid-upload?”**  
-> A: Node emits `'aborted'` and `'close'` on the request without `readableEnded`. multer destroys busboy, removes any partial file it wrote, and calls `next(new Error('Request aborted'))`. The error handler runs, but the socket is already destroyed, so it should not try to respond.
+> A: Node emits `'aborted'`, then `'close'` with `req.readableEnded === false`. multer listens for that, destroys the busboy parser, deletes the partial file it had started, and calls `next(new Error('Request aborted'))`. That is a plain `Error`, not a `MulterError`, so a handler that only checks `instanceof multer.MulterError` misses it. The error middleware does run, but `req.socket.destroyed` is true, so there is no client left and you should not write a response. Example 6 sent 20 KiB of a declared 1 MiB body and saw the temp file at 20480 bytes at the moment of `'aborted'`, then empty after multer cleaned up. A file that exceeds `fileSize` is different. busboy stops, multer deletes what it wrote, and the error handler can still answer, with code `LIMIT_FILE_SIZE`.
 
 > **Q: “Presigned PUT vs presigned POST?”**  
-> A: A presigned PUT is a URL whose SigV4 query signature allows one `PUT` to one key until it expires; it cannot limit the body size. A presigned POST signs a policy document with conditions such as `content-length-range` and `starts-with $Content-Type`, and S3 rejects a form that breaks them, for example `EntityTooLarge` for a file over the range.
-
-> **Q: “How does `@aws-sdk/lib-storage` upload a stream of unknown length?”**  
-> A: It cuts the stream into `partSize` chunks (minimum 5 MiB). If the first chunk is also the last, it sends one `PutObject`; otherwise it starts a multipart upload, sends up to `queueSize` parts at once, and completes it at the end. On error or `abort()` it sends `AbortMultipartUpload`, but only after its read loop stops, so on a client disconnect I also destroy the body stream.
+> A: Both are a signed permission for the browser to send bytes straight to S3, so your server never holds the file. A presigned PUT, from `getSignedUrl` around a `PutObjectCommand`, signs the method, bucket, key, expiry, and headers. Anyone with the URL can PUT that object until it expires. It cannot limit how large the body is. A presigned POST, from `createPresignedPost`, signs a policy document instead: base64 JSON conditions such as `content-length-range` and key prefixes, which S3 checks against the form. Use POST when you need an upper size. Use PUT when the client is a simple HTTP PUT and the size cap is enforced somewhere else. The signature is AWS Signature Version 4, an HMAC with your secret. The URL is the credential until it expires, so keep the lifetime short.
 
 ## Cheat-card
 
-- **Parser:** multer 2.4.0 = Express middleware on busboy 1.6.0; non-multipart requests pass through untouched.
-- **Factories:** `.single(f)` → `req.file`; `.array(f, n)` → `req.files[]`; `.fields([...])` → `req.files{}`; `.none()` → text only.
-- **Storage:** `memoryStorage()` → `file.buffer`; `diskStorage({ destination, filename })` → `file.path` (default `os.tmpdir()`, random hex name).
-- **Limits:** `fileSize` is inclusive; `files`, `fields`, `parts`; all default `Infinity` except `fieldSize` (1 MB) and `headerPairs` (2000).
-- **Errors:** `err instanceof multer.MulterError`, switch on `err.code` (`LIMIT_FILE_SIZE` → 413); aborts are a plain `Error('Request aborted')`.
-- **Real type:** first bytes, PNG `89504e470d0a1a0a`, JPEG `ffd8ff`, PDF `255044462d`; `file-type` 22.x is ESM-only.
-- **Cleanup:** multer cleans its own failures; your later failures must `fs.rm(file.path)` before responding.
-- **S3 stream:** `new Upload({ client, params: { Bucket, Key, Body: stream }, partSize: 5 MiB, queueSize })`; on a limit or disconnect, destroy the stream and `abort()`.
-- **Presigned:** PUT = `getSignedUrl(s3, new PutObjectCommand(...), { expiresIn })`, no size limit, client with `requestChecksumCalculation: 'WHEN_REQUIRED'`; POST = `createPresignedPost` with `['content-length-range', min, max]`.
-- **Local S3:** `endpoint` + `forcePathStyle: true` + throwaway keys; never real credentials in examples.
+- Express does not parse `multipart/form-data`. `req.body` stays `undefined` on Express 5 until a multipart parser runs.
+- busboy 1.6.0 emits `'field'` and `'file'`. multer 2.4.0 is the Express wrapper.
+- `upload.single(name)` sets `req.file`. `array(name, max)` and `fields([...])` set `req.files`. `none()` rejects any file with `LIMIT_UNEXPECTED_FILE`.
+- `memoryStorage` fills `file.buffer`. `diskStorage` writes `file.path`. The default directory is the OS temp dir. The default name is 16 random bytes in hex.
+- `limits.fileSize` is the max per file. multer passes `fileSize + 1` to busboy, so exactly `fileSize` bytes is allowed. `fieldSize` defaults to 1 MB. `headerPairs` defaults to 2000.
+- `fileFilter` sees the client metadata only, before any bytes. `cb(null, false)` skips. `cb(err)` fails the request.
+- Trust magic bytes, not `mimetype` or `originalname`. PNG is `89 50 4E 47 0D 0A 1A 0A`. JPEG is `FF D8 FF`. PDF is `%PDF-`.
+- On a late failure, delete the temp file yourself, and await that delete before you respond.
+- A client abort is `Error('Request aborted')`, not a `MulterError`. The partial file is removed. Do not write a response.
+- lib-storage `Upload` uses 5 MiB parts, minimum, and `queueSize` 4. One part is `PutObject`. More than one part is a multipart upload. Abort only completes once the body stream stops.
+- A presigned PUT cannot cap the size. A presigned POST policy can, with `content-length-range`.
 
----
+## Good to know
+
+- `@aws-sdk/lib-storage` `Upload` reads a stream of unknown length into parts of `partSize` bytes, default and minimum 5 MiB. One part is a single `PutObject`. A larger body is `CreateMultipartUpload`, then `UploadPart` with up to `queueSize` parts in flight, default 4, then `CompleteMultipartUpload`. Each in-flight part is one buffer, so the file is not loaded whole. `upload.abort()` rejects `done()` with `AbortError`, and `AbortMultipartUpload` is sent, unless `leavePartsOnError` is true, only after the body-reading loop has stopped.
+- `MulterError` codes in multer 2.4.0 are `LIMIT_FILE_SIZE`, `LIMIT_FILE_COUNT`, `LIMIT_FIELD_COUNT`, `LIMIT_PART_COUNT`, `LIMIT_FIELD_KEY`, `LIMIT_FIELD_VALUE`, `LIMIT_UNEXPECTED_FILE`, `MISSING_FIELD_NAME`, `LIMIT_FIELD_NESTING`, `LIMIT_FIELD_ARRAY_INDEX`, `INVALID_FIELD_NAME`, and `STREAM_DESTROYED`.
+- The S3 examples in this lesson did not use AWS. MinIO's download URL answered 410 because the open-source MinIO projects are archived. The runs used SeaweedFS 4.48, with `forcePathStyle: true` against `127.0.0.1`.
+- `file-type` 22.1.1 is ESM-only. `require('file-type')` from CommonJS works on Node 24 because requiring a synchronous ES module is unflagged since v22.12.0 and v20.19.0, and no longer experimental since v24.15.0.
 
 ## Learn More
 

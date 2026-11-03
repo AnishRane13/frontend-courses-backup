@@ -13,17 +13,21 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A WebSocket is one long-lived connection that starts as a normal HTTP request and then switches protocols, so either side can send a message without waiting to be asked. The switch is a status 101 response, and after that the same TCP connection carries small frames instead of HTTP requests. It exists because plain HTTP cannot push a chat line, a price, or a cursor move until the browser asks again. The trade-off is that the connection is stateful. It lives on one server, and a quiet socket can sit open until you notice it is dead.
+
 ## Why it matters
 
-Plain HTTP has one shape: the **client asks, the server answers, the exchange ends**. That request/response model is perfect for loading a page or saving a form, but it cannot *push*. If a message arrives on the server — a new chat line, a price tick, another user's cursor move — HTTP has no way to hand it to the browser until the browser asks again. For a whole class of products (chat, multiplayer games, live dashboards, collaborative editors, trading screens, ride tracking) that "ask again" model is either too slow or too wasteful to ship.
+Plain HTTP has one shape. The client asks, the server answers, and the exchange ends. That is the right model for loading a page or saving a form, and it cannot push. If a chat line, a price tick, or another user's cursor arrives on the server, HTTP cannot hand it to the browser until the browser asks again. For chat, games, live dashboards, collaborative editors, trading screens, and ride tracking, asking again is either too slow or too wasteful.
 
-WebSockets close that gap. They give you a single, long-lived, **full-duplex** connection over which either side can send a message at any moment, with almost no per-message overhead. Knowing when to reach for WebSockets — and, just as important, when a cheaper tool like Server-Sent Events or ordinary polling is the correct answer — is a signature backend skill and a very common interview theme. Getting it wrong means either a laggy product or a server melting under connections it never needed to hold open.
+WebSockets close that gap. They give you one long-lived, full-duplex connection, which means both sides can send at any moment, with almost no per-message overhead. You also need to know when a cheaper tool is enough. Server-Sent Events, or ordinary polling, are often the right answer. Picking WebSockets when you only needed a one-way feed means holding open connections you never use.
 
 ## The concept, simply
 
-A WebSocket is a persistent two-way pipe between client and server. It *starts* its life as a normal HTTP request, then asks to be "upgraded" to the WebSocket protocol. Once upgraded, the HTTP framing is gone: both ends now speak in lightweight **frames** over the same underlying TCP connection, and both can speak whenever they like without waiting to be asked.
+A WebSocket is a persistent two-way pipe between client and server. It starts as a normal HTTP request, then asks to be upgraded to the WebSocket protocol. Once upgraded, the HTTP framing is gone. Both ends speak in lightweight frames over the same TCP connection, and either side can speak without being asked.
 
-Compare the three common real-time strategies. **Polling** is the browser repeatedly asking "anything new?" on a timer — simple, but latency equals your interval and most requests come back empty. **Server-Sent Events (SSE)** is a single long HTTP response that the server keeps writing to — one-way (server to client only), HTTP-native, auto-reconnecting, and ideal for feeds and notification streams. **WebSockets** are the heavyweight: genuinely two-way, lowest latency, but a stateful connection you now have to manage and scale.
+Three strategies cover most real-time work. Polling is the browser asking "anything new?" on a timer. It is simple, latency equals your interval, and most requests come back empty. Server-Sent Events, SSE, is one long HTTP response that the server keeps writing. It is one-way, server to client, it is still HTTP, it reconnects on its own, and it fits feeds and notification streams. WebSockets are the heavy tool: genuinely two-way and lowest latency, and the connection is stateful, so you have to manage it and scale it.
 
 ![Three columns comparing HTTP polling, SSE, and WebSocket by direction, overhead, and use case](assets/i64_01_417ee1ac.svg)
 
@@ -31,17 +35,17 @@ Polling asks on a timer, SSE streams one-way over HTTP, and WebSocket is a full-
 
 ## How it works (deep)
 
-The connection begins with a normal HTTP/1.1 GET carrying three tell-tale headers: `Upgrade: websocket`, `Connection: Upgrade`, and a random `Sec-WebSocket-Key`. If the server agrees, it replies with status **101 Switching Protocols** and a `Sec-WebSocket-Accept` header derived from that key (the client verifies it to prove it really reached a WebSocket server, not a confused cache). After the 101, the socket is no longer HTTP — the same TCP connection now carries WebSocket frames.
+The connection begins with a normal HTTP/1.1 GET carrying three headers: `Upgrade: websocket`, `Connection: Upgrade`, and a random `Sec-WebSocket-Key`. If the server agrees, it replies with status 101 Switching Protocols and a `Sec-WebSocket-Accept` header derived from that key. The client checks it to prove it reached a WebSocket server, not a confused cache. After the 101, the socket is no longer HTTP. The same TCP connection now carries WebSocket frames.
 
 ![Sequence diagram of the client GET with Upgrade headers, the server 101 Switching Protocols reply, then bidirectional frames on the same socket](assets/i64_02_89e8f619.svg)
 
-The handshake is one HTTP request that upgrades in place — after the 101, both sides send framed messages over the same TCP connection until either closes it.
+The handshake is one HTTP request that upgrades in place. After the 101, both sides send framed messages over the same TCP connection until either closes it.
 
-Each message is sent as one or more frames. A frame header encodes an **opcode** (text, binary, ping, pong, or close), a payload length, and — for messages sent *from the browser* — a masking key XORed over the payload (a security measure against cache-poisoning proxies; servers never mask). Because framing is so thin (as few as 2 bytes of overhead), a WebSocket can push thousands of tiny updates far more cheaply than the same number of HTTP requests, each of which would carry full headers and cookies.
+Each message is one or more frames. A frame header encodes an opcode, which is the kind of frame: text, binary, ping, pong, or close. It also encodes a payload length. Frames from the browser also carry a masking key that is XORed over the payload, so a cache-poisoning proxy cannot treat the bytes as a request. Servers never mask. The header can be as small as 2 bytes, so thousands of tiny updates cost far less than the same number of HTTP requests, each of which would carry full headers and cookies.
 
-In Node, the `http.Server` emits an `'upgrade'` event instead of the usual `'request'` event when those upgrade headers arrive. The `ws` library hooks that event, completes the handshake, and hands you a socket object with `send()` and `'message'`/`'close'` events. `socket.io` sits a layer above: it adds rooms, automatic reconnection, acknowledgements, and a *fallback to HTTP long-polling* when a raw WebSocket cannot be established (hostile proxies, some corporate networks) — at the cost of its own wire protocol, so a socket.io client cannot talk to a bare `ws` server and vice-versa.
+In Node, `http.Server` emits an `upgrade` event instead of `request` when those headers arrive. The `ws` library hooks that event, completes the handshake, and gives you a socket with `send()` and `message` and `close` events. `socket.io` sits a layer above. It adds rooms, automatic reconnection, acknowledgements, and a fallback to HTTP long-polling when a raw WebSocket cannot be established, for example through a hostile proxy. The cost is its own wire protocol. A socket.io client cannot talk to a bare `ws` server, and the reverse is also true.
 
-Two operational realities shape every production deployment. First, WebSockets are **stateful**: connection C lives on exactly one server instance. If user A is on instance 1 and user B is on instance 2, instance 1 cannot deliver a message to B on its own — you need a **backplane** (commonly a Redis pub/sub adapter) so instances can relay events to each other. Second, load balancers and reverse proxies must be told to allow the upgrade and to hold idle connections open; a default 60-second idle timeout will silently kill quiet sockets, which is why heartbeats matter.
+Two facts shape production. First, the connection is stateful. It lives on exactly one server instance. If user A is on instance 1 and user B is on instance 2, instance 1 cannot deliver a message to B by itself. You need a backplane, commonly a Redis pub/sub adapter, so instances can relay events. Second, load balancers and reverse proxies must allow the upgrade and must hold idle connections open. A default 60 second idle timeout silently kills a quiet socket, which is why a heartbeat matters.
 
 ## Code examples
 
@@ -180,17 +184,17 @@ io.on('connection', (s) => s.on('broadcast', (m) => io.emit('broadcast', m)));
 
 ## ⭐ Interview lens
 
-> **Q: Walk me through what happens when a browser opens a WebSocket.** The client sends an ordinary HTTP/1.1 GET with `Upgrade: websocket`, `Connection: Upgrade`, and a random `Sec-WebSocket-Key`. If the server accepts, it returns **101 Switching Protocols** with a `Sec-WebSocket-Accept` hash of that key. The same TCP connection then carries bidirectional WebSocket frames — no more HTTP request/response. In Node this surfaces as the `'upgrade'` event on the HTTP server.
+> **Q: Walk me through what happens when a browser opens a WebSocket.**  
+> A: The browser sends an ordinary HTTP/1.1 GET. Three headers say it wants a switch: `Upgrade: websocket`, `Connection: Upgrade`, and a random `Sec-WebSocket-Key`. If the server accepts, it returns status 101 Switching Protocols and a `Sec-WebSocket-Accept` value derived from that key. The browser checks the value so it knows it reached a WebSocket server and not a cache that got confused. After the 101, that same TCP connection stops being HTTP. Both sides send frames. A frame header carries an opcode, text, binary, ping, pong, or close, plus a length. Frames from the browser are masked. In Node this is not a normal request. `http.Server` emits `upgrade`, and a library such as `ws` finishes the handshake and gives you `send` and `message`. The limit is everything in front of Node. A proxy that does not allow the upgrade, or that closes idle connections at 60 seconds, kills the socket after it looked open.
 
-> **Q: WebSockets vs SSE vs polling — when do you pick each?** Polling for infrequent updates or dead-simple integrations. SSE when data flows *only* server-to-client (feeds, notifications, token streaming) — it is HTTP-native and auto-reconnects. WebSockets when you need genuinely *two-way*, low-latency traffic (chat, games, collaboration). *Trap:* candidates default to WebSockets for a live feed that has no client-to-server messages — that is SSE's job and it is cheaper to operate.
+> **Q: WebSockets vs SSE vs polling — when do you pick each?**  
+> A: Pick the lightest tool that matches direction and how fresh the data must be. Polling is the browser asking on a timer. Use it for rare updates or a simple integration. Latency is your interval, and most replies are empty. Server-Sent Events, SSE, is one long HTTP response with `Content-Type: text/event-stream`. The server keeps writing events. Use it when data flows only server to client: a feed, a notification bell, token streaming. It stays HTTP, proxies understand it, and the browser reconnects. If the server sends `id:` on each event, the client comes back with `Last-Event-ID` and you can replay what it missed. WebSockets are for genuinely two-way, low-latency traffic: chat, games, collaboration. The trap is reaching for a WebSocket for a live feed that never sends client messages. That is SSE, and you do not have to hold a stateful socket. The limit of WebSockets is the connection itself. It is pinned to one process, and you now own heartbeats, backpressure, and scale.
 
-> **Q: Your chat works locally but messages vanish after you scale to three instances. Why?** WebSocket connections are stateful and pinned to one instance. A broadcast on instance 1 never reaches clients held by instances 2 and 3. You need a backplane — e.g. the socket.io Redis adapter or your own Redis pub/sub — so instances relay events to each other.
+> **Q: Your chat works locally but messages vanish after you scale to three instances. Why?**  
+> A: A WebSocket is stateful. The connection lives on exactly one process. On a laptop, one process holds every client, so a loop over `wss.clients` reaches everyone. Behind a load balancer, user A can be on instance 1 and user B on instance 2. A broadcast inside instance 1 never sees B. You need a backplane so an emit on one instance is relayed to the others. socket.io does this with the Redis adapter: two Redis clients, publish and subscribe, and `io.adapter(createAdapter(pub, sub))`. Your own Redis pub/sub does the same job for a raw `ws` server. If you use socket.io's HTTP long-polling fallback, you also need sticky sessions, because the handshake and the later polls must hit the same instance. A raw WebSocket does not, because there is only the one upgraded connection. The limit is an in-memory bus. It still only reaches clients on that process.
 
-> **Q: How do you detect a client that dropped without a proper close?** TCP may not notice for minutes. Send periodic pings; if a client misses N pongs, `terminate()` it. The classic implementation flags each socket `isAlive=false` before each ping and back to `true` on pong.
-
-> **Q: Is a WebSocket subject to the same-origin policy / CORS?** No — browsers do *not* apply CORS to WebSocket handshakes. That is exactly why Cross-Site WebSocket Hijacking exists. You must validate the `Origin` header and authenticate the connection yourself. *Trap:* assuming CORS "protects" the endpoint.
-
-> **Q: What is backpressure on a WebSocket and how do you handle it?** If you send faster than a client can receive, Node buffers unsent bytes in memory (`ws.bufferedAmount`). Under sustained pressure that is an OOM risk. Handle it by checking buffered amount and throttling, coalescing, or dropping stale updates for slow consumers.
+> **Q: How do you detect a client that dropped without a proper close?**  
+> A: TCP can believe a yanked cable or a frozen peer is still open for minutes, and the `close` event never fires. You detect it with a heartbeat. The server example sets `isAlive` true on connect and on `pong`, then every 30 seconds marks each socket not alive and sends a ping. If the next pass still sees `isAlive` false, it calls `terminate()`, which destroys the socket without waiting for a closing handshake a dead peer will never answer. The client in the additional example does the same from the other side: ping every second, and if no pong arrives within a second, `terminate()`. In that run, SIGSTOP froze the server. `send()` still looked successful for messages 5 through 8, and the pong timer fired about 2 seconds later. Those messages were only recovered because they stayed in an unacked map until the server acknowledged them. The limit of the browser's global `WebSocket` is that it has no `ping()` or `terminate()`. A heartbeat there has to be an application message. Node's built-in client did answer the server's ping with a pong on its own.
 
 ## Cheat-card
 
@@ -202,7 +206,16 @@ io.on('connection', (s) => s.on('broadcast', (m) => io.emit('broadcast', m)));
 - **Security:** authenticate on upgrade, validate `Origin` (no CORS on WS), use `wss://`.
 - **Frames:** tiny header, text/binary/ping/pong/close opcodes; browser-to-server frames are masked.
 - **SSE resume:** send `id:` on every event (+ `retry:`); the client reconnects with `Last-Event-ID`; the server replays newer events from a bounded log. Node 24: no global `EventSource` without `--experimental-eventsource` → `eventsource` package.
-- **Reconnecting WS client:** heartbeat (ping + pong timeout → `terminate()`), backoff `random(0, min(cap, base·2^n))`, outbox while disconnected, resend unacked after reconnect, server dedupes by id. Global `WebSocket` has no `ping()`.
+- **Reconnecting WS client:** heartbeat (ping, then pong timeout, then `terminate()`), backoff `random(0, min(cap, base·2^n))`, outbox while disconnected, resend unacked after reconnect, server dedupes by id. Global `WebSocket` has no `ping()`.
+
+## Good to know
+
+- Q: Is a WebSocket subject to CORS? No. Browsers do not apply the same-origin policy to the handshake, which is why Cross-Site WebSocket Hijacking exists. Validate `Origin` and authenticate during the upgrade.
+- Q: What is backpressure? If you `send()` faster than a client drains, Node buffers bytes and `ws.bufferedAmount` grows, which can exhaust memory. Throttle, coalesce, or drop stale updates for a slow consumer.
+- Q: How does an SSE client resume? The server sends `id:`. `EventSource` stores it and reconnects after `retry:` with `Last-Event-ID`. The server replays stored events with a larger id. Node 24 has no global `EventSource` unless you pass `--experimental-eventsource` (added in v22.3.0 / v20.18.0). This lesson used the `eventsource` package 5.1.2.
+- Q: Clients all reconnect at once after a deploy. What changes? Exponential backoff with full jitter: delay is `random(0, min(5000, 200 * 2^attempt))` ms. Queue while disconnected, resend anything not acknowledged, and dedupe by id on the server.
+- In the demo, server A was SIGSTOP'd, the client logged `sent #5` through `sent #8` into a socket the frozen process never read, then terminated at 4.0 s. Server B later received #5 through #15. A second run waited 19, 318, 515, 1003, and 2554 ms.
+- `eventsource` 5.1.2 `unref()`s its reconnect timer, so a script whose only work is the client exits during the retry unless something else keeps the process alive.
 
 ---
 
@@ -636,8 +649,4 @@ This is at-least-once delivery: nothing is lost, and the receiver removes duplic
 
 ### ⭐ Interview lens (additional topics)
 
-> **Q: “How does an SSE client resume after a dropped connection without missing events?”**  
-> A: The server tags each event with `id:`. The client (`EventSource`) stores the last id and reconnects after the `retry:` interval with a `Last-Event-ID` header. The server replays stored events with larger ids, then continues live. Without ids there is nothing to resume from. *Trap:* Node 24 has no global `EventSource` unless you pass `--experimental-eventsource`; use the `eventsource` package or a fetch-based reader.
-
-> **Q: “Your WebSocket clients all reconnect at once after a deploy and knock the new servers over. What do you change?”**  
-> A: Exponential backoff with jitter: double a delay cap on each failed attempt up to a maximum, and wait a random time below the cap, so reconnects spread out. Add a heartbeat (ping/pong with a timeout, then `terminate()`) to detect half-open connections, queue outgoing messages while disconnected, and resend anything the server has not acknowledged, with server-side dedupe by message id.
+The SSE resume question and the reconnect-storm question are one line each under Good to know.

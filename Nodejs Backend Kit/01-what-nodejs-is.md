@@ -13,60 +13,67 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Node.js is one program, the `node` executable. It runs your JavaScript with Google's V8 engine, and it uses the C library libuv to wait on sockets, files, and timers, then run your callbacks one at a time on a single JavaScript thread.
+
+It exists so a server can hold many connections without giving each one a thread that sits blocked. The trade-off is that one long calculation on that JavaScript thread freezes every other callback until it returns.
+
+V8 is the engine that compiles and runs JavaScript. libuv is the C library that provides the event loop, the wait for I/O, and a small pool of helper threads. The event loop is the scheduler that runs those callbacks.
+
 ## Why it matters
 
-Every later topic in this kit (the event loop, the thread pool, streams, `process`, worker threads, memory limits) is a detail of one program: the `node` executable. If you picture Node as "JavaScript on the server" and nothing more, you cannot answer the questions that come up in production and in interviews:
+Later lessons are details of this one program. Five production questions all come from how it is built:
 
-- Why does one slow `JSON.parse` of a 200 MB string freeze every request, while 10,000 slow database queries do not?
-- Why does `fs.readFile` use a background thread but an HTTP socket does not?
-- Why is `window` undefined, but `fetch` and `setTimeout` exist?
-- Which Node version is safe to deploy today, and for how long?
-- Why did my `process.on('exit')` handler never send its log line?
+- Why one slow `JSON.parse` of a 200 MB string freezes every request, while 10,000 slow database queries do not.
+- Why `fs.readFile` uses a background thread and an HTTP socket does not.
+- Why `window` is undefined, while `fetch` and `setTimeout` exist.
+- Which Node version is safe to deploy, and for how long.
+- Why a `process.on('exit')` handler never sent its log line.
 
-All five answers come from what Node is made of (V8, libuv, C++ bindings, a JavaScript core library), how its threads are arranged (one JavaScript thread plus helpers), how its release lines work, and the fixed order in which a Node program starts, runs and stops. This lesson covers those four things.
+The answers are the parts inside `node` (V8, libuv, C++ bindings, a JavaScript core library), the threads (one JavaScript thread plus helpers), the release lines, and the order a process starts, runs, and stops.
 
 ## The concept, simply
 
-**Node.js is a single executable program (`node`) that embeds Google's V8 JavaScript engine, adds an event loop and asynchronous I/O from the C library libuv, and exposes operating-system features to JavaScript through a C++ layer and a library of built-in JavaScript modules (`node:fs`, `node:http`, `node:crypto`, …).** You give it a file; it compiles and runs that file with V8, then keeps the process alive for as long as there are timers, sockets or pending operations, running your callbacks one at a time as their events arrive.
+**Node.js is a single executable, `node`, that embeds V8, adds an event loop and asynchronous I/O from libuv, and exposes the operating system through a C++ layer and built-in modules such as `node:fs`, `node:http`, and `node:crypto`.** You give it a file. V8 compiles and runs it. The process stays alive while timers, sockets, or other work are pending, and it runs callbacks one at a time as events arrive.
 
-**Origin and purpose.** Ryan Dahl presented Node in 2009. The idea was not "JavaScript on the server" for its own sake. Servers of the time usually gave each connection its own thread, and each thread spent most of its life blocked, waiting for a disk or a database. Dahl's design used a single thread that never waits: every I/O call returns at once, the operating system reports when the data is ready, and a callback runs then. JavaScript fitted this design because it had no blocking I/O library of its own to unlearn, and browser programmers were already used to callbacks. A 2014 fork (io.js) merged back in 2015 as Node.js 4. The project is run today under the OpenJS Foundation.
-
-**Runtime vs language vs framework.** These three words describe different layers:
+Ryan Dahl presented Node in 2009. Servers then usually gave each connection its own thread, and that thread spent most of its life waiting on a disk or a database. Node uses one thread that does not wait. The I/O call returns at once, the operating system reports when the data is ready, and a callback runs then. JavaScript fit because it had no blocking I/O library to unlearn, and browser programmers already used callbacks. A 2014 fork, io.js, merged back in 2015 as Node.js 4. The OpenJS Foundation runs the project.
 
 | Term | What it is | Examples |
 | --- | --- | --- |
-| Language | A specification of syntax and semantics. No I/O at all: ECMAScript has no file, socket or timer API. | ECMAScript 2025 (JavaScript) |
-| Engine | A program that parses, compiles and runs the language, and manages its memory. | V8, SpiderMonkey, JavaScriptCore |
-| Runtime | An engine plus an event loop plus host APIs (files, network, timers, processes), packaged as something you can run. | Node.js, Deno, Bun, a browser tab |
-| Framework | A library you load inside a runtime that sets the structure of your app. | Express, Fastify, NestJS |
+| Language | Syntax and meaning. No files, sockets, or timers. | JavaScript (ECMAScript) |
+| Engine | Parses, compiles, runs, and collects garbage. | V8, SpiderMonkey, JavaScriptCore |
+| Runtime | An engine, plus an event loop, plus host APIs, as something you can start. | Node.js, Deno, Bun, a browser tab |
+| Framework | A library you load inside a runtime to structure the app. | Express, Fastify, NestJS |
 
-So `setTimeout`, `fs` and `process` are not JavaScript. They are Node's host APIs. `Array.prototype.map` and `Promise` are JavaScript, provided by V8.
+So `setTimeout`, `fs`, and `process` are Node. `Array.prototype.map` and `Promise` are JavaScript, from V8.
 
-**The four layers inside `node`.**
+**Four layers inside `node`.**
 
-1. **V8** (C++, from Google's Chromium project): parses and compiles JavaScript to machine code, runs it, and garbage-collects the heap. Topic 2 covers it.
-2. **libuv** (C): the event loop, plus non-blocking networking through the kernel (`epoll` on Linux, `kqueue` on macOS, IOCP on Windows), plus a thread pool for operations that have no non-blocking OS version (file system, DNS `lookup`, some crypto and zlib).
-3. **C++ bindings** (Node's `src/` directory): glue code that turns a JavaScript call such as `fs.open()` into a libuv request, and turns the libuv completion back into a JavaScript callback. Bundled C/C++ libraries live here too: OpenSSL, llhttp (HTTP parser), zlib, c-ares, ICU, simdjson, sqlite.
-4. **The core library** (Node's `lib/` directory): the JavaScript code behind `node:fs`, `node:http`, `node:stream` and so on. It is compiled into the binary, so `require('node:fs')` never touches the disk.
+1. **V8.** Parses and compiles JavaScript to machine code, runs it, and collects garbage. Lesson 2.
+2. **libuv.** The event loop. Non-blocking networking through the kernel: `epoll` on Linux, `kqueue` on macOS, IOCP on Windows. A thread pool for work the operating system cannot do without blocking: the file system, DNS `lookup`, some crypto, and zlib.
+3. **C++ bindings,** in Node's `src/`. They turn a call such as `fs.open()` into a libuv request, and the completion back into a JavaScript callback. Bundled libraries live here too: OpenSSL, llhttp, zlib, c-ares, ICU, simdjson, sqlite.
+4. **The core library,** in Node's `lib/`. The JavaScript behind `node:fs`, `node:http`, and `node:stream`. It is compiled into the binary, so `require('node:fs')` does not touch the disk.
 
-**One JavaScript thread, many helpers.** All of your JavaScript runs on one thread, the main thread, inside one V8 isolate. That thread runs one callback at a time, to completion; nothing preempts it. Concurrency comes from elsewhere. Network sockets are non-blocking in the kernel: libuv asks the OS to watch thousands of them and parks in a single `epoll_wait` call until one is ready, so no extra thread is involved. Operations the OS cannot do without blocking (file reads, `dns.lookup`, `crypto.pbkdf2`, zlib) go to libuv's thread pool, which has 4 worker threads by default (`UV_THREADPOOL_SIZE` changes it). V8 also starts its own background threads for garbage collection and optimizing compilation. When a helper finishes, it queues a completion that the main thread picks up on its next trip around the event loop.
+**One JavaScript thread.** All of your JavaScript runs on the main thread, inside one V8 isolate, meaning one heap. That thread runs one callback to completion. Nothing preempts it. Network sockets are non-blocking in the kernel. libuv asks the operating system to watch thousands of them and sleeps in one `epoll_wait` until one is ready. File reads, `dns.lookup`, `crypto.pbkdf2`, and zlib go to libuv's thread pool, 4 workers by default. `UV_THREADPOOL_SIZE` changes that. V8 also starts its own threads for garbage collection and optimizing compilation. When a helper finishes, it queues a completion for the next trip around the loop.
 
 ![Diagram of Node's threads: the main thread running V8 and your JavaScript with the event loop, libuv in the middle, a thread pool of four workers for fs, crypto, zlib and dns.lookup, and the OS kernel handling network sockets with epoll, kqueue or IOCP](assets/i04_01_4d0a93cc.svg)
-*Figure: one JavaScript thread on top, libuv in the middle, the thread pool and the OS kernel underneath. Look at: the right-hand box, which says network sockets use kernel events and NOT the thread pool.*
+
+*Figure: one JavaScript thread on top, libuv in the middle, the thread pool and the kernel underneath. The right-hand box is the point: network sockets use kernel events, not the thread pool.*
 
 ## How it works
 
-**Running `node app.js`, step by step:**
+**What `node app.js` does.**
 
-1. **Bootstrap (C++).** The `node` binary starts, initialises the V8 platform (which starts V8's worker threads), OpenSSL and ICU, and creates a V8 isolate (one heap) and a context (one set of globals). Node does not build its internal state from scratch: it deserialises it from a startup snapshot compiled into the binary (`process.config.variables.node_use_node_snapshot` is `true` on official builds).
-2. **Bootstrap (JavaScript).** Node's internal JavaScript runs: it sets up `process`, `globalThis`, timers, the module loaders and the error handlers. `performance.nodeTiming.bootstrapComplete` records when this finishes.
-3. **Preload.** Modules named with `--require` / `--import` (or in `NODE_OPTIONS`) load first.
-4. **Run the main module.** Your entry file is resolved, compiled and run from top to bottom. This is synchronous: timers and I/O you start here are only *registered*.
-5. **Drain microtasks.** When the main module's synchronous code ends, the `process.nextTick` queue and then the promise microtask queue are emptied (in an ES module entry the order differs; see topic 8).
-6. **Event loop.** libuv's `uv_run` starts turning: timers → pending → poll → check → close (topic 6). Each callback that runs is followed by another microtask drain. The loop keeps turning while any *ref'd* handle (an active timer, a listening server, an open socket) or pending request exists.
-7. **`beforeExit`.** When the loop has nothing left, Node emits `process.on('beforeExit')`. If a listener schedules new work, the loop starts again and `beforeExit` fires again when that work is done.
-8. **`exit`.** When `beforeExit` listeners add nothing, Node emits `process.on('exit', code)`. Listeners must be synchronous: the loop has stopped, so timers or I/O started here never run.
-9. **Teardown.** Node releases the environment and the isolate and the OS process ends with `process.exitCode` (0 by default).
+1. **Bootstrap, C++.** The binary starts V8's platform and its worker threads, OpenSSL, and ICU, then creates one isolate and one context. Official builds do not build that internal state from scratch. They restore a startup snapshot compiled into the binary. `process.config.variables.node_use_node_snapshot` is `true` on those builds.
+2. **Bootstrap, JavaScript.** Internal code sets up `process`, `globalThis`, timers, the module loaders, and the error handlers. `performance.nodeTiming.bootstrapComplete` marks the end.
+3. **Preload.** Modules named with `--require` or `--import`, including through `NODE_OPTIONS`, load first.
+4. **The main module.** Your file runs top to bottom, synchronously. Timers and I/O started here are only registered.
+5. **Microtasks.** When that synchronous code ends, the `process.nextTick` queue drains, then the promise queue. An ES module entry differs. Lesson 8.
+6. **The event loop.** libuv's `uv_run` turns: timers, pending, poll, check, close. After each callback, microtasks drain again. The loop continues while any ref'd handle or pending request exists.
+7. **`beforeExit`.** When nothing is left, Node emits `beforeExit`. If a listener schedules work, the loop runs again, and `beforeExit` fires again when that work is done.
+8. **`exit`.** If `beforeExit` added nothing, Node emits `exit` with the code. Listeners must be synchronous. The loop has stopped, so a timer or I/O started here never runs.
+9. **Teardown.** Node releases the isolate and the process ends with `process.exitCode`, 0 by default.
 
 text
 
@@ -100,33 +107,24 @@ text
   A signal with no listener (SIGTERM, SIGINT) or SIGKILL skips both 7 and 8.
 ```
 
-**What Node is good at, and bad at.** The single-thread design decides this:
+**Good at waiting, bad at computing on the main thread.** A request that spends 50 milliseconds on a database costs the JavaScript thread almost nothing during that wait, so other requests run. API servers, proxies, chat, streams, and CLIs fit. A long computation blocks every other callback: no timer, no new connection. Image work, a huge `JSON.parse`, encrypting a large payload, or a tight numeric loop belongs in `worker_threads`, a child process, a native addon, or another service. The thread pool is shared and small. Four slow `crypto.pbkdf2` calls fill it, and the next `fs.readFile` waits. Lesson 7.
 
-- **I/O-bound work is cheap.** A request that spends 50 ms waiting on a database costs the main thread almost nothing during those 50 ms; it handles other requests meanwhile. API servers, proxies, gateways, chat and WebSocket servers, file and stream pipelines, and CLI tooling fit well.
-- **CPU-bound work on the main thread blocks everything.** While your code computes, no other callback can run, no timer fires and no new connection is accepted. Image resizing, large JSON parsing, encryption of big payloads, machine-learning inference and tight numeric loops belong in `worker_threads`, a child process, a native addon or another service (topics 10, 62, 63).
-- **The thread pool is shared and small.** Four slow `crypto.pbkdf2` calls fill all four workers, and the next `fs.readFile` waits behind them (topic 7).
-
-**How Node differs from the browser runtime.** Both use an engine plus an event loop, but the host APIs and the security model differ:
+**Browser tab versus Node.** Both are an engine plus an event loop. The host APIs differ.
 
 | | Browser tab | Node.js |
 | --- | --- | --- |
-| Global object | `window` (also `globalThis`) | `globalThis` (also `global`); no `window`, no `document` |
+| Global object | `window` (also `globalThis`) | `globalThis` (also `global`). No `window`, no `document` |
 | DOM | Yes | No |
-| File system, processes, raw TCP/UDP | No | `node:fs`, `node:child_process`, `node:net`, `node:dgram` |
-| Sandbox | Strict (same-origin policy, permissions prompts) | None by default: code has the OS permissions of the user who runs it. The opt-in permission model is `--permission` (added in v20.0.0, stable since v23.5.0 / v22.13.0) |
-| Modules | Classic scripts and ES modules; no CommonJS | CommonJS and ES modules |
-| Event loop | HTML spec loop (tasks, microtasks, rendering steps) | libuv phases plus `process.nextTick` |
-| Who picks the engine version | The user's browser | You, when you choose the Node version |
-| Web APIs present in both | `fetch`, `URL`, `TextEncoder`, `AbortController`, `structuredClone`, Web Streams, `navigator` (partial in Node, added in v21.0.0) | |
+| Files, processes, raw TCP/UDP | No | `node:fs`, `node:child_process`, `node:net`, `node:dgram` |
+| Sandbox | Same-origin policy, permission prompts | None by default. Code has the OS user's permissions. Opt in with `--permission` |
+| Modules | Classic scripts and ES modules. No CommonJS | CommonJS and ES modules |
+| Event loop | Tasks, microtasks, rendering | libuv phases plus `process.nextTick` |
+| Who picks the engine | The user's browser | You, by choosing the Node version |
+| In both | `fetch`, `URL`, `TextEncoder`, `AbortController`, `structuredClone`, Web Streams, and a partial `navigator` | |
 
-**Release lines.** Node ships a new major version on a fixed calendar, and each major moves through phases:
+**Release lines.** A major version moves through phases. Current is the newest major, for its first six months. New features land here. Breaking changes wait for the next major. Active LTS, long-term support, is an even-numbered major about six months after release. It gets a codename. 24 is Krypton. It stays Active for 12 months and receives bug fixes, security fixes, and back-ported features the release team audited. Maintenance is the next 18 months: critical bugs and security fixes only. Active plus Maintenance is about 30 months. End-of-life means no more releases, including security fixes.
 
-- **Current**: the newest major, for its first six months. Gets new features first; breaking changes land only in the next major.
-- **Active LTS** (long-term support): an even-numbered major becomes LTS about six months after release, gets a codename (24 is "Krypton"), and stays Active for 12 months. It receives bug fixes, security fixes and back-ported features that the release team audited.
-- **Maintenance**: the next 18 months. Critical bug fixes and security fixes only. Together, Active plus Maintenance give about 30 months of LTS.
-- **End-of-Life (EOL)**: no more releases, including security fixes.
-
-Up to Node.js 26, odd-numbered majors (23, 25) never become LTS: they stay Current for about six months, get about two months of Maintenance, and then reach EOL (Node 25: released 2025-10-15, Maintenance from 2026-04-01, EOL 2026-06-01). nodejs.org states the plan changes from Node.js 27: "the release cycle will be annual and every major version will move to LTS status after its six-month Current phase (and six additional months of Alpha phase)."
+Up through Node 26, odd majors such as 23 and 25 never become LTS. They stay Current for about six months, get about two months of Maintenance, then end of life. Node 25 was released 2025-10-15, Maintenance from 2026-04-01, end of life 2026-06-01. From Node 27 the plan changes. nodejs.org says the cycle becomes annual, and every major moves to LTS after six months Current, plus six months of Alpha before that.
 
 text
 
@@ -147,13 +145,13 @@ One even line, as a timeline:
   v24:  2025-05-06            2025-10-28                     2026-10-20             2028-04-30
 ```
 
-**Reading the schedule on 7 Oct 2026.** Node 24 is Active LTS until 2026-10-20, then Maintenance until 2028-04-30. Node 26 is Current and becomes Active LTS on 2026-10-28. Node 22 is in Maintenance until 2027-04-30. Node 20 reached EOL on 2026-04-30. For production, pick the newest Active LTS, or a Maintenance line that still has enough life left for your upgrade cycle. Node 24 is the right default today, and moving to Node 26 after 2026-10-28 keeps you on Active LTS.
-
 > ⚠️ Unverified: `schedule.json` lists Node 27 with `alpha` 2026-10-28, `start` 2027-04-22, `maintenance` 2027-10-20 and `end` 2030-04-30, but no `lts` date. I could not find an official nodejs.org page that gives Node 27's LTS start date or explains the `maintenance` date for the new annual cycle, so read those two fields as provisional.
+
+For production, run Active LTS, or a Maintenance line that still covers your upgrade cycle. The dates for 7 Oct 2026 are in Good to know. The diagram above is the source.
 
 ## Code examples
 
-**Example 1 — the layers, as real version numbers.** `process.versions` lists the components compiled into this binary.
+**Example 1. The layers, as version numbers.** `process.versions` lists what this binary was built with.
 
 javascript
 
@@ -180,9 +178,9 @@ console.log('built-in modules:', require('node:module').builtinModules.length);
 //   built-in modules: 72
 ```
 
-`v8` is the engine (layer 1), `uv` is libuv (layer 2), and `openssl`, `llhttp` and `zlib` are C libraries wired in through the C++ bindings (layer 3). `undici` is the JavaScript HTTP client behind global `fetch`, part of the core library (layer 4). `process.release.lts` holds the codename only on LTS builds; on a Current build it is `undefined`. Do not use `process.binding()` to look at the C++ layer: it is internal and deprecated (DEP0111).
+`v8` is the engine. `uv` is libuv. `openssl`, `llhttp`, and `zlib` are C libraries behind the C++ bindings. `undici` is the JavaScript HTTP client behind global `fetch`, part of the core library. `process.release.lts` is the codename on LTS builds and `undefined` on a Current build. Do not use `process.binding()` to peek at the C++ layer. It is internal and deprecated, DEP0111.
 
-**Example 2 — the threads of a real Node process (Linux only).** The thread pool starts lazily, on the first job that needs it.
+**Example 2. The threads of a real Node process, Linux only.** The pool starts on the first job that needs it.
 
 javascript
 
@@ -211,6 +209,7 @@ crypto.pbkdf2('pw', 'salt', 1000, 32, 'sha256', () => {
 //   MainThread, DelayedTaskSche, V8Worker, V8Worker, V8Worker, V8Worker, SignalInspector, libuv-worker, libuv-worker, libuv-worker, libuv-worker
 ```
 
+
 bash
 
 ```
@@ -219,11 +218,11 @@ after first pool job: 15 threads
 MainThread, DelayedTaskSche, V8Worker, V8Worker, V8Worker, V8Worker, SignalInspector, libuv-worker, libuv-worker, libuv-worker, libuv-worker, libuv-worker, libuv-worker, libuv-worker, libuv-worker
 ```
 
-Only `MainThread` runs your JavaScript. The four `V8Worker` threads belong to V8's platform (concurrent garbage collection, background compilation), `DelayedTaskSche` schedules V8's delayed tasks, `SignalInspector` waits for the `SIGUSR1` that starts the debugger, and the `libuv-worker` threads are the thread pool. The thread names come from `/proc`, so this example is Linux-only.
+Only `MainThread` runs your JavaScript. The four `V8Worker` threads are V8's platform, for concurrent garbage collection and background compilation. `DelayedTaskSche` schedules V8's delayed tasks. `SignalInspector` waits for the `SIGUSR1` that starts the debugger. `libuv-worker` threads are the pool. The names come from `/proc`, so this is Linux-only.
 
-> ⚠️ Unverified: the thread names and counts on macOS and Windows; I could only run this on Linux.
+> ⚠️ Unverified: the thread names and counts on macOS and Windows. This was run only on Linux.
 
-**Example 3 — I/O-bound waits overlap; CPU-bound work blocks.**
+**Example 3. Waiting overlaps. Computing on the main thread does not.**
 
 javascript
 
@@ -260,9 +259,9 @@ function cpuBound(ms) {
 //   10 ms timer fired after 301 ms
 ```
 
-A hundred waits of 50 ms finish in about 50 ms, not 5,000 ms, because waiting uses no JavaScript thread time. The 10 ms timer fires after 300 ms: its time was up long before, but the timers phase cannot run while the main thread is inside `cpuBound`.
+A hundred waits of 50 milliseconds finish in about 50 milliseconds, not 5,000, because waiting uses no JavaScript time. The 10 millisecond timer fires after 300 milliseconds. Its delay was already over, but the timers phase cannot run while the main thread is inside `cpuBound`.
 
-**Example 4 — what this runtime has, compared with a browser tab.**
+**Example 4. What this runtime has, compared with a browser tab.**
 
 javascript
 
@@ -291,9 +290,9 @@ console.log('globalThis === global:', globalThis === global);
 //   globalThis === global: true
 ```
 
-`require` is found here because a CommonJS module's code is wrapped in a function that receives `require` as a parameter; it is not a property of `globalThis` and does not exist in ES modules. `localStorage` is missing because on Node 24 it needs `--experimental-webstorage` (added in v22.4.0). `fetch` stopped being experimental in v21.0.0.
+`require` shows up here because a CommonJS file is wrapped in a function that receives `require` as a parameter. It is not on `globalThis`, and it does not exist in ES modules. `localStorage` is missing unless you pass `--experimental-webstorage`.
 
-**Example 5 — Node's own start-up milestones.** `performance.nodeTiming` records when each bootstrap step finished.
+**Example 5. Node's own startup milestones.** `performance.nodeTiming` records when each bootstrap step finished.
 
 javascript
 
@@ -331,9 +330,9 @@ process.on('exit', () => {
 //   in exit: loopExit = 46.4 ms | loop iterations: 1
 ```
 
-`loopStart` is `-1` while the main module runs, which proves step 4 of the lifecycle happens before the event loop exists. `loopExit` has a value only inside an `exit` listener. `uvMetricsInfo` was added in v22.8.0.
+`loopStart` is `-1` while the main module runs, so step 4 happens before the event loop exists. `loopExit` has a value only inside an `exit` listener.
 
-**Example 6 — the whole lifecycle in one file.**
+**Example 6. The whole lifecycle in one file.**
 
 javascript
 
@@ -372,9 +371,9 @@ console.log('1. main module, synchronous code');
 //   7. exit (code 0)
 ```
 
-Read it against the numbered steps: main module (4), microtasks (5), the loop (6), `beforeExit` (7), which ran **twice** because the first listener call scheduled a timer, then `exit` (8). The timer created inside the `exit` listener never ran. The timer uses 5 ms, not 0 ms, because at the top level a 0 ms timer and `setImmediate` race (topic 6).
+Read it against the steps. Main module, microtasks, the loop, then `beforeExit`, which ran twice because the first listener scheduled a timer, then `exit`. The timer created inside the `exit` listener never ran. The timer uses 5 milliseconds, not 0, because at the top of a file a 0 millisecond timer and `setImmediate` race. Lesson 6.
 
-**Example 7 — edge case: `process.exit()` and uncaught errors skip `beforeExit`.**
+**Example 7. `process.exit()` and an uncaught error skip `beforeExit`.**
 
 javascript
 
@@ -391,6 +390,7 @@ if (process.argv[2] === 'throw') {
 process.exitCode = 3;          // the code the process will end with
 process.exit();                // ends now: pending timer dropped, no beforeExit
 ```
+
 
 bash
 
@@ -412,9 +412,9 @@ Node.js v24.19.0
 exit status: 1
 ```
 
-Three things to notice. First, `beforeExit` never fires in either run: the docs state it "is not emitted for conditions causing explicit termination, such as calling `process.exit()` or uncaught exceptions". So `beforeExit` is the wrong place for cleanup that must always happen; use `exit` for synchronous cleanup, and signal handlers plus explicit shutdown code for asynchronous cleanup (topic 66). Second, `process.exit()` drops the pending 100 ms timer without running it. Third, `process.exit()` with no argument uses `process.exitCode`, and an uncaught exception sets the code to 1.
+`beforeExit` does not fire in either run. The docs say it is not emitted for explicit termination, such as `process.exit()` or an uncaught exception. Use `exit` for synchronous cleanup, and signal handlers for asynchronous cleanup. `process.exit()` drops the pending 100 millisecond timer. With no argument it uses `process.exitCode`. An uncaught exception sets the code to 1.
 
-One more exit path skips **both** events: a signal that has no listener. `SIGTERM` is what `kill <pid>`, Docker and Kubernetes send on shutdown.
+A signal with no listener skips both events. `SIGTERM` is what `kill`, Docker, and Kubernetes send.
 
 javascript
 
@@ -426,6 +426,7 @@ setTimeout(() => {}, 5000);                                  // keeps the loop a
 setTimeout(() => process.kill(process.pid, 'SIGTERM'), 50);  // what `kill <pid>` sends
 ```
 
+
 bash
 
 ```
@@ -434,9 +435,9 @@ Terminated                 node sigterm.js
 exit status: 143
 ```
 
-Status 143 is 128 + 15 (the number of `SIGTERM`). `Terminated` is printed by the shell, not by Node. Adding `process.on('SIGTERM', handler)` replaces the default action, and from there you decide when to exit; that is the basis of graceful shutdown (topic 66).
+Status 143 is 128 plus 15, the number of `SIGTERM`. `Terminated` is printed by the shell, not by Node. `process.on('SIGTERM', handler)` replaces the default. From there you decide when to exit.
 
-**Example 8 — reading the release schedule in code.**
+**Example 8. Reading the release schedule in code.**
 
 javascript
 
@@ -465,6 +466,7 @@ for (const [line, r] of Object.entries(schedule)) {
 }
 ```
 
+
 bash
 
 ```
@@ -481,56 +483,59 @@ Status on 2026-10-28:
   v27  Alpha        lts -           maintenance 2027-10-20  end 2030-04-30
 ```
 
-Top-level `await` works because the file is an ES module (`.mjs`). The JSON is the same data the nodejs.org release table is built from, so the script gives you a check you can run in CI ("fail if our Docker base image's major is within 90 days of `end`").
+Top-level `await` works because the file is an ES module, `.mjs`. The JSON is the same data the nodejs.org release table is built from, so a CI job can fail when the Docker base image's major is within 90 days of `end`.
 
 ## Common mistakes & gotchas
 
-- **"Node is single-threaded."** Only your JavaScript is. A plain `node` process on Linux has 7 OS threads at startup and 11 after the first thread-pool job (Example 2). The accurate sentence: one JavaScript thread per isolate, plus libuv and V8 helper threads.
-- **"Everything async uses the thread pool."** Network I/O (TCP, UDP, HTTP, sockets) uses kernel readiness events (`epoll`/`kqueue`/IOCP), not the pool. The pool runs file system calls, `dns.lookup`, async `crypto.pbkdf2`/`scrypt`/`randomBytes`/`randomFill`/`generateKeyPair`, and zlib.
-- **Calling Node a framework or a language.** Node is a runtime. Express is a framework that runs in it; JavaScript is the language it runs.
-- **Expecting browser globals.** `window`, `document` and `localStorage` (without a flag) do not exist. Code that must run in both uses `globalThis` and feature checks.
-- **Deploying a Current or odd-numbered release to production.** A Current line changes quickly and has not yet been audited for LTS, and odd lines up to 25 reach EOL about seven and a half months after release. Use Active LTS or Maintenance.
-- **Doing async work in an `exit` listener.** The loop has stopped; a `setTimeout`, a log write over the network or a database `close()` started there never completes.
-- **Using `beforeExit` for cleanup.** It does not fire on `process.exit()`, on an uncaught exception or on a signal (Example 7). An unhandled `SIGTERM` skips `exit` as well.
-- **Using `process.binding()`.** It is internal, deprecated (DEP0111), and unavailable under the permission model. Use the public modules.
+- **"Node is single-threaded."** Only your JavaScript is. A plain `node` process on Linux has 7 OS threads at startup and 11 after the first thread-pool job. One JavaScript thread per isolate, plus libuv and V8 helper threads.
+- **"Everything async uses the thread pool."** Network I/O uses kernel readiness (`epoll`, `kqueue`, or IOCP). The pool runs file system calls, `dns.lookup`, async `crypto.pbkdf2`, `scrypt`, `randomBytes`, `randomFill`, `generateKeyPair`, and zlib.
+- **Calling Node a framework or a language.** Node is a runtime. Express is a framework. JavaScript is the language.
+- **Expecting browser globals.** `window`, `document`, and `localStorage` without a flag do not exist. Shared code uses `globalThis` and feature checks.
+- **Deploying Current, or an odd major, to production.** A Current line has not been audited for LTS. Odd lines up through 25 reach end of life about seven and a half months after release. Use Active LTS or Maintenance.
+- **Async work in an `exit` listener.** The loop has stopped. A `setTimeout`, a network log, or a database `close()` started there never finishes.
+- **Using `beforeExit` as the only cleanup.** It does not fire on `process.exit()`, an uncaught exception, or a signal. An unhandled `SIGTERM` skips `exit` too.
+- **Using `process.binding()`.** Internal, deprecated as DEP0111, and unavailable under the permission model. Use the public modules.
 
 ## Best practices
 
-- **Pin the runtime version.** Put the major in `.nvmrc` / `.node-version` and in your Docker `FROM node:24-slim` tag, and set `"engines"` in `package.json` as documentation (npm only warns on a mismatch unless `engine-strict=true`; see topic 14).
-- **Track the schedule.** Upgrade to the next LTS during its Active phase, well before your current line's EOL. Example 8 shows a check you can automate.
-- **Keep CPU work off the main thread.** Anything that takes more than a few milliseconds per request goes to `worker_threads`, a child process or another service.
-- **Size the thread pool on purpose.** If you do heavy `fs`, `crypto` or `zlib` work, set `UV_THREADPOOL_SIZE` in the environment before Node starts (setting it from inside a running script is unreliable once the pool has started).
-- **Put shutdown logic in signal handlers, not `beforeExit`.** Handle `SIGTERM`/`SIGINT`, close servers and pools, then let the loop empty or call `process.exit()` (topic 66).
-- **Use `node:` prefixes for built-ins** (`require('node:fs')`). It makes clear the module is part of the core library and cannot be shadowed by a package from npm.
+- Pin the major in `.nvmrc` or `.node-version` and in the Docker `FROM` tag. `"engines"` in `package.json` is documentation. npm only warns unless `engine-strict=true`. Lesson 14.
+- Move to the next LTS during its Active phase, before your line's end of life. Example 8 is a check you can automate.
+- Keep CPU work off the main thread when it takes more than a few milliseconds per request.
+- If you do heavy `fs`, crypto, or zlib, set `UV_THREADPOOL_SIZE` in the environment before Node starts. Setting it from inside a running script is unreliable once the pool exists.
+- Put shutdown in `SIGTERM` and `SIGINT` handlers, not in `beforeExit`. Close servers and pools, then let the loop empty or call `process.exit()`.
+- Require built-ins as `node:fs`. The prefix cannot be shadowed by an npm package of the same name.
 
 ## ⭐ Interview lens
 
 > **Q: “What is Node.js, in one precise sentence?”**  
-> A: A JavaScript runtime: one executable that embeds the V8 engine, uses libuv for its event loop, non-blocking network I/O and a thread pool, and exposes the operating system to JavaScript through C++ bindings and a built-in library of modules such as `fs`, `net` and `http`. *Trap:* "a JavaScript framework" or "server-side JavaScript language" are both wrong.
+> Node.js is a JavaScript runtime: one executable that embeds the V8 engine, uses libuv for the event loop, non-blocking network I/O, and a thread pool, and exposes the operating system through C++ bindings and built-in modules such as `fs`, `net`, and `http`. You hand it a file. V8 runs that file. libuv keeps the process alive while work is pending and runs callbacks one at a time. The limit of the sentence is the slogan people substitute. It is not a framework, and it is not a language. Express is a framework that runs on it. JavaScript is the language V8 implements.
 
 > **Q: “If Node is single-threaded, how does it serve 10,000 connections?”**  
-> A: Only the JavaScript is single-threaded. The sockets are non-blocking; libuv registers them all with the kernel (`epoll` on Linux) and the main thread sleeps in one `epoll_wait` call until some are ready, then runs their callbacks one by one. A connection that is waiting costs memory, not a thread. Blocking file and DNS work goes to libuv's 4-thread pool. The limit is CPU time per callback: one slow synchronous callback delays all 10,000.
-
-> **Q: “Which Node version would you deploy today, and why?”**  
-> A: On 7 Oct 2026, Node 24 (Krypton): it is Active LTS until 2026-10-20, then Maintenance until 2028-04-30. Node 26 becomes Active LTS on 2026-10-28, so I would plan that upgrade next. I would not deploy a Current line, and I would leave Node 22 (Maintenance, EOL 2027-04-30) soon.
+> Only the JavaScript is single-threaded. The sockets are non-blocking. libuv registers them with the kernel, `epoll` on Linux, and the main thread sleeps in one `epoll_wait` until some are ready, then runs their callbacks one by one. A connection that is waiting costs memory, not a thread. Blocking file and DNS work goes to libuv's pool of 4 threads. The limit is CPU time per callback. One slow synchronous callback delays all 10,000, because nothing else can run on that thread until it returns.
 
 > **Q: “What is the difference between `beforeExit` and `exit`?”**  
-> A: `beforeExit` fires when the event loop runs out of work; its listener may schedule more work, and then the loop continues and `beforeExit` fires again later. It is not emitted for `process.exit()` or uncaught exceptions. `exit` fires once, just before the process ends, in all of those cases; its listeners must be synchronous because the loop is gone. Neither fires when a signal with no listener (`SIGTERM`, `SIGINT`) or `SIGKILL` ends the process.
+> `beforeExit` fires when the event loop has no work left. A listener may schedule more work, the loop runs again, and `beforeExit` can fire again. It does not fire for `process.exit()` or an uncaught exception. `exit` fires once, just before the process ends, including those cases, and its listeners must be synchronous because the loop is gone. A timer started in `exit` never runs. Neither event fires when a signal with no listener ends the process, such as `SIGTERM`, `SIGINT`, or `SIGKILL`. For cleanup that must be async, handle the signal yourself.
 
 > **Q: “Name things that exist in the browser but not Node, and the reverse.”**  
-> A: Browser only: `window`, `document`, the DOM, `localStorage` (Node 24 needs a flag), a same-origin sandbox. Node only: `process`, `Buffer`, `require` and CommonJS, `fs`, `child_process`, raw TCP/UDP, `setImmediate`, `process.nextTick`. Both: `fetch`, `URL`, `AbortController`, `TextEncoder`, Web Streams, `structuredClone`.
+> The browser has `window`, `document`, the DOM, and a same-origin sandbox. Node has `process`, `Buffer`, CommonJS `require`, `fs`, `child_process`, raw TCP and UDP, `setImmediate`, and `process.nextTick`. Both have `fetch`, `URL`, `AbortController`, `TextEncoder`, Web Streams, and `structuredClone`. `localStorage` is not there on Node 24 unless you pass a flag. The limit is assuming a shared API behaves the same. Node has no sandbox by default. Code runs with the permissions of the user who started the process.
 
 ## Cheat-card
 
-- **Node =** V8 (engine) + libuv (event loop, async I/O, thread pool) + C++ bindings + core JS library, in one binary.
-- **Runtime ≠ language ≠ framework:** JavaScript is the language, Node the runtime, Express a framework.
-- **Threads:** 1 JS main thread; libuv pool = 4 by default (`UV_THREADPOOL_SIZE`); V8 helper threads; network I/O uses the kernel, not the pool.
-- **Good at:** waiting (I/O-bound). **Bad at:** computing on the main thread (CPU-bound blocks everything).
-- **Versions:** `process.versions.v8`, `.uv`, `.openssl`; `process.release.lts` = codename on LTS builds.
-- **Lifecycle:** bootstrap → preload → main module → microtasks → event loop → `beforeExit` (may restart the loop) → `exit` (sync only) → teardown.
-- **Skips `beforeExit`:** `process.exit()`, uncaught exception, signals.
-- **Release phases:** Current (6 months) → Active LTS (12 months) → Maintenance (18 months) → EOL. Odd lines up to 25 never become LTS; from 27 every major becomes LTS.
-- **On 2026-10-07:** 24 Active LTS (Maintenance from 2026-10-20), 26 Current (LTS from 2026-10-28), 22 Maintenance (EOL 2027-04-30), 20 EOL.
+- **Node** is V8, plus libuv, plus C++ bindings, plus the core JavaScript library, in one binary.
+- JavaScript is the language. Node is the runtime. Express is a framework.
+- One JavaScript thread. libuv pool defaults to 4. V8 has helper threads. Network I/O uses the kernel, not the pool.
+- Strong at I/O. A long computation on the main thread blocks everything else.
+- `process.versions` has `v8`, `uv`, and `openssl`. `process.release.lts` is the codename on LTS builds.
+- Lifecycle: bootstrap, preload, main module, microtasks, event loop, `beforeExit` (may schedule more work), `exit` (synchronous only), teardown.
+- `process.exit()`, an uncaught exception, and signals skip `beforeExit`. A signal with no listener also skips `exit`.
+
+## Good to know
+
+- Q: Which Node version would you deploy today, and why? On 7 Oct 2026, Node 24, Krypton. Active LTS until 2026-10-20, then Maintenance until 2028-04-30. Node 26 becomes Active LTS on 2026-10-28. Do not deploy a Current line. Node 22 is Maintenance until 2027-04-30.
+- On 2026-10-07 the lines are: 24 Active LTS, Maintenance from 2026-10-20, end 2028-04-30. 26 Current, LTS from 2026-10-28, end 2029-04-30. 22 Maintenance until 2027-04-30. 20 ended 2026-04-30. 25 ended 2026-06-01. 27 is not out. Alpha is listed from 2026-10-28, release 2027-04-22, end 2030-04-30, and `schedule.json` has no LTS date. See the unverified note under the schedule.
+- Phases up through Node 26: Current about 6 months, Active LTS 12 months, Maintenance 18 months, then end of life. Odd majors through 25 never become LTS. From 27, every major is planned to become LTS.
+- `--permission` was added in v20.0.0 and is stable since v23.5.0 and v22.13.0. Partial `navigator` was added in v21.0.0. `fetch` stopped being experimental in v21.0.0. `localStorage` on Node 24 needs `--experimental-webstorage`, added in v22.4.0. `uvMetricsInfo` was added in v22.8.0.
+- A plain process on Linux showed 7 threads at startup and 11 after the first pool job. Example 2.
 
 ---
 
@@ -543,3 +548,4 @@ Top-level `await` works because the file is an ES module (`.mjs`). The JSON is t
 - [process: 'beforeExit' and 'exit' events nodejs.org](https://nodejs.org/api/process.html)
 - [libuv design overview docs.libuv.org](https://docs.libuv.org/en/v1.x/design.html)
 - [Don't Block the Event Loop (or the Worker Pool) nodejs.org](https://nodejs.org/en/learn/asynchronous-work/dont-block-the-event-loop)
+

@@ -13,22 +13,29 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A scheduled job is work that starts because the clock matched a rule, not because a user called you. The rule is usually a cron expression: minute, hour, day of month, month, and day of week. A scheduler waits until that slot arrives and starts the job. It exists for reports, cleanups, partner syncs, and reminders. The trade-off is duplicates. Every copy of the app computes the same slot, so a second start has to notice the job already ran.
+
 ## Why it matters
 
-Most backends have work that nobody asks for: a nightly report, a cleanup of expired sessions, a sync with a partner API every ten minutes, a reminder email at 09:00 in the customer's time zone. Something has to start that work at the right moment, and the ways it goes wrong are different from request handling:
+Most backends have work that nobody asks for: a nightly report, a cleanup of expired sessions, a partner sync every ten minutes, a reminder at 09:00 in the customer's time zone. The ways that goes wrong are different from request handling.
 
-- **It runs once per instance.** You scale the API from one process to three, every process schedules the same cron, and every customer gets three copies of the report. Example 2 shows exactly that.
-- **It runs zero times.** The only instance that ran the scheduler was restarting at 03:00, or the job was scheduled in a time that does not exist on the day the clocks jump forward.
-- **It runs twice for the same slot.** A lock stops two runs from overlapping, but a slow instance can still start after the first one has finished (Example 5).
-- **It runs at the wrong time.** The server is in UTC, the business is in New York, and twice a year the offset between them changes.
+It runs once per instance. You scale from one process to three, every process schedules the same cron, and every customer gets three reports. Example 2 shows that.
 
-None of this shows up on a laptop with one process. This lesson shows each failure with real runs and then fixes it.
+It runs zero times. The only instance that held the scheduler was restarting at 03:00, or the job was scheduled in an hour that does not exist when the clocks jump forward.
+
+It runs twice for the same slot. A lock stops two runs from overlapping, and a slow instance can still start after the first one has finished and released the lock (Example 5).
+
+It runs at the wrong time. The server is in UTC, the business is in New York, and twice a year the offset between them changes.
+
+None of this shows up on a laptop with one process. This lesson shows each failure with a real run, then the fix.
 
 ## The concept, simply
 
-A **schedule** is a rule that produces points in time: "every day at 03:15", "every 10 minutes from 08:00 to 18:59 on weekdays". Each point is a **slot**. A **scheduler** watches the clock and, when a slot arrives, starts the job for that slot.
+A schedule is a rule that produces points in time: every day at 03:15, or every 10 minutes from 08:00 to 18:59 on weekdays. Each point is a slot. A scheduler watches the clock and, when a slot arrives, starts the job for that slot.
 
-The rule is almost always written as a **cron expression**: five fields (minute, hour, day of month, month, day of week), or six when the library adds a seconds field at the front.
+The rule is almost always a cron expression. Five fields: minute, hour, day of month, month, day of week. Six fields when the library adds seconds at the front.
 
 text
 
@@ -53,7 +60,7 @@ Where the scheduler lives decides most of its behaviour:
 | OS cron (`crontab`) | The `cron` daemon on one machine | One per machine that has the crontab | The daemon misses it if the machine is down |
 | Kubernetes CronJob | The CronJob controller in the cluster | One Job per slot, "approximately" (Kubernetes docs) | Late Jobs still start, within `startingDeadlineSeconds` |
 
-The rule that ties all of them together: **a slot can be started more than once, so the job must make its second start do nothing.** You do that with a **run key**, a record of "job X for slot T" that only one run can claim.
+The rule that ties them together: a slot can be started more than once, so the job must make a second start do nothing. You do that with a run key, a record of "job X for slot T" that only one run can claim.
 
 ## How it works
 
@@ -66,9 +73,9 @@ What an in-process scheduler such as node-cron does from `schedule()` to the run
 5. When the timer fires, it calls your function with a context whose `date` is the **scheduled** instant, not the moment the callback started (Example 1 prints it).
 6. It computes the next slot and goes back to step 4. If your function is still running and `noOverlap` is set, the new slot is skipped and an `execution:overlap` event is emitted.
 
-**node-cron 4 (v4 is a TypeScript rewrite; 4.6.0 is the npm `latest`).** Changes from v3, from the official migration guide and checked against the 4.6.0 type definitions: Node.js 20 or newer; ESM and CommonJS builds with named exports; the `scheduled` and `runOnInit` options are removed (use `cron.createTask()` for a task that does not start, and `task.execute()` to run once now); `recoverMissedExecutions` is removed (a missed run emits `execution:missed`); `task.now()` is renamed to `task.execute()`; new methods `destroy()`, `getStatus()`, `getNextRun()`, `getNextRuns(n)` and `lastRun()`; new options `noOverlap`, `maxExecutions`, `maxRandomDelay`, `logger`. 4.6.0 also has `distributed: true` with a pluggable "run coordinator" (see the duplicate-runs paragraph below).
+node-cron 4.6.0 is a TypeScript rewrite and needs Node.js 20 or newer. The options you will actually use are `timezone`, `noOverlap`, and `logger`, plus `task.execute()`, `destroy()`, and `getNextRuns(n)`. `ctx.date` is the scheduled instant, not the moment the callback started. The v3 options that were removed, and the `distributed` flag, are in Good to know.
 
-**BullMQ job schedulers (added in v5.16.0; the old `repeat` option was removed in v6.0.0).** `queue.upsertJobScheduler(id, { pattern | every, tz }, template)` stores one scheduler under `id` in Redis. "Upsert" means calling it again with the same id updates the scheduler instead of adding a second one, so every instance can call it on boot. The scheduler always keeps one delayed job for the next slot. Its job id is `repeat:<schedulerId>:<slot in ms>` (Example 6 prints it), so one slot cannot produce two jobs. The BullMQ docs add that "the scheduler will only generate new jobs when the last job begins processing", so a busy queue gets fewer runs than the pattern asks for. The v6.0.0 changelog lists the removal: "the repeat option on Queue#add and Queue#addBulk, the Repeat class, Queue#getRepeatableJobs(), Queue#removeRepeatable(), and Queue#removeRepeatableByKey()". In 6.3.13 `queue.add(name, data, { repeat })` does not throw: it adds one plain job and no scheduler (Example 6). v6 also stopped installing ioredis for you ("ioredis is no longer installed as a direct dependency"), so install it yourself.
+BullMQ job schedulers store one scheduler under an id in Redis. `queue.upsertJobScheduler(id, { pattern or every, tz }, template)` updates that id instead of adding a second scheduler, so every instance can call it on boot. The scheduler keeps one delayed job for the next slot. Its job id is `repeat:<schedulerId>:<slot in ms>`, so one slot cannot produce two jobs. The docs add that "the scheduler will only generate new jobs when the last job begins processing", so a busy queue gets fewer runs than the pattern asks for. In 6.3.13, `queue.add` with a `repeat` option does not throw. It adds one plain job and no scheduler (Example 6). Install `ioredis` yourself. v6 no longer installs it for you. The version it was added, and the removed method names, are in Good to know.
 
 **OS cron.** On Ubuntu 26.04 (`cron` 3.0pl1-200ubuntu1), `crontab -e` edits a per-user file and the `cron` daemon checks all crontabs once a minute. Facts from `man 5 crontab` and `man 8 cron` on that system:
 
@@ -840,16 +847,16 @@ kubeconform (downloaded from its GitHub release, SHA-256 checked against the rel
 ## ⭐ Interview lens
 
 > **Q: “We run three replicas and our nightly job ran three times. How do you fix it?”**  
-> A: Each replica runs its own scheduler and computes the same slot, so all three fire. First, make the job safe to run twice: a run key per (job, slot) that one run claims, then works, then marks done. Then remove the extra triggers: either move the schedule to one place (a BullMQ job scheduler, a Kubernetes CronJob, an elected leader), or wrap the job in a lock (Redis `SET NX PX` with a token and Lua release, or `pg_try_advisory_lock`). *Trap:* a lock alone. It stops concurrent runs, but a slow replica that starts after the first one released the lock runs the slot again.
+> A: Each replica runs its own in-process scheduler. They parse the same cron expression, compute the same next slot, and fire within milliseconds of each other. Example 2 is that with three processes. First I make a second start do nothing. The run key is a row keyed by job and slot, and the slot comes from the scheduled time, `ctx.date` or the BullMQ job id, never from `Date.now()`. One insert wins. If the row is already `done`, stop. If it is `processing` and younger than the lease, someone else owns it. If it is older, the owner crashed, so take it over. Then do the work, and mark `done` only after it succeeds. Second, I stop the extra triggers. A BullMQ job scheduler stores one scheduler in Redis and every instance can upsert the same id. A Kubernetes CronJob creates the Job in the cluster, not in each pod. Or a lock: Redis `SET key token NX PX ttl`, released by a Lua compare-and-delete, or `pg_try_advisory_lock`. The trap is the lock alone. It stops overlap. A slow replica that starts after the first one released the lock runs the slot again. The run key is what remembers the slot is finished.
 
 > **Q: “Redis lock or PostgreSQL advisory lock for a scheduled job?”**  
-> A: Both give "one winner right now". A Redis lock is a key with a TTL: if the holder crashes, others wait for the TTL; if the job outlives the TTL, two can run; a failover can lose it. A session advisory lock lives as long as the database connection: a crash frees it at once, it has no TTL to tune, but it ties up a connection for the whole job, and through a pool the unlock can land on the wrong connection. If the job already writes to PostgreSQL, a run-key row in the same database is usually the strongest option, because it also remembers that the slot is done.
+> A: Both answer "who runs right now". A Redis lock is a key with a TTL. If the holder crashes, everyone else waits out the TTL. If the job runs longer than the TTL, a second worker can take the lock while the first is still going. The release has to be compare-and-delete with the token you stored, or an expired holder deletes the new owner's lock. A session advisory lock, `pg_try_advisory_lock`, returns true to one session and false to the rest, and PostgreSQL holds it until you unlock or the session ends. A crash frees it as soon as the connection closes. There is no TTL to tune, and it holds a connection for the whole job. Through a pool the unlock can land on a different connection, return false, and leave the lock held. Use a dedicated client, or `pg_try_advisory_xact_lock`, which ends with the transaction. If the job already writes to PostgreSQL, I prefer the run-key row. It is one winner now, and it also remembers that the slot is done after the lock would have been released.
 
 > **Q: “What happens to a job scheduled at 01:30 New York time on the day the clocks go back?”**  
-> A: 01:30 exists twice, once in EDT and once in EST. A daily `30 1 * * *` ran once in node-cron, cron-parser and BullMQ (at the EDT one). A `*/30` schedule differs: node-cron skips the repeated hour, cron-parser and BullMQ run 01:00 and 01:30 twice. On the spring-forward day, 02:30 does not exist: node-cron skips that day, cron-parser and BullMQ move it to 03:30, and Debian cron runs it soon after the change. So keep daily jobs out of that window, or schedule in UTC, and make them idempotent by a UTC slot key anyway.
+> A: A cron expression is wall-clock time. On 1 November 2026, America/New_York falls back at 02:00, so 01:00 to 01:59 happens twice, once in EDT and once in EST. A daily `30 1 * * *` ran once, at the EDT 01:30, in node-cron 4.6.0, cron-parser 5.10.2, and BullMQ 6.3.13. A `*/30` schedule does not agree. node-cron skips the repeated hour: 01:00 EDT, 01:30 EDT, then 02:00 EST. cron-parser and BullMQ run both passes, so 01:00 and 01:30 happen twice. BullMQ uses cron-parser for pattern slots, which is why those two match. On the spring-forward day, 8 March 2026, 02:00 to 02:59 does not exist. node-cron skips a daily 02:30. cron-parser and BullMQ move it to 03:30 EDT. Debian cron, for a change under 3 hours, runs a fixed time in the skipped hour soon after the change, and does not re-run a job in a repeated hour. So I keep a once-a-day job out of 01:00 to 03:00 in a US zone, or I schedule it in UTC, and the run key stays a UTC instant so the two 01:30s would still be different keys.
 
 > **Q: “What do `concurrencyPolicy` and `startingDeadlineSeconds` do on a Kubernetes CronJob?”**  
-> A: `concurrencyPolicy` controls overlap between Jobs of the same CronJob: `Allow` (default) lets them overlap, `Forbid` skips a slot while the previous Job runs, `Replace` stops the old Job and starts the new one. `startingDeadlineSeconds` is how late a Job may still start; past it, the slot is skipped (unset means no deadline, under 10 s may never schedule). Neither makes a CronJob exactly-once: the docs say a Job is created "approximately once" per slot and ask for idempotent Jobs. *Trap:* expecting `Forbid` to stop duplicates from a second CronJob or another scheduler; it only looks at its own Jobs.
+> A: A CronJob creates a Job for each slot, and the Job creates Pods. `concurrencyPolicy` is about overlap between Jobs of this one CronJob. `Allow` is the default and lets them overlap. `Forbid` skips a slot while the previous Job is still running. `Replace` stops the running Job and starts the new one. It does not look at any other CronJob. `startingDeadlineSeconds` is how late a Job may still be created. Past that, the slot is skipped. Unset means no deadline. The docs warn that a value under 10 seconds may never schedule, because the controller checks about every 10 seconds, and that more than 100 missed slots means the Job is not started. Neither field is exactly-once. The docs say a CronJob creates a Job "approximately once" per slot, and sometimes two Jobs or none, so the Job should be idempotent. Since Kubernetes 1.32 the Job carries `batch.kubernetes.io/cronjob-scheduled-timestamp` with the slot time, which is the run key you claim. `timeZone` is an IANA name. Without it, the controller uses its own zone. `timeZone` has been stable since 1.27. CronJob itself has been stable since 1.21.
 
 ## Cheat-card
 
@@ -861,7 +868,14 @@ kubeconform (downloaded from its GitHub release, SHA-256 checked against the rel
 - **One run per slot:** lock (Redis token + `SET NX PX` + Lua release, or `pg_try_advisory_lock` on a dedicated connection / `pg_try_advisory_xact_lock`) + run key `(job, slot)` claim → work → done.
 - **Leader election:** one lease holder runs schedules; failover = lease time; still needs run keys.
 - **DST (America/New_York, 2026):** fall back 1 Nov (01:00–01:59 twice), spring forward 8 Mar (02:00–02:59 missing); node-cron skips, cron-parser/BullMQ repeat or shift; schedule critical jobs outside 01:00–03:00 or in UTC.
-- **Versions used:** Node v24.19.0, node-cron 4.6.0, bullmq 6.3.13 (cron-parser 5.10.1 inside), ioredis 6.0.0, Redis 8.0.5, pg 8.23.1, PostgreSQL 18.4, cron-parser 5.10.2, kubeconform 0.8.0 with Kubernetes 1.36.0 schemas.
+- **Versions used:** Node v24.19.0, node-cron 4.6.0, bullmq 6.3.13, ioredis 6.0.0, Redis 8.0.5, pg 8.23.1, PostgreSQL 18.4, cron-parser 5.10.2, kubeconform 0.8.0.
+
+## Good to know
+
+- node-cron v3 removals, from the migration guide and the 4.6.0 types: `scheduled`, `runOnInit`, `recoverMissedExecutions`. `task.now()` became `task.execute()`. A missed run emits `execution:missed`. Also added: `maxExecutions`, `maxRandomDelay`, `lastRun()`. `distributed: true` reads `NODE_CRON_RUN=true|false` by default. A test run passed the coordinator key `x:2026-10-12T17:08:21.000Z` (task name plus slot).
+- BullMQ job schedulers were added in v5.16.0. v6.0.0 removed `repeat` on `Queue#add` and `addBulk`, the Repeat class, `getRepeatableJobs()`, `removeRepeatable()`, and `removeRepeatableByKey()`. BullMQ pins cron-parser 5.10.1. This lesson also used cron-parser 5.10.2 directly. Inside BullMQ the call is `CronExpressionParser.parse(pattern, { …opts, currentDate })`.
+- OS cron on this machine was `cron` 3.0pl1-200ubuntu1. Kubernetes CronJob schemas were 1.36.0. kubeconform caught `startingDeadlineSeconds` as a string and `timezone` (not `timeZone`) only with `-strict`. It did not catch `concurrencyPolicy: forbid` or `restartPolicy: Always`, because the schema types those as strings.
+- Day-of-month and day-of-week together are OR in OS cron, cron-parser, and BullMQ (`30 4 1,15 * 5` runs on the 1st, the 15th, and every Friday). node-cron combines them with AND.
 
 ---
 

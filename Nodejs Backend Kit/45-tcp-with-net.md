@@ -13,41 +13,41 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+`node:net` gives you a TCP socket, which is a reliable ordered stream of bytes, and a server that accepts those connections. HTTP, Postgres, Redis, and a chat protocol all sit on that stream. The trade-off is that TCP does not keep your message boundaries. Two `write` calls can arrive as one `data` event, or one write can arrive as many chunks, so you have to frame messages yourself, and `write` returning false is the only sign to stop or the process will buffer without a limit.
+
 ## Why it matters
 
-HTTP, PostgreSQL, Redis, MySQL, SMTP and the WebSocket protocol all run on top of TCP. Lesson 40 shows `http.createServer` handing you a `req` and a `res`, but underneath each pair is a `net.Socket` that the HTTP parser reads bytes from. When you write a database driver, a proxy, a custom protocol between two services, or a test double for a TCP service, you work with that socket directly through `node:net`.
+HTTP, PostgreSQL, Redis, MySQL, SMTP, and WebSocket all run on TCP. Under `http.createServer`, each request is a `net.Socket` that the HTTP parser reads. A database driver, a proxy, a custom protocol, or a test double for a TCP service uses that socket through `node:net`.
 
-TCP gives you a reliable, ordered **byte stream**, and nothing more. It does not keep message boundaries. If the client calls `write('hello')` and then `write('world')`, the server can get one `'data'` event with `helloworld`, or `hel` followed by `loworld`. Code that treats one `'data'` event as one message works on a quiet laptop and breaks under load, on a slow link, or as soon as a message is larger than about 64 KiB. Socket code also breaks in other common ways:
-
-- it ignores `write()` returning `false`, so a slow reader makes the process buffer gigabytes;
-- it expects `setTimeout` to close idle sockets (it does not);
-- it closes with `destroy()` and loses data still in the queue;
-- it crashes on an unhandled `ECONNRESET`.
+TCP gives you ordered bytes and nothing else. If the client writes `hello` and then `world`, the server might see one `data` event with `helloworld`, or `hel` and then `loworld`. Code that treats one `data` event as one message works on a quiet laptop and breaks under load, on a slow link, or when a message is larger than about 64 KiB. The other common breaks are ignoring `write` returning false, expecting `setTimeout` to close the socket, closing with `destroy` and losing queued bytes, and crashing on an unhandled `ECONNRESET`.
 
 ## The concept, simply
 
-`node:net` has two classes:
+`node:net` has two classes.
 
-- **`net.Server`**: a listening socket. `server.listen(port, host)` asks the kernel to accept TCP connections on that address. For each accepted connection the server emits `'connection'` with a new `net.Socket`.
-- **`net.Socket`**: one TCP connection, from either side. `net.createConnection({ host, port })` (alias `net.connect`) creates a client socket and starts the three-way handshake. The server gets the same kind of object for its end.
+`net.Server` is the listening socket. `server.listen(port, host)` asks the kernel to accept TCP connections. Each accepted connection emits `connection` with a new `net.Socket`.
 
-A `net.Socket` is a **Duplex stream**: it is a Readable and a Writable in one object, and the two sides are independent. The readable side holds the bytes the peer sent you; you read them with `'data'`, `pipe()` or `for await`. The writable side holds the bytes you send; you write them with `write()` and `end()`. Each side has its own buffer, its own `highWaterMark` (64 KiB by default), and its own end. The readable side ends when the peer sends a FIN (`'end'`). The writable side ends when you call `end()`, which sends your FIN. The two directions have no link between them, which is why TCP allows a "half-open" connection where one direction is closed and the other still carries data.
+`net.Socket` is one connection, from either side. `net.createConnection({ host, port })`, also called `net.connect`, starts the client's handshake. The server gets the same kind of object for its end.
+
+A socket is a Duplex stream. The readable side is what the peer sent you. The writable side is what you send. The sides are independent, each with its own buffer and its own `highWaterMark`, 64 KiB by default. The readable side ends when the peer sends FIN, the `end` event. The writable side ends when you call `end()`, which sends your FIN. TCP allows a half-open connection, one direction closed and the other still carrying data.
 
 ![The four Node stream types; the Duplex panel shows a TCP socket with independent read and write channels](assets/i23_02_ec427c97.svg)
 *Figure: Readable, Writable, Duplex and Transform streams. Look at: the Duplex panel, "TCP socket — two channels, in and out unrelated", which is exactly what a `net.Socket` is.*
 
-Underneath, each socket is a file descriptor that libuv watches with epoll (Linux), kqueue (macOS) or IOCP (Windows). No thread-pool thread is used for socket I/O. When the kernel has bytes for you, libuv reads up to 64 KiB into a Buffer and the socket emits `'data'`. When you write, libuv tries to hand the bytes to the kernel's send buffer right away and queues what does not fit.
+Under the socket is a file descriptor that libuv watches with epoll on Linux, kqueue on macOS, or IOCP on Windows. Socket I/O does not use a thread-pool thread. When the kernel has bytes, libuv reads up to 64 KiB into a Buffer and the socket emits `data`. A write tries to hand bytes to the kernel send buffer and queues what does not fit.
 
 ## How it works
 
-1. **Listen.** `server.listen(0, '127.0.0.1')` binds and listens. Port `0` makes the kernel pick a free port; read it back with `server.address().port`. `'listening'` fires when the socket is ready.
-2. **Connect.** The client resolves the host name with `dns.lookup()` (see `33-dns-module.md`), then sends SYN. The kernel on the server side completes the handshake and puts the connection in the accept queue, even before Node calls `accept()`.
-3. **Accept.** libuv accepts the connection and the server emits `'connection'` with a `net.Socket`. The client emits `'connect'`, then `'ready'`.
-4. **Exchange bytes.** `socket.write(data)` copies bytes towards the kernel; the peer's kernel acknowledges them; the peer's Node reads whatever has arrived and emits `'data'` with a chunk of any size from 1 byte to 64 KiB. Write boundaries are not kept.
-5. **Half-close.** `socket.end()` sends FIN: "I will write nothing more". The peer gets `'end'` on its readable side. By default (`allowHalfOpen: false`) the peer's socket then ends its own writable side automatically, on the next tick.
-6. **Close.** When both directions are finished, or someone calls `destroy()`, the file descriptor is closed and `'close'` fires once, with `hadError` set to `true` if an error caused the close.
+1. `server.listen(0, '127.0.0.1')` binds. Port 0 asks the kernel for a free port. Read it back from `server.address().port`. `listening` fires when the socket is ready.
+2. The client resolves the host with `dns.lookup` (lesson 33), then sends SYN. The server's kernel finishes the handshake and queues the connection before Node calls `accept`.
+3. libuv accepts it. The server emits `connection` with a `net.Socket`. The client emits `connect`, then `ready`.
+4. `socket.write(data)` copies bytes toward the kernel. The peer reads whatever has arrived and emits `data` with a chunk from 1 byte up to 64 KiB. Write boundaries are not kept.
+5. `socket.end()` sends FIN, meaning "I will write nothing more". The peer gets `end` on its readable side. With `allowHalfOpen: false`, the default, the peer then ends its own writable side on the next tick.
+6. When both directions are finished, or someone calls `destroy()`, the descriptor closes and `close` fires once. `hadError` is true if an error caused it.
 
-The handshake, the data phase and the two ways to finish look like this on the wire:
+The handshake, the data, and the two ways to finish:
 
 text
 
@@ -68,12 +68,13 @@ text
    │                                                   │  'error' ECONNRESET, 'close' (hadError=true)
 ```
 
-**Framing is your job.** Because TCP delivers a byte stream, a protocol on top of it must mark where each message ends. There are two common ways:
+**Framing is your job.** A protocol on TCP has to mark where each message ends.
 
-- **Length-prefixed**: each message starts with a fixed-size header that holds the body length, for example 4 bytes as an unsigned big-endian integer. The reader collects bytes until it has the 4-byte header, reads the length, then waits until the whole body has arrived. Binary-safe; the body may contain any bytes. PostgreSQL's wire protocol works this way (a 1-byte message type, then a 4-byte length).
-- **Delimiter-based**: each message ends with a byte that cannot appear inside a message, usually `\n` (SMTP, IRC and line-delimited JSON end each message with a line ending). The reader keeps the unfinished tail after the last delimiter and puts it in front of the next chunk. Text only, unless you escape the delimiter.
+Length-prefixed: a fixed header holds the body length, often 4 bytes as an unsigned big-endian integer. The reader waits for the header, reads the length, then waits for that many body bytes. The body may contain any bytes. PostgreSQL's wire protocol is this shape: a 1-byte type, then a 4-byte length.
 
-Both readers need the same three parts: a buffer that carries leftover bytes between `'data'` events, a loop that emits every complete message in the buffer, and a maximum size, so that a client that never sends the delimiter (or sends a length of 4 GB) cannot make you buffer without limit. A text reader also needs a `StringDecoder`, because a chunk can end in the middle of a multi-byte UTF-8 character.
+Delimiter: the message ends with a byte that cannot appear inside it, usually a newline, as in SMTP, IRC, and line-delimited JSON. The reader keeps the unfinished tail and puts it in front of the next chunk. Text only, unless you escape the delimiter.
+
+Both readers need a buffer for leftover bytes, a loop that emits every complete message, and a maximum size, so a client that never sends the delimiter, or that claims a 4 GB length, cannot make you buffer forever. A text reader also needs a `StringDecoder`, because a chunk can end in the middle of a UTF-8 character.
 
 text
 
@@ -86,29 +87,18 @@ text
  line-delimited:  a l p h a \n b e t a \n h é é l l o \n
 ```
 
-**Backpressure.** `socket.write()` returns `true` if the data went to the kernel's send buffer, and `false` if all or part of it had to be queued in Node's memory and that queue is now at or above `writableHighWaterMark` (64 KiB). The kernel's buffers come first: on loopback the send buffer of the writer and the receive buffer of the reader together hold a few megabytes, so `write()` keeps returning `true` long after the reader stopped reading. Once they are full, every further write grows `socket.writableLength`, the number of bytes queued in Node. `write()` never refuses data: if you keep writing after `false`, memory grows without limit. A correct writer stops when `write()` returns `false` and continues on `'drain'`, which fires when the queue has been flushed to the kernel. `pipe()` and `stream.pipeline()` do this for you.
+**Backpressure.** `socket.write()` returns true if the bytes fit in the kernel send buffer, and false if some had to be queued in Node and that queue is at or above `writableHighWaterMark` (64 KiB). The kernel buffers come first. On loopback the send buffer and the peer's receive buffer hold a few megabytes, so `write` stays true long after the reader stopped. Once those are full, further writes grow `socket.writableLength`, the bytes queued in Node. `write` never refuses data. If you keep going after false, memory grows without a limit. Stop on false and continue on `drain`. `pipe` and `pipeline` do this.
 
 ![A fast readable pushes into a slow writable; write() returns false, the source pauses, the buffer empties, 'drain' fires and the source resumes](assets/i26_01_e8e417ed.svg)
 *Figure: the backpressure loop between a fast producer and a slow sink. Look at: the `write() → false` → pause → `'drain'` → resume cycle; on a socket the "slow sink" is the network plus the peer that is not reading.*
 
-**Half-open connections and closing.** `end()` sends FIN after every queued byte has been written; the peer still receives all of it. `destroy()` closes the file descriptor now. Data still queued in Node is dropped, and the kernel sends a FIN for what it already holds. `resetAndDestroy()` (added in v18.3.0) sends RST: the peer gets `ECONNRESET`, and data still in the kernel buffers is discarded too. With `allowHalfOpen: false` (the default for both `net.createServer` and `new net.Socket`), a socket that receives FIN ends its own writable side on the next tick. Set `allowHalfOpen: true` when a reply has to be written after the peer has finished sending, for example a request/response protocol where the client signals "end of request" with `end()`.
+**Closing.** `end()` sends FIN after every queued byte, so the peer receives all of it. `destroy()` closes the descriptor now and drops bytes still queued in Node. The kernel sends FIN for what it already holds. `resetAndDestroy()` sends RST. The peer gets `ECONNRESET`, and data still in the kernel buffers is discarded too. With `allowHalfOpen: false`, a socket that receives FIN ends its writable side on the next tick. Set `allowHalfOpen: true` when you must reply after the peer has finished sending, for example a client that signals "end of request" with `end()`.
 
-**Timeouts and keepalive are different mechanisms.**
+**Timeouts and keepalive are different.** `socket.setTimeout(ms)` is a Node timer that restarts on every read or write. When it fires, the socket emits `timeout` and nothing else happens. The connection stays open until you `end` or `destroy`. `socket.setKeepAlive(true, initialDelay)` sets kernel options so the kernel sends probes on an idle connection and reports it dead if the probes go unanswered. That finds a peer that vanished. It is not how you close idle clients.
 
-- `socket.setTimeout(ms)` is a Node timer that restarts on every read or write. When it fires, the socket emits `'timeout'` and **nothing else happens**: the connection stays open until you call `end()` or `destroy()`.
-- `socket.setKeepAlive(true, initialDelay)` sets kernel options (`SO_KEEPALIVE`, `TCP_KEEPIDLE`) so that the kernel sends empty probe packets on an idle connection and reports the connection as dead if the probes go unanswered. Its purpose is to detect a peer that vanished (power loss, a NAT entry that expired), not to close idle clients.
-- In v24.19.0, `setKeepAlive` also takes `interval` and `count` (`TCP_KEEPINTVL`, `TCP_KEEPCNT`) and an options-object form `setKeepAlive({ enable, initialDelay, interval, count })` (both added in v24.19.0). The `keepAlive`, `keepAliveInitialDelay` and `noDelay` options of `net.createServer` and `net.createConnection` were added in v17.7.0 / v16.15.0.
+**Nagle.** By default the kernel holds small writes while earlier data is unacknowledged, and merges them. `socket.setNoDelay(true)` sends each write as soon as it can. That lowers latency for small interactive messages. It does not preserve message boundaries. The receiver can still merge or split segments.
 
-**Nagle and `setNoDelay`.** By default the kernel uses Nagle's algorithm: while some sent data is still unacknowledged, it holds back small writes and merges them into one segment. `socket.setNoDelay(true)` (or the `noDelay: true` option) turns that off, so each write goes out as soon as possible. This lowers latency for small interactive messages. It does not give you message boundaries: the receiver can still merge or split segments.
-
-**Errors and `'close'`.** A socket emits `'error'` and then `'close'` with `hadError === true`. Without an `'error'` listener, the error is thrown and the process crashes (see lesson 88). The common codes:
-
-- `ECONNREFUSED`: you connected to a port where nothing listens, so the peer kernel answered with RST.
-- `ECONNRESET`: the peer reset an open connection, for example a crash, `resetAndDestroy()`, or a close while unread data was still in its receive buffer.
-- `ETIMEDOUT`: the kernel gave up on the handshake or on keepalive probes.
-- `EPIPE`: you wrote after the peer had already closed.
-
-A clean close emits `'end'` (the peer's FIN) and then `'close'` with `hadError === false`.
+**Errors.** A socket emits `error` and then `close` with `hadError === true`. With no `error` listener, the error is thrown and the process can crash. `ECONNREFUSED` means nothing was listening and the peer answered with RST. `ECONNRESET` means the peer reset an open connection. `ETIMEDOUT` means the kernel gave up on the handshake or on keepalive probes. `EPIPE` means you wrote after the peer had closed. A clean close is `end` and then `close` with `hadError === false`.
 
 ## Code examples
 
@@ -840,59 +830,59 @@ The complete `dave` line was handled first; then the 3,000-byte unfinished line 
 
 ## Common mistakes & gotchas
 
-- **Treating one `'data'` event as one message.** Example 2: five writes became one chunk, and one 1 MiB write became 17 or 18 chunks. Always frame: a length prefix or a delimiter, plus a buffer that carries the leftover bytes.
-- **Calling `chunk.toString()` on raw chunks of text.** A multi-byte UTF-8 character can be cut across chunks and becomes `�` (Example 4). Use a `StringDecoder`, `socket.setEncoding('utf8')`, or decode only complete frames.
-- **No maximum message size.** A reader that buffers "until the newline" or "until `length` bytes" can be made to hold any amount of memory by one client. Reject oversized lengths and over-long tails.
-- **Ignoring `write()`'s return value.** `write()` accepts everything; `false` means "stop". If you keep writing to a slow peer, `writableLength` grows until the process runs out of memory. Wait for `'drain'`, use `pipeline()`, or drop the peer (Example 9).
-- **Expecting `setTimeout` to close the socket.** It only emits `'timeout'`. Call `end()` or `destroy()` in the handler.
-- **Confusing `setTimeout` with `setKeepAlive`.** The first is a Node idle timer for your own policy; the second makes the kernel detect dead peers, and its first probe comes after `initialDelay`; with `0` the kernel default applies (`net.ipv4.tcp_keepalive_time`, 7200 s here).
-- **Answering asynchronously after `'end'` with the default `allowHalfOpen: false`.** The writable side is already ended; the reply is lost (Example 6).
-- **Closing with `destroy()` when you meant `end()`.** `destroy()` drops queued data and the peer gets a normal FIN, so nothing reports the loss (Example 7).
-- **No `'error'` listener on a socket.** `ECONNRESET` from one client then crashes the whole server. Every socket, server-side and client-side, needs one.
-- **Thinking `setNoDelay(true)` preserves message boundaries.** It only stops the sender's kernel from delaying small writes; the receiver can still merge or split them.
+- **One `data` event is not one message.** Five writes can arrive as one chunk, and one large write can arrive as many. Frame with a length prefix or a delimiter, and keep the leftover bytes.
+- **`chunk.toString()` on raw text chunks.** A multi-byte character cut across chunks becomes a replacement character. Use a `StringDecoder`, `socket.setEncoding('utf8')`, or decode only a complete frame.
+- **No maximum message size.** "Until the newline" or "until `length` bytes" lets one client force an unbounded buffer.
+- **Ignoring `write()` returning false.** `writableLength` grows until the process runs out of memory. Wait for `drain`, use `pipeline`, or drop the slow peer.
+- **Expecting `setTimeout` to close the socket.** It only emits `timeout`. Call `end` or `destroy` in the handler.
+- **Confusing `setTimeout` with `setKeepAlive`.** The first is your idle policy. The second asks the kernel to detect a dead peer.
+- **Replying after `end` with the default `allowHalfOpen: false`.** The writable side is already ended, and the reply is lost.
+- **`destroy()` when you meant `end()`.** `destroy` drops queued data, and the peer still sees a normal FIN, so nothing reports the loss.
+- **No `error` listener.** `ECONNRESET` from one client crashes the process.
+- **`setNoDelay(true)` as a framing fix.** It only stops the sender delaying small writes. The receiver can still merge or split them.
 
 ## Best practices
 
-- **Pick a framing and write it down**: a 4-byte big-endian length prefix for binary data, or `\n`-terminated lines (often line-delimited JSON) for text. Put a maximum size on both.
-- **Keep the decoder separate from the socket** (a function or a Transform stream that takes chunks and emits messages), so you can unit-test it by feeding it 1-byte chunks and glued chunks, as Examples 3 and 4 do.
-- **Respect backpressure on every write path.** For one-to-one copies use `pipeline(source, socket)`. For fan-out (chat, pub/sub), check `writableLength` per client and drop or slow down clients that fall behind.
-- **Attach `'error'` to every socket and log `err.code`.** Treat `ECONNRESET` and `EPIPE` as normal disconnects, not as server failures.
-- **Use `end()` for a graceful close** and `destroy()` only when you mean to drop the connection; use `resetAndDestroy()` when the peer must see an error.
-- **Use `setTimeout` plus `end()` for idle clients** and `setKeepAlive(true, delay)` to find dead peers on long-lived connections (database pools, push channels).
-- **Listen on port 0 in tests** and read the port from `server.address().port`, so parallel test runs never collide.
+- **Pick a framing and write it down.** A 4-byte big-endian length for binary data, or newline-terminated lines for text. Put a maximum size on both.
+- **Keep the decoder off the socket,** as a function or a Transform, and unit-test it with 1-byte chunks and with glued chunks.
+- **Respect backpressure on every write.** `pipeline(source, socket)` for a one-to-one copy. For fan-out, watch `writableLength` per client and drop clients that fall behind.
+- **Attach `error` on every socket and log `err.code`.** Treat `ECONNRESET` and `EPIPE` as disconnects.
+- **`end()` for a graceful close.** `destroy()` when you mean to drop the connection. `resetAndDestroy()` when the peer must see an error.
+- **`setTimeout` plus `end()` for idle clients.** `setKeepAlive(true, delay)` to find dead peers on long-lived connections.
+- **Listen on port 0 in tests** and read `server.address().port`, so parallel runs do not collide.
 
 ## ⭐ Interview lens
 
 > **Q: “A client sends two JSON messages with two `write()` calls. Why might the server's `JSON.parse(chunk)` fail?”**  
-> A: TCP is a byte stream with no message boundaries. The two writes can arrive as one `'data'` chunk (the kernel merged them) or one message can be split across chunks (a large payload, a slow link, the 64 KiB read size). You need framing: newline-delimited JSON with a carried tail, or a length prefix. *Trap:* `setNoDelay(true)` does not fix this; it only changes when the sender transmits.
+> A: TCP is a byte stream. It keeps order and it does not keep the boundaries of your `write` calls. Two `socket.write` calls of two JSON messages can arrive as one `data` chunk, because the kernel merged them, or one message can be split across chunks, because the payload is large, the link is slow, or Node read at most 64 KiB. `JSON.parse(chunk)` then throws, or it parses the first object and silently drops the second. You frame the stream. Newline-delimited JSON carries the unfinished tail to the next chunk. A length prefix waits until it has the header and then the declared body. `setNoDelay(true)` does not fix this. It only changes when the sender transmits. The receiver can still merge and split. The limit of a delimiter is a message that contains the delimiter, and a client that never sends it. Escape the delimiter, or use a length, and cap the size.
 
 > **Q: “What does `socket.write()` returning `false` mean, and what happens if you ignore it?”**  
-> A: The data was accepted but queued in Node's memory because the kernel's send buffer is full, and the queue (`writableLength`) has reached `writableHighWaterMark`. If you keep writing, the queue grows without limit. Stop and resume on `'drain'`, or let `pipeline()` do it. On loopback the first `false` only comes after the kernel buffers (a few MB) are full.
+> A: `write` returning false means the bytes were accepted and queued in Node, because the kernel send buffer is full, and that Node queue, `writableLength`, is at or above `writableHighWaterMark`, 64 KiB by default. Stop writing. Continue when `drain` fires, which means the queue has been handed to the kernel. `pipeline` does that pause and resume for you. If you ignore the boolean, `write` still takes every chunk and `writableLength` grows with no error until the process runs out of memory. The limit on a local test is the kernel buffers. On loopback they hold a few megabytes, so the first false comes later than you expect, after those buffers fill, not at the first unread byte.
 
 > **Q: “What is the difference between `end()`, `destroy()` and `resetAndDestroy()`?”**  
-> A: `end()` flushes the queue, then sends FIN; the peer gets everything plus `'end'`. `destroy()` closes now and drops whatever is still queued in Node; the peer still sees a normal FIN. `resetAndDestroy()` sends RST; the peer gets `ECONNRESET` and `'close'` with `hadError=true`, and data in kernel buffers is discarded.
-
-> **Q: “What is a half-open connection and when do you need `allowHalfOpen: true`?”**  
-> A: One direction is closed by FIN and the other still carries data. Use `allowHalfOpen: true` when the peer signals "request complete" with `end()` and you reply afterwards, especially after async work. With the default `false`, Node ends your side on the tick after `'end'`, so an async reply hits `ERR_STREAM_WRITE_AFTER_END`.
+> A: `end()` finishes cleanly. It writes every byte still queued in Node, then sends FIN. The peer gets the whole payload and an `end` event. `destroy()` closes the descriptor now. Bytes still queued in Node are dropped, and the peer can still see a normal FIN for whatever the kernel had already accepted, so the loss is silent. `resetAndDestroy()` sends RST. The peer gets `ECONNRESET` and `close` with `hadError` true, and data still sitting in kernel buffers is discarded too. Use `end` when the peer should receive everything. Use `destroy` when you are abandoning the connection. Use the reset when the peer must treat the close as an error. The limit of `destroy` as a quick close is that in-flight `_write` work can still complete, and the peer has no signal that the tail was cut.
 
 > **Q: “Does `socket.setTimeout(30000)` close idle connections?”**  
-> A: No. It emits `'timeout'` after 30 s without reads or writes and leaves the socket open; you call `end()` or `destroy()` yourself. Kernel keepalive (`setKeepAlive`) is a separate mechanism that detects dead peers with probe packets.
+> A: No. `socket.setTimeout(30000)` starts a timer that resets whenever the socket reads or writes. After 30 seconds of silence it emits `timeout` and leaves the connection open. You call `end` or `destroy` in that handler if idle clients should go away. `setKeepAlive` is a different mechanism. It asks the kernel to send probe packets on a connection that has gone quiet, and to report the connection dead if the probes are not answered. That finds a peer that lost power or a NAT entry that expired. It is not your idle policy. The limit is passing `0` as the initial delay. The kernel default applies, and on the machine in this lesson `net.ipv4.tcp_keepalive_time` was 7200 seconds, so the first probe is two hours out.
 
 ## Cheat-card
 
-- **Server:** `net.createServer({ allowHalfOpen, keepAlive, noDelay, pauseOnConnect }, (socket) => …).listen(0, host)`; port via `server.address().port`.
-- **Client:** `net.createConnection({ host, port, noDelay, keepAlive, timeout, autoSelectFamily })`; events `'lookup'`, `'connect'`, `'ready'`.
-- **Socket = Duplex:** readable side ends on peer FIN (`'end'`); writable side ends on your `end()`; `readyState` `open` / `readOnly` / `writeOnly` / `closed`.
-- **Chunks:** 1 byte to 64 KiB, merged or split at random; never one write = one `'data'`.
-- **Framing:** length prefix (`readUInt32BE`, wait for `4 + len`) or delimiter (`split('\n')`, carry `tail`, `StringDecoder`); always a max size.
-- **Backpressure:** `write()` → `false` = stop; `'drain'` = go; `writableLength` = bytes queued in Node; kernel buffers absorb MBs first.
-- **Close:** `end()` = flush + FIN · `destroy()` = close now, drop queue · `resetAndDestroy()` = RST (v18.3.0).
-- **Half-open:** default `allowHalfOpen: false` ends your side on the tick after `'end'`.
-- **Idle:** `setTimeout(ms)` → `'timeout'` only, you close. Keepalive: `setKeepAlive(true, ms)`; `interval`/`count` and the options form added in v24.19.0.
-- **Errors:** `'error'` then `'close'(hadError=true)`; `ECONNREFUSED` (nobody listening), `ECONNRESET` (peer RST), `EPIPE`, `ETIMEDOUT`. Always add an `'error'` listener.
+- **Server:** `net.createServer(options, (socket) => ...).listen(0, host)`. Port from `server.address().port`.
+- **Client:** `net.createConnection({ host, port })`. Events: `lookup`, `connect`, `ready`.
+- **Socket is a Duplex.** The readable side ends on the peer's FIN (`end`). The writable side ends on your `end()`.
+- **Chunks are 1 byte to 64 KiB,** merged or split. One `write` is not one `data`.
+- **Framing:** a length prefix (`readUInt32BE`, then wait for 4 plus the length) or a delimiter (`split` on newline, carry `tail`, use a `StringDecoder`). Always a max size.
+- **Backpressure:** `write` returning false means stop. `drain` means go. `writableLength` is bytes queued in Node. Kernel buffers absorb megabytes first.
+- **Close:** `end` flushes and sends FIN. `destroy` closes now and drops the Node queue. `resetAndDestroy` sends RST.
+- **Half-open:** the default `allowHalfOpen: false` ends your writable side on the tick after `end`.
+- **Idle:** `setTimeout` emits `timeout` only. You close. `setKeepAlive` is the kernel's dead-peer probes.
+- **Errors:** `error`, then `close` with `hadError` true. `ECONNREFUSED`, `ECONNRESET`, `EPIPE`, `ETIMEDOUT`. Always listen for `error`.
 
----
+## Good to know
 
+- What is a half-open connection, and when do you set `allowHalfOpen: true`? One direction is closed by FIN and the other still carries data. Set it true when the peer signals "request complete" with `end()` and you reply afterwards, especially after async work. With the default false, Node ends your writable side on the tick after `end`, and an async reply hits `ERR_STREAM_WRITE_AFTER_END`.
+- `resetAndDestroy` was added in v18.3.0. In v24.19.0, `setKeepAlive` also takes `interval` and `count`, and an options object `{ enable, initialDelay, interval, count }`, both added in v24.19.0. The `keepAlive`, `keepAliveInitialDelay`, and `noDelay` options of `net.createServer` and `net.createConnection` were added in v17.7.0 and v16.15.0.
+- With `setKeepAlive` and an `initialDelay` of 0, the kernel default applies. On the lesson's machine that was `net.ipv4.tcp_keepalive_time`, 7200 seconds.
 ## Learn More
 
 - [Net | Node.js v24 Documentation nodejs.org](https://nodejs.org/docs/latest-v24.x/api/net.html)

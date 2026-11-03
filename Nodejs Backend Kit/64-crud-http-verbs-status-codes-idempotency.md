@@ -13,50 +13,52 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+CRUD is create, read, update, and delete, and HTTP gives each one a method and a success code: POST answers 201, GET answers 200, PUT or PATCH answers 200 or 204, and DELETE answers 204. Idempotent means one call and many identical calls leave the server in the same state, which is true of GET, PUT, and DELETE, and not of POST, because each POST can create another row. You follow this so caches, retries, and monitoring can trust the method and the status. The trade-off is that a retried POST needs an idempotency key, or it can create or charge twice.
+
 ## Why it matters
 
-The difference between an API that feels professional and one that feels amateur is almost entirely in the details of this topic: choosing the right HTTP method, returning the right status code, and understanding idempotency. These are not pedantic niceties. A wrong status code silently breaks clients: a browser will happily *cache* a response you returned as 200 when it should have been an error, a monitoring dashboard counting "5xx" will miss your outage because you returned 200 with `{"error": true}`, and a payment client that retries a non-idempotent request can charge a customer twice.
+The method, the status code, and idempotency decide whether clients, caches, and dashboards behave. A browser will cache a response you marked 200 when it should have been an error. A dashboard that counts 5xx will miss an outage you returned as 200 with `{"error": true}`. A payment client that retries a non-idempotent request can charge a customer twice.
 
-Interviewers lean on this topic heavily because it is a fast, reliable filter. "What status code do you return when a user tries to create a resource that already exists?" separates people who have shipped real APIs from people who have only followed tutorials. "Is PUT idempotent? Is POST? Why?" is one of the most common backend questions in existence, and getting it right — with the *reasoning*, not just the answer — signals seniority. Idempotency in particular is the backbone of reliable distributed systems: networks fail, clients retry, and only idempotent operations survive retries without corruption.
-
-Master this and you will write APIs that integrate cleanly with HTTP's built-in machinery — caching, conditional requests, retries, load balancers — instead of fighting it.
+"What status do you return when the resource already exists?" and "Is PUT idempotent? Is POST?" are standard backend questions. The reasoning matters more than the yes or no. Networks fail, clients retry, and only idempotent operations survive a retry without corruption.
 
 ## The concept, simply
 
-CRUD — Create, Read, Update, Delete — is the set of four operations most resources support. HTTP gives you methods that map naturally onto them, and each operation has a conventional *success* status code.
+CRUD is the four operations most resources support. Each one has a conventional success status.
 
 ![Table mapping CRUD to HTTP verbs success codes and idempotency](assets/i37_01_0ff846bf.svg)
 
-Each CRUD operation maps to an HTTP verb with a conventional success code. Note which verbs are safe and which are idempotent.
+Each CRUD operation maps to an HTTP verb, a success code, and a safety or idempotency property.
 
-- **Create** → `POST /users` → **201 Created** (plus a `Location` header pointing at the new resource).
-- **Read** → `GET /users/42` → **200 OK** (or 404 if it doesn't exist).
-- **Update** → `PUT /users/42` (full replace) or `PATCH /users/42` (partial) → **200 OK** with the body, or **204 No Content** if you return nothing.
-- **Delete** → `DELETE /users/42` → **204 No Content** (or 200 with a body).
+- **Create** is `POST /users`, then **201 Created**, plus a `Location` header pointing at the new resource.
+- **Read** is `GET /users/42`, then **200 OK**, or 404 if it does not exist.
+- **Update** is `PUT /users/42` for a full replace, or `PATCH /users/42` for a partial change, then **200 OK** with the body, or **204 No Content** if you return nothing.
+- **Delete** is `DELETE /users/42`, then **204 No Content**, or 200 if you return a body.
 
-Two properties classify these verbs. A method is **safe** if it does not change server state — GET is safe. A method is **idempotent** if making the same call once or many times leaves the server in the same final state. GET, PUT, and DELETE are idempotent; POST is not. That single distinction drives an enormous amount of correct API design.
+A method is **safe** if it does not change server state. GET is safe. A method is **idempotent** if one call and many identical calls leave the server in the same final state. GET, PUT, and DELETE are idempotent. POST is not.
 
 ## How it works (deep)
 
-**Idempotency, precisely.** Idempotent means *the effect on server state* of N identical requests equals the effect of one. It is *not* about the response being byte-identical. Consider `DELETE /users/42`: the first call deletes the user and returns 204; the second call finds nothing to delete and returns 404. The *responses differ*, but the *server state is identical* after either the first or the second call — user 42 is gone. That still counts as idempotent. This nuance trips up almost everyone; interviewers specifically probe it.
+**Idempotency is about server state, not the response bytes.** `DELETE /users/42` can return 204 the first time and 404 the second time. The responses differ. After either call, user 42 is gone. That is still idempotent.
 
-**Why POST is not idempotent.** `POST /orders` means "create a new order." Send it twice and you get two orders. The server assigns a new identity each time, so repeating the call changes state each time. That is exactly why forms warn "do not click submit twice" and why retrying a failed POST is dangerous — you cannot know whether the first one actually succeeded before the network dropped.
+**POST is not idempotent** because `POST /orders` means "create a new order." The server picks a new id each time. Two calls create two orders. You cannot know whether the first call succeeded before the network dropped, so a blind retry is dangerous.
 
-**Why PUT is idempotent but POST is not, even though both "write."** PUT means "make the resource at this URL equal to this representation." `PUT /users/42` with a body sets user 42 to that exact state; do it ten times and user 42 still holds that same state. The client chooses the URL/identity, so repetition converges. POST lets the *server* choose the identity, so repetition diverges. This is the crux.
+**PUT is idempotent because the client picks the URL.** `PUT /users/42` means "make the resource at this URL equal this body." Ten identical calls leave user 42 in that same state. POST lets the server pick the identity, so repetition creates more rows.
 
-**PATCH is usually not idempotent.** `PATCH` applies a partial change. `{ "op": "increment", "field": "views" }` is clearly not idempotent — each call adds one. Even a "set field X to Y" PATCH is only idempotent by convention, and JSON Patch operations like "add to array" are not. Treat PATCH as non-idempotent unless you have specifically designed it to be.
+**PATCH is usually not idempotent.** `{ "op": "increment", "field": "views" }` adds one on every call. A "set field X to Y" PATCH is idempotent only if you designed it that way. JSON Patch operations such as "add to array" are not. Treat PATCH as non-idempotent unless you have made it so.
 
-**Idempotency keys.** Since POST is not idempotent but networks retry, robust APIs (Stripe is the canonical example) accept an `Idempotency-Key` header. The client generates a unique key per logical operation; the server stores "I already processed key K and here is the result." A retry with the same key returns the stored result instead of creating a second order or charge. This turns an unsafe POST into a safely-retriable one — a favorite senior-level design question.
+**Idempotency keys** make a POST safe to retry. The client sends a unique `Idempotency-Key` per logical operation. The server stores the result under that key. A retry with the same key returns the stored result instead of creating a second charge. Stripe is the usual example.
 
-**Choosing the right status code** matters as much as the verb.
+**Status code families.** 2xx means success. 3xx means redirection or a cached copy. 4xx means the caller must fix the request. 5xx means the server failed a valid request. Monitoring and on-call depend on that line.
 
 ![Five status code families 1xx through 5xx with example codes](assets/i37_02_b53e0eaa.svg)
 
-The five families. 4xx means the caller must fix the request; 5xx means the server failed a valid request. Never blur the two.
+The five families. 4xx is the caller's fault. 5xx is the server's fault.
 
-The families: **2xx** success, **3xx** redirection/caching, **4xx** client error, **5xx** server error. The single most important line is between 4xx and 5xx: *4xx is the caller's fault* (bad input, missing auth), *5xx is your fault* (an exception, a downstream failure). Getting this wrong wrecks monitoring and on-call. The high-value 4xx codes to know cold: **400** malformed request, **401** not authenticated, **403** authenticated but not allowed, **404** not found, **409** conflict (e.g. duplicate/edit collision), **422** well-formed but semantically invalid (validation failed), **429** too many requests. On the success side: **200** OK, **201** Created, **204** No Content, **304** Not Modified.
+Know these 4xx codes: **400** malformed, **401** not authenticated, **403** authenticated but not allowed, **404** not found, **409** conflict with current state, **422** well-formed but semantically invalid, **429** too many requests. On the success side: **200**, **201**, **204**, and **304** Not Modified.
 
-**401 vs 403** is a classic trap. 401 = "I don't know who you are" (no or bad credentials) — log in. 403 = "I know who you are and you still can't do this" — logging in again won't help. **400 vs 422** is another: 400 for a request that is syntactically broken (unparseable JSON), 422 for one that parses fine but fails business validation (email already taken, age negative). And **409 Conflict** is the right code when the request collides with current state — creating a user whose email already exists, or editing a record someone else changed.
+**401 means "I do not know who you are."** Log in or send a new credential. **403 means "I know who you are, and you still cannot do this."** Logging in again will not help. **400** is for a request that does not parse, such as broken JSON. **422** is for a request that parses and fails a business rule, such as a negative age. **409** is for a collision with current state, such as an email that is already registered, or an edit of a row someone else changed.
 
 ## Code examples
 
@@ -158,57 +160,58 @@ router.patch('/posts/:id/views', async (req, res) => {
 
 ## Common mistakes & gotchas
 
-- **Returning 200 for everything**, including errors, with an `{ "error": ... }` body. This breaks HTTP-aware clients, caches, and monitoring. Use real status codes.
-- **Confusing 401 and 403:** 401 = not authenticated (who are you?); 403 = authenticated but forbidden (you can't do this). Logging in fixes 401, never 403.
-- **Using 400 for validation failures** when 422 is more precise: 400 = unparseable; 422 = parsed but invalid.
-- **Thinking "idempotent" means "same response."** It means same *server state*. DELETE returning 404 on the second call is still idempotent.
-- **Retrying POST blindly:** without an idempotency key, a retried create can duplicate orders/charges.
-- **Using PUT for partial updates:** PUT replaces the whole resource, so omitted fields get wiped. Use PATCH for partial changes.
-- **201 without a `Location` header:** clients can't discover where the new resource lives.
-- **Using GET with side effects:** GET must be safe; prefetchers and crawlers will trigger those side effects.
+- **Returning 200 for errors** with an `{ "error": ... }` body. Caches, clients, and monitoring all trust the status line.
+- **Swapping 401 and 403.** 401 means not authenticated. 403 means authenticated and still forbidden.
+- **Using 400 for every validation failure.** 400 means unparseable. 422 means parsed and invalid.
+- **Treating idempotent as "same response."** It means the same server state. A second DELETE that returns 404 is still idempotent.
+- **Retrying POST with no idempotency key.** A retried create can duplicate an order or a charge.
+- **Using PUT for a partial update.** PUT replaces the whole resource. Omitted fields get wiped. Use PATCH for a partial change.
+- **201 with no `Location` header.** The client cannot find the new resource.
+- **Side effects on GET.** GET must be safe. Prefetchers and crawlers will trigger those effects.
 
 ## Best practices
 
-- Map CRUD to verbs faithfully: POST create, GET read, PUT/PATCH update, DELETE delete.
-- Return **201 + Location** on create, **204** when there's genuinely no body to return, and **200** when you return the resource.
-- Keep the **4xx/5xx boundary honest** — it is the contract your monitoring and on-call rely on.
-- Prefer **422** for validation errors, **409** for state conflicts, and distinguish **401** from **403** precisely.
-- Make writes **retry-safe**: PUT/DELETE are naturally idempotent; wrap POST create/charge flows with an `Idempotency-Key`.
-- Keep GET **safe** — never mutate state on a GET.
-- Return a consistent, machine-readable error body alongside the status code (covered in the versioning topic).
+- Map create to POST, read to GET, full replace to PUT, partial update to PATCH, and delete to DELETE.
+- Return 201 plus `Location` on create, 204 when there is no body, and 200 when you return the resource.
+- Keep 4xx and 5xx honest. Monitoring depends on that line.
+- Prefer 422 for validation errors, 409 for state conflicts, and keep 401 distinct from 403.
+- Make writes safe to retry. PUT and DELETE already are. Wrap a create or a charge in an `Idempotency-Key`.
+- Keep GET free of writes.
+- Return one machine-readable error body with the status (lesson 66).
 
 ## ⭐ Interview lens
 
 > **Q: Is PUT idempotent? Is POST? Why?**  
-> PUT is idempotent: it sets the resource at a client-chosen URL to an exact state, so repeating converges. POST is not: it creates a new resource with a server-chosen identity each time, so repeating diverges (two orders). The reasoning — who chooses the identity — is what they want, not just the yes/no.
+> PUT is idempotent. It means "make the resource at this client-chosen URL equal this representation." Sending the same PUT ten times leaves that resource in the same state, because the client already picked the identity. POST is not idempotent. It means "create a new resource," and the server picks a new id each time, so two identical POSTs become two orders. For example, `PUT /users/42` with the same body converges, and `POST /orders` diverges. The limit is PATCH. A patch that increments a counter changes state on every call. A patch that sets one field to a value is idempotent only when you designed it that way. Treat PATCH as non-idempotent unless you can show the final state does not depend on how many times it ran.
 
 > **Q: DELETE returns 204 the first time and 404 the second. Is it still idempotent?**  
-> Yes. Idempotency is about final *server state*, not identical responses. After either call, the resource is gone — same state. The differing status codes are fine. This is the classic trap.
+> Yes. Idempotent means the effect on server state of many identical calls equals the effect of one. It does not mean the response bytes match. After the first DELETE, user 42 is gone and the server answers 204. After the second, user 42 is still gone and the server answers 404 because there is nothing left to delete. The state matches. For example, a client that retries a DELETE after a timeout cannot create a second deletion. The limit is a DELETE handler that does extra work with its own identity, such as inserting a new audit row with a new id on every call. The user is still gone, but the rest of the database changed again, so that handler is not idempotent.
 
 > **Q: 401 vs 403?**  
-> 401 = not authenticated ("I don't know who you are") — provide/refresh credentials. 403 = authenticated but not authorized ("I know you, you still can't") — re-auth won't help. Returning 403 when you mean 401 misleads clients into not retrying login.
-
-> **Q: Which status code for "email already registered" on signup?**  
-> 409 Conflict — the request conflicts with current server state. Some teams use 422 (validation). Either is defensible if consistent; 200 or 400 are not. Explaining the 409-vs-422 nuance scores well.
+> 401 means the server does not know who you are. The credential is missing or bad, and the client should log in or refresh it. 403 means the server knows who you are and still refuses the action. Sending the password again will not help. For example, a logged-out call to place an order is 401, and a logged-in user who is not allowed to order is 403. The limit of swapping them is client behaviour. A client that sees 401 will try to authenticate again. A client that sees 403 will stop. Returning 403 for a missing token teaches the client not to log in. The status line is what HTTP libraries and gateways branch on. A sentence in the JSON body does not repair a swapped code.
 
 > **Q: How do you make a "create payment" endpoint safe to retry?**  
-> Accept an `Idempotency-Key` header. Store the result keyed by that key; a retry with the same key returns the stored result instead of charging again. This makes a non-idempotent POST effectively idempotent — the Stripe pattern.
-
-> **Q: Why not just return 200 with `{ "success": false }` for errors?**  
-> Because HTTP status codes are the machine-readable contract for caches, load balancers, retry logic, and monitoring. A 200 error is invisible to all of them — your dashboards show green during an outage, and clients cache failures. Use the status line; put detail in the body.
+> Accept an `Idempotency-Key` header. The client generates one unique key per logical payment, not per HTTP attempt. The server stores the result under that key. If the same key arrives again, the server returns the stored status and body and does not charge a second time. That is the pattern Stripe uses, and it turns a non-idempotent POST into something a timeout can retry. For example, the first call charges and saves `{ status: 201, body }`. The retry hits the store and returns that same 201. The limit is the key's lifetime and scope. A key reused for a different payment would return the old charge, and a key that is never stored, because the process crashed before the save, can still double-charge. Persist the key before you call the gateway, or in the same transaction as the charge record.
 
 ## Cheat-card
 
-- **Create** POST → 201 + Location · **Read** GET → 200/404 · **Update** PUT/PATCH → 200/204 · **Delete** DELETE → 204.
-- **Safe:** GET (no state change). **Idempotent:** GET, PUT, DELETE. **Not idempotent:** POST, (usually) PATCH.
-- Idempotent = same *server state* after N calls, not same response.
-- **401** = who are you? · **403** = you can't · **404** = not here · **409** = conflict · **422** = invalid · **429** = rate limited.
-- **4xx** = caller's fault · **5xx** = server's fault. Keep the line honest.
-- Retry-safe POST = `Idempotency-Key` header + server-side result store.
-- PUT replaces the whole resource; PATCH changes part of it.
-- **HEAD/OPTIONS are automatic:** HEAD runs the GET handler and drops the body; OPTIONS replies `Allow: GET, HEAD`. A wrong method gets **404**, not 405.
-- **405 = `app.route(p).get(…).all(h)`** with an `Allow` header (required by RFC 9110); answer OPTIONS inside `.all()`.
-- **415** wrong `Content-Type` (`req.is`) · **428** `If-Match` missing (RFC 6585) · **412** `If-Match` stale; strong ETag compare only.
+- Create: POST, 201, and `Location`. Read: GET, 200 or 404. Update: PUT or PATCH, 200 or 204. Delete: DELETE, 204.
+- Safe: GET. Idempotent: GET, PUT, DELETE. Not idempotent: POST, and usually PATCH.
+- Idempotent means the same server state after N calls, not the same response.
+- 401 who are you. 403 you cannot. 404 not here. 409 conflict. 422 invalid. 429 rate limited.
+- 4xx is the caller's fault. 5xx is the server's fault.
+- A retry-safe POST stores the result under an `Idempotency-Key`.
+- PUT replaces the whole resource. PATCH changes part of it.
+
+## Good to know
+
+- HEAD and OPTIONS are automatic on a route that has GET. HEAD runs the GET handler and drops the body. OPTIONS replies `Allow: GET, HEAD`. A wrong method is 404, not 405, until you add it.
+- 405 is `app.route(path).get(...).all(handler)` plus an `Allow` header, which RFC 9110 requires on a 405. Answer OPTIONS inside `.all()`.
+- 415 is the wrong `Content-Type`, checked with `req.is`. 428 means `If-Match` was required and missing (RFC 6585). 412 means `If-Match` is stale. The compare is strong, so a weak ETag does not match.
+- Q: Which status for "email already registered" on signup? 409 Conflict, because the request collides with current state. Some teams use 422. 200 and 400 do not fit. Pick one and keep it.
+- Q: Why not return 200 with `{ "success": false }`? Status codes are the contract for caches, load balancers, retries, and monitoring. A 200 error stays invisible to them, so dashboards stay green during an outage and clients can cache the failure.
+- Q: How do you stop two users overwriting each other without a lock? Optimistic concurrency. GET returns a strong ETag from a version. PUT or PATCH must send `If-Match`. A changed resource answers 412, and the client re-reads. Require `If-Match` with 428, or clients that omit it skip the check. Compare inside the UPDATE `WHERE` so it is atomic. A weak ETag or `req.fresh` is the wrong tool. `If-Match` needs the strong comparison.
+- Q: Does Express return 405 for an unsupported method? No. It answers 404 `Cannot DELETE /path`, because no route matched. It does answer OPTIONS (`Allow: GET, HEAD`) and HEAD through the GET handler. Add `.all()` after the methods on `app.route()` and set `Allow`.
 
 ---
 
@@ -437,8 +440,4 @@ Both clients send `If-Match: "v1"`. The server handles one request completely be
 
 ### ⭐ Interview lens (additional topics)
 
-> **Q: “How do you stop two users from overwriting each other's edits without locking?”**  
-> A: Optimistic concurrency with ETags. GET returns a strong `ETag` derived from a version. PUT/PATCH must send `If-Match` with that tag; if the resource changed, the server answers 412 and the client re-reads, merges and retries. Make `If-Match` mandatory with 428 (RFC 6585), or clients that omit it bypass the check. In the database, do the comparison inside the `UPDATE`'s `WHERE` clause so it is atomic. *Trap:* using a weak ETag or `req.fresh` for this. `If-Match` needs the strong comparison.
-
-> **Q: “Does Express return 405 for an unsupported method?”**  
-> A: No. It answers 404 `Cannot DELETE /path`, because no route matched. It does answer OPTIONS automatically (`Allow: GET, HEAD`) and HEAD via the GET handler. For 405, add `.all()` after the method handlers in `app.route()` and set `Allow`, which RFC 9110 requires on a 405.
+The questions from this section are under Good to know, one line each.

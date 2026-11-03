@@ -13,37 +13,39 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+MongoDB stores BSON documents, a binary form of JSON, in collections, and Mongoose is the library on the official Node driver that checks a schema, casts types, and builds queries before they are sent. You declare a schema, compile it into a model, and that model reads and writes one collection. It exists so a flexible database still has rules in your Node app. The trade-off is that some write methods skip those rules unless you ask for them.
+
 ## Why it matters
 
-Almost every Node.js service you will ever write needs to remember things between requests: users, orders, sessions, posts. That memory lives in a database, and for a huge slice of the Node ecosystem that database is **MongoDB**. MongoDB is a *document database* — instead of rows and columns it stores JSON-like documents, which map naturally onto the objects you already pass around in JavaScript. There is no impedance mismatch between a `user` object in your code and a `user` document in the database; they look almost identical.
+Almost every Node service has to remember users, orders, or posts between requests. For a large part of the Node world that store is MongoDB. A document looks like the object you already pass around in JavaScript, so there is little translation between the two.
 
-**Mongoose** is the library that sits between your Node code and MongoDB. It gives you schemas (so your "schema-less" database actually has enforced structure), type casting, validation, middleware hooks, and a fluent query API. Understanding how these two pieces relate — where MongoDB ends and Mongoose begins — is the single most important mental model in this whole chapter, and it is a question interviewers love because it separates people who copy tutorials from people who understand their stack.
-
-If you cannot confidently model data, run CRUD, and explain why `findByIdAndUpdate` skips your validators, you will struggle in both real backends and interviews. This topic builds that foundation.
+Mongoose sits between your code and MongoDB. It gives you schemas, casting, validation, hooks, and a query API. The interview question is where MongoDB ends and Mongoose begins. If you cannot model data, run CRUD, and explain why `findByIdAndUpdate` skips your validators, both production and interviews get hard.
 
 ## The concept, simply
 
-MongoDB organises data into **databases → collections → documents**. A collection is loosely like a SQL table, and a document is loosely like a row — except a document is a flexible BSON object (Binary JSON) that can nest arrays and sub-objects to any depth. Two documents in the same collection do not have to have the same fields. That flexibility is the whole selling point, and also the whole footgun.
+MongoDB organises data as database, then collection, then document. A collection is loosely like a table. A document is loosely like a row, except it is a BSON object that can nest arrays and objects, and two documents in one collection need not share fields. That flexibility is the feature and the hazard.
 
-Mongoose adds a disciplined layer on top. You declare a **Schema** (the shape and rules), compile it into a **Model** (a constructor bound to one collection), and then create **documents** (instances of that model). The model is your gateway for every query; the document is a single record with methods like `.save()`.
+Mongoose adds a layer. A **schema** is the shape and the rules. A **model** is a constructor bound to one collection, compiled from the schema. A **document** is one instance, with methods such as `.save()`.
 
 ![Stacked layers from application code through the Mongoose model and MongoDB driver down to the mongod server](assets/i40_01_26cef54d.svg)
 
-Mongoose is a modeling layer on top of the official driver — it validates and casts, but the driver still speaks to the server.
+Mongoose validates and casts. The official driver still speaks to `mongod`.
 
-The key insight the diagram encodes: **Mongoose is not the database**. It is a convenience and safety layer. Underneath, the official `mongodb` driver serialises your data to BSON, manages the connection pool, and sends it over the wire. When Mongoose behaves surprisingly (a validator not running, a field silently dropped), the answer is almost always "because at that moment Mongoose handed off to the raw driver".
+Mongoose is not the database. Under it, the `mongodb` driver serialises to BSON, manages a connection pool, and sends bytes over the wire. When a validator does not run or a field disappears, the usual reason is that Mongoose handed the operation to the driver and skipped its own pipeline.
 
 ## How it works (deep)
 
-Let us trace a full round trip. When your process starts you call `mongoose.connect(uri)`. Mongoose opens a **connection pool** (by default up to 100 sockets) to `mongod` and buffers any queries you fire before the connection is ready — this is why `User.find()` at module load time does not immediately crash. Once connected, queries flush from the buffer.
+`mongoose.connect(uri)` opens a pool of sockets to `mongod`. The default cap is 100. Queries you fire before the connection is ready are buffered, which is why `User.find()` at module load does not crash immediately. They flush once the connection is up.
 
-A **Schema** is a plain description: field names, their types (`String`, `Number`, `Date`, `ObjectId`, `Buffer`, arrays, nested objects), and rules (`required`, `unique`, `default`, `min`, `enum`, custom `validate`). Compiling it with `mongoose.model('User', schema)` produces a **Model**. The string `'User'` is pluralised and lower-cased to derive the collection name `users` — a detail that trips people up when the collection "doesn't exist".
+A schema lists field names, types (`String`, `Number`, `Date`, `ObjectId`, `Buffer`, arrays, nested objects), and rules (`required`, `unique`, `default`, `min`, `enum`, or a custom `validate`). `mongoose.model('User', schema)` compiles a model. The string `'User'` is pluralised and lower-cased into the collection name `users`. People go looking for a collection that was never going to have that name.
 
-When you build a query like `User.find({ age: { $gt: 18 } })`, Mongoose does **not** execute immediately. It returns a **Query** object — a thenable builder. Execution happens when you `await` it, call `.then()`, or call `.exec()`. Before sending, Mongoose *casts* your filter values to the schema types (so the string `"18"` becomes the number `18`), which is a subtle safety net the raw driver does not give you.
+`User.find({ age: { $gt: 18 } })` does not run immediately. It returns a **Query**, a thenable builder. It runs when you `await` it, call `.then()`, or call `.exec()`. Before it sends, Mongoose casts filter values to the schema types, so the string `"18"` becomes the number `18`. The raw driver does not do that for you.
 
-On the way back, BSON documents are hydrated into full Mongoose documents with getters, virtuals, and instance methods — unless you called `.lean()`, which returns plain JS objects and skips hydration entirely. `.lean()` is dramatically faster and lighter for read-only endpoints because it avoids constructing the document wrapper for every result.
+On the way back, BSON becomes a full Mongoose document with getters, virtuals, and methods, unless you called `.lean()`. Lean returns plain JavaScript objects and skips that wrapping. It is much cheaper on a read-only endpoint that only sends JSON.
 
-Two families of write operations exist, and the split is the source of the most common Mongoose bug. **Document-based writes** (`new User(...).save()`, `doc.save()`) run the full pipeline: casting, validators, `pre('save')` hooks. **Query-based writes** (`updateOne`, `updateMany`, `findOneAndUpdate`, `findByIdAndUpdate`) go closer to the driver: by default they **skip validators and skip the `save` middleware**. You must pass `{ runValidators: true }` to get validation, and even then `save` hooks never fire — only `update` hooks do. Interviewers probe this constantly.
+Two kinds of writes cause the most common bug. **Document writes** (`new User(...).save()`, `doc.save()`) run the full pipeline: casting, validators, and `pre('save')` hooks. **Query writes** (`updateOne`, `updateMany`, `findOneAndUpdate`, `findByIdAndUpdate`) go closer to the driver. By default they skip validators and skip `save` middleware. Pass `{ runValidators: true }` to validate. Even then, `save` hooks do not fire. Update hooks do.
 
 ## Code examples
 
@@ -135,59 +137,61 @@ if (!user) {
 
 ## Common mistakes & gotchas
 
-- **Expecting `updateOne` / `findByIdAndUpdate` to validate.** By default they do not run validators or `pre('save')` hooks. Pass `{ runValidators: true }`, and remember hooks still will not fire — use `save()` when you need them.
-- **Thinking `findByIdAndUpdate` returns the updated document.** By default it returns the document *before* the change. Pass `{ new: true }` to get the updated version back.
-- **Treating a query as already-resolved data.** `const u = User.findOne(...)` without `await` gives you a Query object, not a user. `u.name` is `undefined`, not an error.
-- **Relying on `unique: true` as validation.** It is not a validator — it is an *index* instruction. Duplicates throw a driver error (code `11000`) at write time, not a nice validation error, and only if the index actually built.
-- **Forgetting `.lean()` on hot read paths.** Hydrating thousands of full documents per request wastes CPU and memory when you only serialise them to JSON anyway.
-- **Calling `connect()` on every request.** In serverless especially, this exhausts connections. Connect once and reuse; cache the connection across invocations.
-- **Assuming the collection name.** `model('Person')` writes to `people`, not `Persons`. Override with the third argument if you need a specific name.
+- **Expecting `updateOne` or `findByIdAndUpdate` to validate.** By default they skip validators and `pre('save')` hooks. Pass `{ runValidators: true }`. Save hooks still do not fire. Use `save()` when you need them.
+- **Expecting `findByIdAndUpdate` to return the new document.** By default it returns the document from before the change. Ask for the new one with the option this lesson's Mongoose 9 notes name.
+- **Treating a query as data.** `User.findOne(...)` without `await` is a Query. `u.name` is `undefined`.
+- **Treating `unique: true` as a validator.** It asks for a unique index. A duplicate throws a driver error, code `11000`, at write time, and only after the index exists.
+- **Skipping `.lean()` on a hot read.** Hydrating thousands of documents wastes CPU and memory when you only send JSON.
+- **Calling `connect()` on every request.** Especially in serverless, that exhausts connections. Connect once and reuse.
+- **Guessing the collection name.** `model('Person')` writes to `people`. Pass a third argument when you need a fixed name.
 
 ## Best practices
 
-- Connect **once** at startup (or with a cached promise in serverless) and let Mongoose manage the pool; never open a connection per query.
-- Prefer `.lean()` for read-only endpoints that just return JSON; keep full documents for paths that mutate and save.
-- Always pass `{ new: true, runValidators: true }` to `findByIdAndUpdate` when you want the updated doc validated — make it a team habit.
-- Define indexes in the schema (`schema.index(...)`) and understand they build in the background; in production, build them deliberately rather than relying on `autoIndex`.
-- Catch the duplicate-key error (`err.code === 11000`) explicitly and translate it into a friendly 409 response.
-- Keep business rules in schema validators and `pre`/`post` hooks so they cannot be bypassed by a forgetful controller.
-- Use `select: false` on sensitive fields (password hashes) so they are never returned unless explicitly requested.
+- Connect once at startup, or cache the connect promise in serverless, and let Mongoose keep the pool.
+- Use `.lean()` for read-only JSON. Keep full documents when you will mutate and `save()`.
+- When you update by query and want the new document validated, pass the options as a team habit, and remember save hooks still do not run.
+- Define indexes in the schema. In production, build them on purpose instead of relying on `autoIndex`.
+- Catch duplicate-key code `11000` and answer 409.
+- Keep business rules in validators and hooks so a controller cannot forget them.
+- Set `select: false` on secrets such as a password hash so they stay out of query results unless you ask.
 
 ## ⭐ Interview lens
 
 > **Q: What is the difference between MongoDB and Mongoose?**  
-> MongoDB is the database and its official driver; Mongoose is an ODM (Object Data Modeling) library layered on the driver. Mongoose adds schemas, type casting, validation, middleware, virtuals, and a query builder. MongoDB itself is schema-flexible — Mongoose is what enforces structure from your Node app. The trap: candidates say Mongoose "is" the database. It is not; the driver still does the wire communication.
+> MongoDB is the database. The official `mongodb` driver is what speaks BSON over the wire and holds the connection pool. Mongoose is an ODM, an object-document mapper, layered on that driver. You declare a schema, compile a model bound to one collection, and get casting, validators, middleware hooks, virtuals, and a query builder. MongoDB itself will store two documents with different fields. Mongoose is what enforces a shape from your Node app. For example, a schema field of type Number casts the string `"18"` to 18 before the query is sent. The limit is that Mongoose is not in the path for every write. Query updates such as `findByIdAndUpdate` skip validators and `save` hooks unless you opt in, because those calls go closer to the driver.
 
 > **Q: Why does my validator not run on `findByIdAndUpdate`?**  
-> Because query-based updates bypass the document pipeline by default. Validators and `save` hooks only run on document methods like `save()`. You must pass `{ runValidators: true }`, and even then `pre('save')` hooks will not fire — only `pre('findOneAndUpdate')`-style update hooks do.
+> `findByIdAndUpdate` is a query write. It does not load a document and call `save()`. The full pipeline, casting plus validators plus `pre('save')` hooks, runs on document methods such as `new User().save()` and `doc.save()`. By default a query update skips validators and skips save middleware. Pass `{ runValidators: true }` and the validators run. Save hooks still do not. Only update hooks such as `pre('findOneAndUpdate')` run for that call. For example, a `pre('save')` hook that hashes a password never sees a `findByIdAndUpdate` that sets `password`. The limit is that `runValidators: true` is not a switch for hooks. If the rule has to live in a save hook, load the document and `save()` it.
 
 > **Q: What does `.lean()` do and when would you use it?**  
-> It returns plain JavaScript objects instead of full Mongoose documents, skipping hydration (getters, virtuals, instance methods, change tracking). Use it on read-only endpoints for a large performance and memory win. Do not use it when you need to call `.save()` or rely on virtuals.
+> `.lean()` tells Mongoose to skip hydration. Hydration means wrapping each BSON result in a document object with getters, virtuals, instance methods, and change tracking. Lean returns plain JavaScript objects. Use it on a read-only endpoint that only sends JSON, especially when a page returns hundreds of rows, because building those wrappers costs CPU and memory you then throw away. For example, `User.find().lean()` gives objects you can pass to `res.json` directly. The limit is that a lean object has no `.save()`, no virtuals, and no getters. If the response needs a virtual, or the next line mutates and saves, keep the full document. The speedup is the wrappers you skipped, not a different query on the server. The same filter and the same index run either way.
 
 > **Q: When is a Mongoose query actually executed?**  
-> Not at build time. `User.find(...)` returns a lazy Query (a thenable). Execution happens when you `await` it, call `.then()`, or call `.exec()`. This laziness lets you chain `.where()`, `.sort()`, `.limit()` before the round trip.
-
-> **Q: Is `unique: true` a validator?**  
-> No — it is a shortcut for creating a unique index. It does not produce a Mongoose validation error; a duplicate insert throws a MongoServerError with code 11000 at the driver level, and only enforces once the index has finished building. For a friendly error you catch code 11000 yourself.
-
-> **Q: How do you avoid connection exhaustion in a serverless function?**  
-> Cache the connection (or the connect promise) on the module/global scope so warm invocations reuse it instead of opening a new pool each time. Keep `maxPoolSize` small per instance, and never call `mongoose.connect()` inside the request handler.
+> Building a query does not run it. `User.find({ age: { $gt: 18 } })` returns a Query object, which is a thenable. The driver sends the command when you `await` the query, call `.then()`, or call `.exec()`. That delay is what lets you chain `.where()`, `.sort()`, and `.limit()` and still pay for one round trip. For example, `const q = User.find()` followed by `q.name` is undefined, because `q` is not a user. The limit is easy to miss in a function that returns the query without awaiting it. The caller receives a Query, serializes it badly, and the database work happens later than they think, or not at all if nobody awaits it.
 
 ## Cheat-card
 
-- **Hierarchy:** database → collection → document (BSON).
-- **Mongoose trio:** Schema (shape) → Model (bound to collection) → Document (instance).
-- **Collection name:** `model('User')` → `users` (pluralised, lower-cased).
-- **Queries are lazy** until `await` / `.then()` / `.exec()`.
-- **save()** = full pipeline (validators + hooks). **updateOne / findByIdAndUpdate** = skip both by default.
-- **Updated doc back:** `{ new: true }`. **Validate on update:** `{ runValidators: true }`.
-- **Read-only speed:** `.lean()`. **Duplicate error:** code `11000`.
-- **`timestamps: true`:** Mongoose sets `createdAt`/`updatedAt` on `save()` and on query updates (`$set updatedAt`, `$setOnInsert createdAt`); `{ timestamps: false }` skips it per query.
-- **Virtuals:** not stored; getter/setter via `schema.virtual()`; populate virtual `{ ref, localField, foreignField, count? }`; `toJSON: { virtuals: true }` and `toObject` are configured separately; `.lean()` has no virtuals.
-- **Discriminators:** `Base.discriminator('Name', schema)` → one collection, `discriminatorKey` (default `__t`) written on save and added to every child-model query.
-- **One error mapper:** `CastError` → 400, `ValidationError` → 422 (a cast on `create()` lands inside it), `err.code === 11000` → 409 (`MongoServerError` or `MongoBulkWriteError`); `await Model.init()` before testing duplicates.
-- **NoSQL injection:** `{ "password": { "$ne": null } }` in a JSON body bypasses `findOne({ email, password })`; `sanitizeFilter` wraps `$`-objects in `$eq`; `mongoose.trusted()` for operators your code builds.
-- **Mongoose 9 (9.11.1 used here):** `pre` hooks get no `next()` (v9.0); `returnDocument: 'after'` replaces `{ new: true }` (deprecated in v9.2.0).
+- Hierarchy: database, collection, document (BSON).
+- Schema is the shape. Model is bound to a collection. Document is one instance.
+- `model('User')` uses the collection `users`.
+- Queries run on `await`, `.then()`, or `.exec()`.
+- `save()` runs validators and save hooks. `updateOne` and `findByIdAndUpdate` skip both unless you opt in.
+- `.lean()` for read-only JSON. Duplicate key error code is `11000`.
+
+## Good to know
+
+- Default pool size on `mongoose.connect` is up to 100 sockets.
+- `timestamps: true` sets `createdAt` and `updatedAt` on `save()`, and on query updates it adds `$set` of `updatedAt` and `$setOnInsert` of `createdAt`. `{ timestamps: false }` skips that for one query.
+- A virtual is not stored. Define it with `schema.virtual()`. A populate virtual uses `{ ref, localField, foreignField, count? }`. `toJSON: { virtuals: true }` and `toObject` are separate. `.lean()` has no virtuals.
+- `Base.discriminator('Name', schema)` shares one collection. The key defaults to `__t`. It is written on save and added to every child-model query.
+- Map errors once: `CastError` to 400, `ValidationError` to 422 (a cast inside `create()` lands inside it), `err.code === 11000` to 409 whether the class is `MongoServerError` or `MongoBulkWriteError`. `await Model.init()` before you test duplicates.
+- `{ "password": { "$ne": null } }` in a JSON body can bypass `findOne({ email, password })`. `sanitizeFilter` wraps objects whose keys start with `$` in `$eq`. Use `mongoose.trusted()` for operators your own code builds.
+- On 12 Oct 2026 `npm view mongoose dist-tags` reported `latest: 9.11.1` (released 2026-10-07), `8x: 8.24.5`, and `next: 9.0.0-rc1`. 9.0.0 was released on 2025-11-21.
+- Mongoose 9.11.1: `pre` hooks get no `next()` (changed in v9.0). `returnDocument: 'after'` replaces `{ new: true }`, which still works and prints a deprecation warning (deprecated in v9.2.0).
+- Q: Is `unique: true` a validator? No. It creates a unique index. A duplicate throws a driver error with code 11000, after the index has finished building. Catch 11000 yourself for a friendly 409.
+- Q: How do you avoid connection exhaustion in a serverless function? Cache the connection, or the connect promise, on a global so a warm invocation reuses it. Keep `maxPoolSize` small per instance. Do not call `mongoose.connect()` inside the handler.
+- Q: How would someone log in as admin without the password? `User.findOne({ email, password })` with a JSON body of `"password": { "$ne": null }` means "this email and any password." Check that inputs are strings, compare a hash in code, and turn on `sanitizeFilter`, which wraps `$` objects in `$eq`. On a String path that then fails the cast and a mapper can return 400. Wrap your own operators in `mongoose.trusted()`.
+- Q: What is the difference between a CastError and a ValidationError? A CastError is a value that cannot be converted to the schema type in a query or an update, such as `findById('abc')`. A ValidationError is a document failing its rules on save or create, with one entry per path. A cast during `create()` sits inside the ValidationError. Duplicates are neither. They are server errors with code 11000. Map all three.
 
 ---
 
@@ -206,7 +210,7 @@ if (!user) {
 
 *Added 12 Oct 2026 · examples verified on Node v24.19.0 and Mongoose 9.11.1 (bundles the `mongodb` driver 7.7.0), Express 5.3.0, supertest 7.3.1, MongoDB 8.2.6 run locally via mongodb-memory-server's downloaded mongod binary (no Docker)*
 
-**Which Mongoose.** On 12 Oct 2026 `npm view mongoose dist-tags` reports `latest: 9.11.1` (released 2026-10-07), `8x: 8.24.5` and `next: 9.0.0-rc1`. 9.0.0 was released on 2025-11-21, and 9.11.1 is a regular, non-prerelease version, so 9.x is the stable line and the examples use 9.11.1. Two Mongoose 9 changes affect code written for 8.x. `pre` middleware no longer receives `next()`, so use `async function` hooks (changed in v9.0). And `{ new: true }` on `findOneAndUpdate()` still works but prints a deprecation warning; `returnDocument: 'after'` replaces it (changed in v9.2.0). Install with `npm install mongoose@9.11.1 express@5.3.0` and `npm install -D supertest@7.3.1`. Each example below is a standalone ES module run with `MONGO_URL=mongodb://127.0.0.1:<port>/<db> node file.mjs`.
+**Which Mongoose.** These examples use Mongoose 9.11.1, the stable 9.x line. The release tags are under Good to know. Two Mongoose 9 changes affect code written for 8.x. `pre` middleware no longer receives `next()`, so use `async function` hooks (changed in v9.0). And `{ new: true }` on `findOneAndUpdate()` still works but prints a deprecation warning; `returnDocument: 'after'` replaces it (changed in v9.2.0). Install with `npm install mongoose@9.11.1 express@5.3.0` and `npm install -D supertest@7.3.1`. Each example below is a standalone ES module run with `MONGO_URL=mongodb://127.0.0.1:<port>/<db> node file.mjs`.
 
 ### The `timestamps` schema option
 `timestamps: true` makes Mongoose manage two `Date` fields, `createdAt` and `updatedAt`. Without it, every write path has to remember to set them, and query-based updates (`updateOne`, `findOneAndUpdate`), which skip `save` hooks, are where people forget.
@@ -583,8 +587,5 @@ How each case arrives:
 The mapper in the example above therefore checks `instanceof ValidationError`, `instanceof CastError` and `code === 11000`, never the error's `name`.
 
 ### ⭐ Interview lens (additional topics)
-> **Q: “How would someone log in as admin without the password, and how do you stop it?”**  
-> A: If the handler does `User.findOne({ email, password })` with values from a JSON body, sending `"password": { "$ne": null }` turns the filter into "this email and any password", which matches. To stop it, check that inputs are strings at the edge, compare a password hash in code instead of in the query, and turn on `sanitizeFilter`, which wraps `$`-objects in `$eq`. On a `String` path that then fails the cast, and the mapper returns a 400. Wrap your own operators in `mongoose.trusted()`.
 
-> **Q: “What is the difference between a `CastError` and a `ValidationError` in Mongoose?”**  
-> A: A `CastError` is a value that cannot be converted to the schema type in a query or update filter, such as `findById('abc')`. A `ValidationError` is a document failing its rules on save or create, with one entry per path. A cast failure during `create()` shows up *inside* the `ValidationError`. Duplicates are neither: they are server errors with code 11000, from a unique index. An error middleware should map all three to 400/422/409 by class and code.
+The questions from this section are under Good to know, one line each.

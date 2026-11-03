@@ -13,39 +13,40 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Node parses the method, the path, and the headers of an HTTP request for you, and it leaves the body as a stream of Buffer chunks you assemble yourself. The response is a status, headers, and bytes you write, then `res.end()`. This is the layer under `express.json()`. The trade-off is that a body can be huge, so you cap it, and a multi-byte character can be split across chunks, so you concatenate the buffers and decode once.
+
 ## Why it matters
 
-The `req` and `res` objects are where your server meets the network. Everything a client tells you — which resource, which verb, what content type, the auth token, the JSON payload — arrives on `req`. Everything you tell the client back — success or failure, the shape of the data, caching rules, cookies — you encode into `res`. Get these two objects right and your endpoints are correct, cacheable, and secure; get them wrong and you leak memory on large uploads, corrupt UTF-8 text, or silently accept malformed input.
+`req` and `res` are where the server meets the network. The verb, the path, the content type, the token, and the JSON arrive on `req`. Status, headers, caching, and the body go out on `res`. Get them wrong and you leak memory on a large upload, corrupt UTF-8, or accept input you did not mean to parse.
 
-This is also the layer frameworks hide, which means when something misbehaves — a body that never parses, a response that arrives with the wrong charset, a header the browser rejects — the fix lives here. And in interviews, “how do you read a POST body without Express?” separates people who understand streams from people who have only memorised `app.use(express.json())`.
+Frameworks hide this. When a body never parses, or a charset is wrong, the fix is here. "How do you read a POST body without Express?" is the interview version of the same question.
 
 ## The concept, simply
 
-An HTTP request has four parts: a **method** (GET, POST…), a **target** (the URL path plus query string), a set of **headers** (key/value metadata), and an optional **body** (the payload). Node parses the first three for you and exposes them synchronously as `req.method`, `req.url`, and `req.headers`. The body it does *not* parse — it hands you a stream, because a body can be gigabytes and Node will not silently buffer that into memory for you.
+A request has four parts: a method such as GET or POST, a target which is the path plus the query string, headers, and an optional body. Node exposes the first three immediately as `req.method`, `req.url`, and `req.headers`. It does not parse the body. A body can be gigabytes, so you get a stream.
 
-A response mirrors this: a **status code** (200, 404, 500…), **headers**, and a **body**. You set the status and headers, then write the body. That is the whole contract.
+A response is a status code, headers, and a body. You set the status and the headers, then you write the body. That is the contract.
 
 ![Diagram mapping raw HTTP request bytes to Node's req.method, req.url, req.headers and the streamed body](assets/i28_01_dca6aee2.svg)
 
-Node parses the start line and headers into properties; the body stays a raw stream.
 
 ## How it works
 
-**Method and URL.** `req.method` is the uppercase verb string. `req.url` is only the *path and query* — e.g. `'/users?active=1'` — not the full URL; the host lives in `req.headers.host`. To parse it safely, use the WHATWG `URL` class with a base: `` new URL(req.url, `http://${req.headers.host}`) ``, which gives you `.pathname` and a `.searchParams` object. The legacy `url.parse()` is deprecated and has security footguns.
+`req.method` is the verb in uppercase. `req.url` is only the path and the query, for example `/users?active=1`, not the full URL. The host is `req.headers.host`. Parse it with the WHATWG `URL` class and a base: `new URL(req.url, 'http://' + req.headers.host)`. You get `pathname` and `searchParams`. The older `url.parse()` is deprecated.
 
-**Headers.** `req.headers` is a plain object with **lowercased** keys (HTTP header names are case-insensitive, so Node normalises them). Most headers are strings; `set-cookie` is special and is always an array. Duplicate headers other than a few are joined with `', '`. There is also `req.rawHeaders`, a flat array preserving original case and order, if you need the wire form.
+`req.headers` is a plain object with lowercased keys, because header names are case-insensitive. Most values are strings. `set-cookie` is always an array. `req.rawHeaders` is the flat list with the original case, if you need the wire form.
 
-**The body.** Because `req` is a readable stream, you assemble the body by collecting chunks. Chunks are `Buffer`s, not strings — concatenate the buffers and decode *once* at the end, otherwise a multi-byte UTF-8 character split across two chunks gets corrupted. You must also **size-limit** the body: an attacker (or a bug) can stream forever, so abort past a threshold. In modern Node you can skip the manual loop entirely with `req.text()` / `req.json()`-style helpers via `node:stream/consumers`, but knowing the manual version is expected.
+The body arrives as Buffer chunks on the readable `req`. Push them into a list, `Buffer.concat` once, then `toString('utf8')` once. Decoding each chunk alone corrupts a character that was split across the boundary. Cap the byte count and stop past the limit, or a client can stream forever.
 
-**Writing the response.** `res.statusCode` defaults to 200. Set it, or pass it to `res.writeHead(status, headers)` which sets status and multiple headers in one call. `res.setHeader(name, value)` sets one header (and can be called repeatedly before the body). The body is written with `res.write()` (0+ times) and finished with `res.end()`. Always send a `Content-Type` — without it browsers guess (“MIME sniffing”), which is both a correctness and a security problem. For text, include the charset: `text/plain; charset=utf-8`.
+`res.statusCode` defaults to 200. `res.writeHead(status, headers)` sets the status and many headers at once. `res.setHeader(name, value)` sets one, and you can still change it until the body starts. Write with `res.write`, finish with `res.end()`. Always send `Content-Type`. For text, include the charset, `text/plain; charset=utf-8`. Without a type, browsers guess, which is a correctness problem and a security problem.
 
-**Content-Length vs chunked.** If you know the full body size, set `Content-Length` and the response is sent with that length. If you stream with multiple `write()`s and no length, Node uses *chunked transfer-encoding* automatically. Both are valid; you rarely set the encoding by hand.
+If you know the size, set `Content-Length`. If you `write` several times with no length, Node uses chunked transfer encoding on HTTP/1.1. `res.write` returns false when the socket buffer is full. Stop and wait for `drain`, or `pipeline(source, res)`.
 
-**Backpressure on the response.** `res.write(chunk)` returns a boolean: `true` means the chunk fit in the kernel/socket buffer, `false` means the buffer is full and the data is being queued in memory. If you are copying from a fast source (a file, a database cursor) to a slow client and you ignore that `false`, Node keeps buffering and memory climbs unbounded. The correct pattern is to stop writing, wait for the writable stream's `'drain'` event, then resume — or simply `pipeline(source, res)` and let Node manage the flow control for you. This is the single most important reason to prefer `pipe`/`pipeline` over a hand-rolled read-and-write loop when relaying a stream to a response.
+A response is finished when the framing is finished: a full `Content-Length`, or the zero-length chunk that ends chunked encoding. `res.end()` writes that terminator. For HEAD, send the same headers you would for GET, including `Content-Length`, and no body. Informational 1xx responses, such as `100 Continue` or `103 Early Hints`, go out with `writeProcessing` or `writeEarlyHints` before the final status, and they do not lock your headers.
 
-**What ends a response, and what a 1xx or HEAD changes.** A response is complete when Node has sent everything the framing promises: a full `Content-Length` worth of bytes, or the terminating zero-length chunk for chunked encoding. `res.end()` writes that terminator. Two edge cases surprise people. For a `HEAD` request you must send the exact same headers (including `Content-Length`) as the equivalent `GET`, but no body — so call `res.end()` with no data. And informational `1xx` responses (like `100 Continue` or `103 Early Hints`) are sent with `res.writeProcessing()` / `res.writeEarlyHints()` *before* the final status; they do not count as “the” response and do not lock your headers, so you can still send a normal `200` afterwards.
-
-**Trailers.** Occasionally you need to send a header whose value you only know *after* the body (a checksum, a computed length). HTTP supports *trailers* for exactly this: declare them up front with `res.setHeader('Trailer', 'Content-MD5')` (only valid with chunked encoding), stream the body, then supply the values with `res.addTrailers({ 'Content-MD5': digest })` immediately before `res.end()`. They are rarely needed but come up in streaming and gRPC-over-HTTP contexts.
+A trailer is a header you only know after the body, such as a checksum. Declare it with `Trailer: Content-MD5`, which is only valid with chunked encoding, stream the body, then `res.addTrailers` immediately before `res.end()`.
 
 ## Code examples
 
@@ -148,62 +149,56 @@ http.createServer((req, res) => {
 
 ## Common mistakes & gotchas
 
-- **Treating `req.url` as the full URL.** It is only the path + query. Building a `URL` without a base throws; supply `http://${req.headers.host}`.
-- **Decoding each chunk separately.** `chunk.toString()` per chunk corrupts multi-byte characters that straddle a chunk boundary. Concatenate buffers, then decode once.
-- **No body size limit.** Buffering an unbounded stream into an array is a denial-of-service vector. Always cap and abort.
-- **Assuming header values are strings.** `set-cookie` is always an array; some proxies send repeated headers. Handle both.
-- **Omitting `Content-Type`.** Leads to MIME sniffing and broken clients; for JSON always send `application/json`.
-- **Wrong status semantics.** Returning `200` with an error body, or `500` for user input errors. Use `4xx` for client faults, `5xx` for server faults.
-- **Trusting header case.** Reading `req.headers['Content-Type']` returns `undefined` — keys are lowercased. Use `'content-type'`.
+- **Treating `req.url` as the full URL.** It is path plus query. `new URL(req.url)` without a base throws.
+- **Decoding each chunk with `toString`.** A character split across chunks becomes a replacement character. Concatenate, then decode once.
+- **No body size limit.** Buffering an endless stream is a denial of service. Cap it and answer 413.
+- **Assuming every header value is a string.** `set-cookie` is an array.
+- **Omitting `Content-Type`.** Clients sniff the bytes. For JSON, send `application/json`.
+- **200 with an error body, or 500 for bad input.** 4xx is the client's fault. 5xx is yours.
+- **Reading `req.headers['Content-Type']`.** Keys are lowercased. Use `content-type`.
 
 ## Best practices
 
-- **Parse URLs with the WHATWG `URL` class**, never the deprecated `url.parse()`.
-- **Cap body size** and reject with `413 Payload Too Large` before buffering the rest.
-- **Always set an explicit `Content-Type` with charset** for text.
-- **Validate `Content-Type` before parsing** — do not `JSON.parse` a body a client claimed was `text/html`.
-- **Return the right status code**: `400` invalid, `401` unauth, `404` missing, `405` wrong method (with an `Allow` header), `413` too big, `500` server error.
-- **Set security headers** (`X-Content-Type-Options: nosniff`, `Cache-Control`) deliberately rather than relying on defaults.
-- **Prefer `node:stream/consumers`** (`json()`, `text()`, `buffer()`) for concise, correct body reading.
+- **Parse URLs with the WHATWG `URL` class**, not `url.parse()`.
+- **Cap the body** and reject with 413 before you buffer the rest.
+- **Set `Content-Type` and a charset** for text.
+- **Check `Content-Type` before you parse.** Do not `JSON.parse` a body the client called `text/html`.
+- **Use the status that matches:** 400 invalid, 401 unauthenticated, 404 missing, 405 wrong method with `Allow`, 413 too big, 500 your bug.
+- **Set `X-Content-Type-Options: nosniff`** when you do not want the browser to guess.
+- **Prefer `node:stream/consumers`** (`json`, `text`, `buffer`) when you want the loop written for you.
 
 ## ⭐ Interview lens
 
 > **Q: How do you read a POST body in raw Node?**  
-> Listen on the `req` stream: collect `Buffer` chunks in `'data'`, concatenate them in `'end'` with `Buffer.concat`, then decode with `.toString('utf8')` and parse. Enforce a max size and handle `'error'`. Modern shortcut: `await require('node:stream/consumers').json(req)`.
+> A: Read the `req` stream yourself. On each `data` event, push the Buffer chunk into an array and add up the bytes. If the total crosses your cap, destroy the request and answer 413. On `end`, `Buffer.concat` the chunks, decode once with `toString('utf8')`, and `JSON.parse` if the content type says JSON. Listen for `error` on the stream too. The shortcut on modern Node is `await require('node:stream/consumers').json(req)`, which does that loop. The limit is doing this on a route that should not have a body, or with no cap. The helper will still buffer whatever the client sends.
 
 > **Q: Why concatenate buffers instead of building a string chunk by chunk?**  
-> A UTF-8 character can span two chunks; calling `toString()` on each chunk decodes a partial byte sequence and produces replacement characters (�). Concatenating the raw buffers first and decoding once preserves the bytes.
+> A: UTF-8 uses one to four bytes per character. A chunk boundary is wherever the socket buffer filled, so it can cut a character in half. `chunk.toString()` on a partial character emits the replacement character, and the next chunk's leftover bytes become another one. The text is then wrong even though you concatenated the strings. Keep the raw Buffers, `Buffer.concat` them, and decode the whole sequence once. The limit is a streaming parser that must emit text before the body ends. That parser needs a `StringDecoder`, which holds the incomplete bytes, not a `toString` on each chunk.
 
 > **Q: What is in `req.url` exactly?**  
-> Only the request target: the path and query string (e.g. `/search?q=node`). Not the scheme, not the host. The host is in `req.headers.host`. To parse, use `` new URL(req.url, `http://${req.headers.host}`) ``.
+> A: `req.url` is the request target: the path and the query string, such as `/search?q=node`. It does not include the scheme or the host. The host is `req.headers.host`. To get a pathname and a parsed query, build `new URL(req.url, 'http://' + req.headers.host)`. `pathname` is what you route on. `searchParams` is the query. The limit is routing on `req.url` itself. `/users` and `/users?active=1` are different strings, so an equality check against the path fails as soon as a client adds a query.
 
 > **Q: Trap — why does `req.headers['Content-Type']` come back `undefined`?**  
-> Node lowercases all header keys, so the correct access is `req.headers['content-type']`. Header names are case-insensitive on the wire; Node normalises them to lowercase in the parsed object.
-
-> **Q: What's the difference between `writeHead` and `setHeader`?**  
-> `setHeader(name, value)` sets one header and can be called repeatedly before the body; the header can still be read back or overwritten. `writeHead(status, headers)` sets the status and a batch of headers and marks them as sent — after it, headers are effectively flushed. You cannot `setHeader` after `writeHead`/first `write`.
-
-> **Q: Which status for “the client used the wrong HTTP method”?**  
-> `405 Method Not Allowed`, and you must include an `Allow` header listing the accepted methods. Returning `404` or `400` is a common wrong answer.
+> A: Node lowercases header names when it builds `req.headers`, because on the wire the names are case-insensitive. `Content-Type` and `content-type` are the same header, and the object key is `content-type`. `req.headers['Content-Type']` is `undefined`. If you need the bytes as they arrived, `req.rawHeaders` is a flat array that keeps the original case and order. The limit is `set-cookie`. That one is always an array, even when you expect a string, because a response can set more than one cookie.
 
 ## Cheat-card
 
-- `req.method` — uppercase verb; `req.url` — path + query only.
-- `req.headers` — lowercased keys; `set-cookie` is an array.
-- Body = stream: `'data'` (Buffers) → `Buffer.concat` → `.toString('utf8')`.
-- Parse URL: `` new URL(req.url, `http://${req.headers.host}`) ``.
-- Shortcut: `stream/consumers` → `json()` / `text()` / `buffer()`.
-- Response: set status + headers → `write` → `end`.
-- Always send `Content-Type`; cap body size (413).
-- Status map: 400 / 401 / 404 / 405+Allow / 413 / 500.
-- Urlencoded form: cap the body, decode once, `new URLSearchParams(text)` (`+` → space, `%XX` → bytes).
-- Multipart: use busboy 1.6.0 with `limits`; a file stream's `'limit'` + `truncated` means you answer 413.
-- ETag: `"x"` strong, `W/"x"` weak; `If-None-Match` compares weakly → 304; `If-Range` compares strongly.
-- Range: 206 + `Content-Range: bytes a-b/len`; unsatisfiable → 416 + `bytes */len`; several → `multipart/byteranges`.
-- Client IP: walk `X-Forwarded-For` from the right past your own proxies; never the left-most entry; Express `trust proxy` = your proxies, not `true`.
+- `req.method` is the uppercase verb. `req.url` is path plus query only.
+- `req.headers` has lowercased keys. `set-cookie` is an array.
+- Body: `data` gives Buffers, then `Buffer.concat`, then `toString('utf8')`. Cap the size.
+- URL: `new URL(req.url, 'http://' + req.headers.host)`.
+- Shortcut: `node:stream/consumers` `json()`, `text()`, `buffer()`.
+- Response: status and headers, then `write`, then `end`. Send `Content-Type`.
+- Status: 400, 401, 404, 405 with `Allow`, 413, 500.
 
----
+## Good to know
 
+- What is the difference between `writeHead` and `setHeader`? `setHeader(name, value)` sets one header and you can still read it back or overwrite it before the body. `writeHead(status, headers)` sets the status and a batch of headers and marks them sent. You cannot `setHeader` after `writeHead` or the first `write`.
+- Which status for the wrong HTTP method? `405 Method Not Allowed`, and the response must include an `Allow` header listing the methods you do accept. 404 and 400 are the usual wrong answers.
+- A urlencoded form is `application/x-www-form-urlencoded`. Cap the body, decode once, then `new URLSearchParams(text)`. `+` becomes a space and `%XX` becomes bytes. `URLSearchParams` has been global since v10.0.0.
+- Multipart file uploads: use busboy, with `limits`. A file stream's `limit` event and `truncated` means you answer 413. A hand parser breaks on a boundary that is split across chunks.
+- ETag: `"x"` is strong, `W/"x"` is weak. `If-None-Match` compares weakly and can answer 304. `If-Range` compares strongly. A satisfiable `Range` is 206 with `Content-Range: bytes a-b/len`. An unsatisfiable range is 416 with `bytes */len`.
+- Client IP behind a proxy: walk `X-Forwarded-For` from the right, past the proxies you operate. Do not trust the left-most entry. Express `trust proxy` is the list of your proxies, not `true`.
 ## Learn More
 
 - [HTTP messages | MDN developer.mozilla.org](https://developer.mozilla.org/en-US/docs/Web/HTTP/Messages)

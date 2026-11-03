@@ -13,33 +13,37 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+req is everything the client sent, and res is how you send one reply back. Express fills the path parameters and the query string for you, and it leaves the body unread until you add a parser such as the JSON parser. You answer with helpers that set the status and send JSON, which also set the headers and end the response. These objects exist so you stop repeating that plumbing. The trade-off is that you still get exactly one response per request, and a body you did not parse stays undefined.
+
 ## Why it matters
 
-Every Express handler you will ever write does two things: it *reads* the incoming request and it *writes* a response. The `req` and `res` objects are the interface for both, and knowing them fluently is the difference between fumbling through docs on every endpoint and writing handlers on autopilot. Interviewers use these objects as a fast competence check: "where does the request body come from?", "how do you set a 201 with JSON?", "what does `res.json()` do that `res.send()` doesn't?" — quick questions that instantly reveal whether you have actually built APIs or just skimmed a tutorial.
+Every handler does two things. It reads the request, and it writes a response. `req` and `res` are the interface for both. Interviewers use them as a fast check: where the body comes from, how you send a 201 with JSON, and what `res.json()` does that `res.send()` does not.
 
-Beyond the individual methods, these objects teach an important truth about Express: they are Node's own `IncomingMessage` and `ServerResponse`, *extended* with conveniences. That means everything you know about Node HTTP still applies, and the Express helpers are sugar on top. This topic maps the request side (`params`, `query`, `body`, `headers` and how body parsing actually works) and the response side (`json`, `status`, `send`, `redirect`, headers), plus the gotchas — the string-typing, the one-response rule, the parsing prerequisites — that turn into production bugs when ignored.
+Under the helpers, these are Node's own `IncomingMessage` and `ServerResponse` with extra methods. What you know about Node HTTP still applies. This lesson maps the read side, which is params, query, body, and headers, and the write side, which is status, json, send, redirect, and headers. The bugs are the string types, the one-response rule, and forgetting to parse the body.
 
 ## The concept, simply
 
-**`req` is the request: everything the client sent.** It bundles four sources of input. `req.params` holds path parameters (`/users/:id` → `req.params.id`). `req.query` holds the parsed query string (`?page=2` → `req.query.page`). `req.body` holds the parsed request body (the JSON a client POSTs) — but only if a body-parsing middleware ran first. `req.headers` (and the helper `req.get('Header-Name')`) holds the request headers. Plus useful extras: `req.method`, `req.path`, `req.originalUrl`, `req.cookies` (with a cookie parser), and `req.ip`.
+`req` is the request, everything the client sent. It has four inputs. `req.params` holds path parameters, so `/users/:id` gives `req.params.id`. `req.query` holds the parsed query string, so `?page=2` gives `req.query.page`. `req.body` holds the parsed body, such as JSON a client POSTs, but only if a body-parsing middleware ran first. `req.headers`, and the helper `req.get('Header-Name')`, hold the headers. You also get `req.method`, `req.path`, `req.originalUrl`, `req.ip`, and `req.cookies` if a cookie parser ran.
 
-**`res` is the response: everything you send back.** Its key methods are `res.status(code)` to set the HTTP status (chainable), `res.json(obj)` to send a JSON body (it serialises and sets `Content-Type: application/json`), `res.send(body)` to send a string, Buffer, or object (it guesses the type), and `res.redirect(url)` to send a redirect. You also set headers with `res.set()`/`res.header()`, cookies with `res.cookie()`, and end a bodiless response with `res.status(204).end()`. The golden rule: **you send exactly one response per request.**
+`res` is the response, everything you send back. `res.status(code)` sets the status and returns `res` so you can chain. `res.json(obj)` serializes the value and sets `Content-Type: application/json`. `res.send(body)` sends a string, a Buffer, or an object, and it guesses the type. `res.redirect(url)` sends a redirect. `res.set()` sets a header. `res.cookie()` sets a cookie. `res.status(204).end()` ends a response with no body. The rule is one response per request.
 
 ![Two panels one labelled req incoming listing params query body and headers the other labelled res outgoing listing status json send and redirect](assets/i35_01_be4c0901.svg)
 
-req is the read side (params, query, body, headers); res is the write side (status, json, send, redirect). One response per request.
+`req` is the read side. `res` is the write side. One response per request.
 
-The one concept that trips everyone: **body parsing is not automatic**. When a client POSTs JSON, the body arrives as a raw stream of bytes. Express does not decode it into `req.body` unless you registered `express.json()` (for JSON) or `express.urlencoded()` (for HTML-form encoding) earlier in the pipeline. Without that, `req.body` is `undefined`. Params and query are parsed for free; the body is opt-in because parsing strategy depends on content type.
+Body parsing is not automatic. A JSON POST arrives as a stream of bytes. Express does not put that on `req.body` unless you registered `express.json()` for JSON, or `express.urlencoded()` for HTML form bodies, earlier in the pipeline. Without that, `req.body` is `undefined`. Params and query are parsed for you. The body is opt-in because the strategy depends on the content type.
 
 ## How it works
 
-`req` and `res` are the same objects Node's HTTP server creates — `http.IncomingMessage` and `http.ServerResponse` — with Express's prototype methods mixed in. So `res.json()` ultimately calls `res.end()` underneath, and `req.headers` is Node's raw headers map. This layering is why you can always escape to the lower level: `res.setHeader()`, `res.writeHead()`, and `res.end()` all still work. Express helpers exist to remove repetitive steps, not to hide the machine.
+`req` and `res` are the objects Node's HTTP server creates, `http.IncomingMessage` and `http.ServerResponse`, with Express methods mixed in. `res.json()` ends up calling `res.end()`. `req.headers` is Node's header map. You can still use `res.setHeader()`, `res.writeHead()`, and `res.end()`. The helpers remove repeated steps. They do not hide the machine.
 
-Body parsing works because a parser is a middleware that reads the request stream to completion, decodes it according to the `Content-Type` header, and assigns the result to `req.body` before calling `next()`. `express.json()` only acts on requests whose `Content-Type` is `application/json`; `express.urlencoded()` handles `application/x-www-form-urlencoded`. If the incoming type does not match, or the request has no body at all, the parser passes through and `req.body` is left **`undefined`** in Express 5 (changed in v5; Express 4's parsers set it to `{}` in that case). With no parser registered it is `undefined` in both versions. So never destructure `req.body` without a fallback — `const { email } = req.body` throws `TypeError: Cannot destructure property 'email' of 'req.body' as it is undefined.` on a POST with no JSON body; write `req.body ?? {}` or validate it first. Both parsers accept a `limit` option to cap body size — an important guard against memory-exhaustion attacks. File uploads (`multipart/form-data`) need a dedicated library like `multer`, not the built-in parsers.
+A body parser is middleware. It reads the request stream to the end, decodes it according to `Content-Type`, assigns the result to `req.body`, and then calls `next()`. `express.json()` acts only when `Content-Type` is `application/json`. `express.urlencoded()` handles `application/x-www-form-urlencoded`. If the type does not match, or the request has no body, the parser passes through. On Express 5, `req.body` stays `undefined` in that case. Express 4's parsers set it to `{}`. With no parser registered it is `undefined` on both. Do not destructure `req.body` without a fallback. `const { email } = req.body` throws `TypeError: Cannot destructure property 'email' of 'req.body' as it is undefined` on a POST with no JSON body. Use `req.body ?? {}`, or validate first. Both parsers take a `limit` so one huge body cannot exhaust memory. File uploads, which are `multipart/form-data`, need a library such as multer, not these parsers.
 
-On the response side, `res.json(value)` runs `JSON.stringify` on the value, sets the `Content-Type` to `application/json`, and sends it. `res.send(value)` is more flexible and infers the type: a string is sent as HTML/text, a Buffer as binary, and — importantly — an object or array is sent as JSON (it delegates to `res.json`). For a JSON API, prefer `res.json()` explicitly; it is unambiguous. `res.status(code)` only *sets* the status and returns `res` so you can chain (`res.status(201).json(...)`); it does not send anything on its own. `res.redirect(url)` defaults to a 302 and sets the `Location` header; pass a status first for a permanent redirect (`res.redirect(301, url)`).
+On the way out, `res.json(value)` runs `JSON.stringify`, sets `Content-Type` to `application/json`, and sends the body. `res.send(value)` infers the type. A string goes out as HTML or text, a Buffer as binary, and an object or array is handed to `res.json`. For a JSON API, call `res.json()` so the intent is obvious. `res.status(code)` only sets the status and returns `res`. It does not send. You chain it: `res.status(201).json(...)`. `res.redirect(url)` defaults to 302 and sets `Location`. Pass a status first for a permanent redirect: `res.redirect(301, url)`.
 
-The strict rule underneath all of this is that **an HTTP response can be sent only once**. Methods like `res.json`, `res.send`, `res.redirect`, and `res.end` *finish* the response. Calling any of them a second time — or calling one after the headers have been flushed — throws `ERR_HTTP_HEADERS_SENT` ("Cannot set headers after they are sent"). This is why you `return` after responding, and why a handler that responds must not also fall through to `next()` into code that responds again. Types are the other recurring gotcha: values in `req.params` and `req.query` are always strings, and `req.body` reflects exactly what the client sent — never trust it without validation.
+An HTTP response can be sent only once. `res.json`, `res.send`, `res.redirect`, and `res.end` finish it. A second call, or a call after the headers were flushed, throws `ERR_HTTP_HEADERS_SENT`, "Cannot set headers after they are sent". That is why you `return` after responding, and why a handler that responded must not also call `next()` into code that responds again. Values in `req.params` and `req.query` are always strings. `req.body` is whatever the client sent. Do not trust it without validation.
 
 ## Code examples
 
@@ -116,57 +120,55 @@ app.get('/guard/:id', (req, res) => {
 
 ## Common mistakes & gotchas
 
-- **`req.body` is `undefined`.** You forgot `express.json()` / `express.urlencoded()`, or registered it after the route, or the client didn't send a matching `Content-Type`, or (Express 5) the request simply had no body — Express 5 no longer defaults it to `{}`.
-- **Sending two responses.** Calling `res.json()` then `res.send()` (or responding without `return` and falling through) throws "Cannot set headers after they are sent". Respond once; `return` after.
-- **Assuming numbers.** `req.params.id` and `req.query.page` are strings; do `Number(...)` and validate. `?flag=false` is the truthy string `"false"`, not a boolean.
-- **Trusting `req.body`.** It is whatever the client sent, including missing or malicious fields. Validate/whitelist before using it (schema library or manual checks).
-- **Using `express.json()` for file uploads.** Multipart uploads need `multer`; the JSON parser won't touch `multipart/form-data`.
-- **Forgetting a body-size `limit`.** An unbounded parser lets a client send a huge body and exhaust memory; set `limit`.
-- **Confusing `req.path`, `req.url`, and `req.originalUrl`.** Inside a mounted router `req.url` is relative to the mount; `req.originalUrl` is the full path the client requested.
+- **`req.body` is `undefined`.** You forgot `express.json()` or `express.urlencoded()`, you registered it after the route, the client sent a different `Content-Type`, or on Express 5 the request simply had no body. Express 5 no longer defaults that case to `{}`.
+- **Two responses.** `res.json()` and then `res.send()`, or a response without `return` that falls through, throws "Cannot set headers after they are sent". Respond once and return.
+- **Assuming numbers.** `req.params.id` and `req.query.page` are strings. Use `Number(...)` and validate. `?flag=false` is the truthy string `"false"`, not a boolean.
+- **Trusting `req.body`.** It is whatever the client sent, including missing or hostile fields. Validate before you use it.
+- **Using `express.json()` for file uploads.** Multipart needs multer. The JSON parser ignores `multipart/form-data`.
+- **No body-size `limit`.** An unbounded parser lets a client exhaust memory. Set `limit`.
+- **Mixing up `req.path`, `req.url`, and `req.originalUrl`.** Inside a mounted router, `req.url` is relative to the mount. `req.originalUrl` is the full path the client requested.
 
 ## Best practices
 
-- **Register body parsers once, near the top**, with an explicit `limit`, before any route that reads `req.body`.
-- **Prefer `res.json()` for APIs** over `res.send()` — it is explicit about content type and intent, even though `send` would also JSON-encode an object.
-- **Always set an intentional status** — 201 for creates, 204 for empty successes, 4xx for client errors — instead of letting everything default to 200.
-- **Validate and coerce request inputs at the boundary** (params, query, body) with a schema library, so handlers work with clean, typed data.
-- **Always `return` after sending a response** to guarantee the one-response rule and avoid header-already-sent errors.
-- **Read headers via `req.get('Name')`** (case-insensitive) rather than indexing `req.headers` with a guessed casing.
+- Register body parsers once, near the top, with an explicit `limit`, before any route that reads `req.body`.
+- Prefer `res.json()` for APIs. `res.send()` would also JSON-encode an object, but `res.json()` states the content type.
+- Set the status on purpose. 201 for a create, 204 for an empty success, 4xx for a client error. Do not leave everything at 200.
+- Validate and coerce params, query, and body at the boundary, with a schema, so handlers see clean values.
+- `return` after every response.
+- Read headers with `req.get('Name')`. It is case-insensitive. Indexing `req.headers` with a guessed case is not.
 
 ## ⭐ Interview lens
 
 > **Q: "Where do `req.params`, `req.query`, and `req.body` each come from?"**  
-> A: `req.params` from named segments in the route path (`/users/:id`); `req.query` from the query string after the `?`; `req.body` from the parsed request body — but only after a body-parsing middleware like `express.json()` runs. Params and query are parsed automatically; the body is opt-in.
+> A: `req.params` comes from named segments in the route path. `/users/:id` matched against `/users/42` gives `req.params.id`. Express parses that as it matches the route. `req.query` comes from the query string after `?`, and Express parses it for every request. `req.body` comes from the request body, but only after a parser such as `express.json()` has run and the `Content-Type` matched. Params and query are automatic. The body is opt-in because a JSON body, a form body, and a file upload are different parsers. For example, a POST to `/users/42/notes?draft=true` with a JSON object puts the id in `params`, `"true"` in `query.draft`, and the object in `body` only if `express.json()` ran above the route. The limit is Express 5. If no parser matched, or the request had no body, `req.body` is `undefined`, not `{}`.
 
 > **Q: "Why is `req.body` undefined even though the client sent JSON?"**  
-> A: No body parser ran before the handler. You need `app.use(express.json())` registered above the route, and the client must send `Content-Type: application/json` so the parser activates.
+> A: No body parser ran before the handler, or it ran but did not claim this request. `express.json()` has to be registered with `app.use` above the route, and the client has to send `Content-Type: application/json`. The parser reads the stream, runs `JSON.parse`, and sets `req.body` before it calls `next()`. If the header is `text/plain`, or there is no body, the parser calls `next()` and leaves `req.body` alone. On Express 5 that means `undefined`. On Express 4 the built-in parsers set `{}` when they did not parse a body. The limit of checking only "did I call `express.json()`" is order. A parser registered below the route never runs for that route.
 
 > **Q: "Difference between `res.send()` and `res.json()`?"**  
-> A: `res.json()` always serialises the argument with `JSON.stringify` and sets `Content-Type: application/json`. `res.send()` infers the type — string as text/HTML, Buffer as binary, object/array delegated to `res.json()`. For a JSON API, use `res.json()` for clarity.
-
-> **Q: "How do you send a 201 with a JSON body?"**  
-> A: `res.status(201).json(data)`. `res.status()` only sets the code and returns `res` for chaining; `res.json()` serialises and sends. It does not send by itself.
+> A: `res.json(value)` always runs `JSON.stringify` on the value and sets `Content-Type` to `application/json`, then ends the response. `res.send(value)` looks at the type. A string goes out as HTML or text, a Buffer as binary, and an object or array is passed through to `res.json`. So `res.send({ ok: true })` does produce JSON, but a reader cannot see that from the call. On a JSON API, call `res.json` so the content type is explicit. Both methods finish the response. You cannot call the other one afterwards. Chain the status first if you need it: `res.status(201).json(data)`. `res.status` only stores the code and returns `res`. It does not send.
 
 > **Q (trap): "What throws 'Cannot set headers after they are sent'?"**  
-> A: Sending the response more than once — e.g. calling `res.json()` and then another `res.send()`/`res.redirect()`, or responding and then falling through into `next()` to code that also responds. An HTTP response can be finished only once; `return` after you respond.
-
-> **Q: "Are `req.params` and `req.query` values typed?"**  
-> A: No — always strings (query values can also be arrays/objects from repeated or bracketed keys, but never numbers or booleans). `?active=false` gives the truthy string `"false"`. You must coerce and validate.
+> A: You finished the response twice. `res.json`, `res.send`, `res.redirect`, and `res.end` write the status line and headers and then the body. Node throws `ERR_HTTP_HEADERS_SENT`, "Cannot set headers after they are sent", if you call another of them, or if you call `next()` and a later handler also writes. The usual shape is a handler that sends a 400 and then, without `return`, falls through to `res.json` of the success body. Return after the error response. The same throw happens if you try to `res.status(500).json(...)` after a stream has already flushed the headers. At that point `res.headersSent` is true, and the only honest move is to stop writing.
 
 ## Cheat-card
 
-- `req` reads: `req.params` (path), `req.query` (`?`), `req.body` (needs parser), `req.get('H')` (headers).
-- `res` writes: `res.status(n)` (chainable), `res.json(obj)`, `res.send(x)`, `res.redirect([code,] url)`.
-- `req.body` needs `express.json()` / `express.urlencoded()` **before** the route.
-- Params & query are **always strings**. Coerce & validate.
-- **One response per request.** `return` after responding.
-- `res.json` = explicit JSON; `res.send` = infers type (object → JSON).
-- Set a body-size `limit`; use `multer` for file uploads.
-- `req`/`res` extend Node's `IncomingMessage`/`ServerResponse` — `res.end()`/`res.setHeader()` still work.
-- **More of the API** (`req.is`, `req.accepts*`, `req.ip`/`ips`, `req.fresh`, `req.range`, `res.format`, `res.vary`, `res.append`, `express.raw`/`text`): lesson 54.
-- **Guard JSON routes:** `if (!req.is('application/json')) return res.sendStatus(415)`, then `req.body ?? {}`.
+- Read with `req.params` (the path), `req.query` (after `?`), `req.body` (needs a parser), and `req.get('H')` for a header.
+- Write with `res.status(n)`, which only sets the code, then `res.json(obj)`, `res.send(x)`, or `res.redirect(code, url)`.
+- `req.body` needs `express.json()` or `express.urlencoded()` before the route.
+- Params and query are always strings. Coerce them and validate.
+- One response per request. Return after you respond.
+- `res.json` is explicit JSON. `res.send` infers the type, and an object becomes JSON.
+- Set a body `limit`. Use multer for file uploads, not `express.json()`.
+- `req` and `res` extend Node's `IncomingMessage` and `ServerResponse`. `res.end()` and `res.setHeader()` still work.
+- More of the API, including `req.is`, `req.accepts`, `req.ip`, `req.fresh`, `req.range`, `res.format`, `res.vary`, `res.append`, `express.raw`, and `express.text`, is lesson 54.
+- Guard a JSON route with `if (!req.is('application/json')) return res.sendStatus(415)`, then read `req.body ?? {}`.
 
----
+## Good to know
+
+- Send a 201 with JSON as `res.status(201).json(data)`. `res.status` only stores the code and returns `res`. `res.json` serializes and sends.
+- `req.params` and `req.query` values are always strings. A query value can also be an array or an object when the key is repeated or bracketed, but it is never a number or a boolean. `?active=false` is the truthy string `"false"`. Coerce and validate.
+- On Express 5, `req.body` stays `undefined` when no parser matched or the request had no body. Express 4's parsers set `{}` in that case. With no parser at all, both versions leave it `undefined`.
 
 ## Learn More
 

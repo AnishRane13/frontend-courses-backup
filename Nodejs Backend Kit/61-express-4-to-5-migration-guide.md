@@ -13,31 +13,25 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Express 5 keeps the same building blocks as Express 4: routes, the request and response, and middleware, which is a function that runs before your handler. It is built from newer helper packages, so some methods were removed and some calls that still exist now return a different status. You find the breaks from the warnings Express 4 already prints, then from the official rewrite script, then by testing the cases that do not throw. The trade-off is that the dangerous changes stay quiet: a create that used to answer 201 can answer 200.
+
 ## Why it matters
 
-Express 5 keeps the shape of the Express 4 API: `app.get`, `req`, `res`, middleware and `next`. That is why an upgrade looks easy and then fails in three different ways:
+An Express 5 upgrade looks small because `app.get`, `req`, `res`, middleware, and `next` are still there. It fails in three ways.
 
-- **Crashes at startup.** Removed methods (`app.del`, `app.param(fn)`) and old route strings (`'/*'`, `'/:id?'`) throw while the app registers its routes.
-- **Errors per request.** `req.param()`, `res.sendfile()` and `req.acceptsCharset()` are gone, so the routes that call them answer 500 with `TypeError: … is not a function`.
-- **Silent behaviour changes.** These are the dangerous ones. `res.json(obj, 201)` now answers **200**. `res.send(404)` answers **200** with the body `404`. `res.redirect('back')` sends `Location: back`. `?a[b]=c` stops being a nested object, `req.body` becomes `undefined`, and `/.well-known/…` starts returning 404. None of these throw.
+- **Crashes at startup.** Removed methods such as `app.del` and `app.param(fn)`, and old route strings such as `'/*'` and `'/:id?'`, throw while the app registers routes.
+- **Errors on a request.** `req.param()`, `res.sendfile()`, and `req.acceptsCharset()` are gone, so those routes answer 500 with `TypeError: … is not a function`.
+- **Silent behaviour changes.** These are the ones that ship. `res.json(obj, 201)` now answers **200**. `res.send(404)` answers **200** with the body `404`. `res.redirect('back')` sends `Location: back`. `?a[b]=c` stops being a nested object, `req.body` becomes `undefined`, and `/.well-known/…` starts returning 404. None of these throw.
 
-This lesson walks the official migration guide ([expressjs.com/en/guide/migrating-5.html](https://expressjs.com/en/guide/migrating-5.html)) item by item. For each item it shows what Express 4.22.3 actually did and what Express 5.3.0 actually does, measured by running both side by side. It ends with the official codemod (run on a real sample, with its diff and the two things it got wrong), grep patterns for what the codemod does not touch, and a step-by-step checklist.
+This lesson follows the official migration guide item by item, with what Express 4.22.3 did and what Express 5.3.0 does, measured side by side. It includes the official codemod, a script that rewrites source, the two mistakes that script made on a real sample, grep patterns for what it skips, and a checklist.
 
 ## The concept, simply
 
-Express 5.0 was released in September 2024. 5.3.0 is the current release on npm as of this lesson. It needs Node 18 or newer (`"engines": {"node": ">= 18"}` in its `package.json`; Express 4.22.3 says `>= 0.10.0`). Most of the changes come from Express swapping or upgrading the small packages it is built from:
+Express 5.0 was released in September 2024. This lesson uses 5.3.0. It needs Node 18 or newer. Express 4.22.3 still says it can run on Node 0.10.0 and up. Most of the behaviour changes come from newer copies of the small packages Express is built from: the router, the path matcher path-to-regexp, the body parser, the static-file sender, and the query parser. The version pairs are under Good to know.
 
-| Part | Express 4.22.3 | Express 5.3.0 |
-|---|---|---|
-| Router | built in (`lib/router`) | the `router` package 2.2.0 |
-| Path matching | path-to-regexp 0.1.13 | path-to-regexp 8.4.2 |
-| Body parsers | body-parser 1.20.8 | body-parser 2.3.0 |
-| Static files / `sendFile` | serve-static 1.16.3, send 0.19.2 | serve-static 2.2.1, send 1.2.1 |
-| MIME types | mime 1.6.0 / mime-db 1.52.0 | mime-types 3.0.2 / mime-db 1.54.0 |
-| Final error handler | finalhandler 1.3.2 | finalhandler 2.1.1 |
-| Default query parser | `"extended"` (qs) | `"simple"` (Node's `querystring`) |
-
-You can run both majors in one project to compare them, because npm can install a package under an alias:
+You can install both majors in one project under two names:
 
 bash
 
@@ -47,69 +41,64 @@ $ node -p "require('express/package.json').version + ' / ' + require('express4/p
 5.3.0 / 4.22.3
 ```
 
-Every example below takes the package name as an argument (`node file.cjs express4` or `node file.cjs express`).
+Every example below takes the package name as an argument, `node file.cjs express4` or `node file.cjs express`.
 
-The guide groups the changes into three lists, and this lesson keeps that order:
+The guide, and this lesson, use three lists:
 
-1. **Removed:** methods and signatures that no longer exist. Most of them printed a `deprecated` warning in Express 4.
+1. **Removed:** methods and signatures that no longer exist. Most of them printed a deprecation warning in Express 4. A deprecation warning means the call still works and will be removed.
 2. **Changed:** APIs that still exist but behave differently.
 3. **Improvements:** changes that need no code edits.
 
 ## How it works
 
-Upgrade in this order, because each step makes the next one's failures easier to read:
+Upgrade in this order, because each step makes the next failure easier to read:
 
-1. **Run your test suite on Express 4 and read its deprecation warnings.** Express 4 prints a line such as `express deprecated res.json(obj, status): Use res.status(status).json(obj) instead at routes/users.js:12:7` for most removed APIs. It prints the warning once for each call site, and only when that line actually runs. Each warning names a line you must change.
-2. **Run the official codemod** (`npx codemod@latest @expressjs/v5-migration-recipe`) on a clean git tree, then review its diff (Example 9).
-3. **Grep for what the codemod does not handle**: route strings, `req.query` writes, `express.urlencoded()` without options, `router.param` arrays, `clearCookie` options (Example 10).
-4. **Install `express@5`, start the app,** and fix every `PathError` and `TypeError` thrown at startup.
-5. **Run the tests again** and go through the silent changes in the table below one by one.
+1. **Run the test suite on Express 4 and read deprecation warnings.** Express 4 prints a line such as `express deprecated res.json(obj, status): Use res.status(status).json(obj) instead at routes/users.js:12:7` for most removed APIs. It prints the warning once per call site, and only when that line runs. Each warning names a line to change.
+2. **Run the official codemod** (`npx codemod@latest @expressjs/v5-migration-recipe`) on a clean git tree, then review the diff (Example 9).
+3. **Search for what the codemod skips:** route strings, writes to `req.query`, `express.urlencoded()` with no options, `router.param` arrays, and `clearCookie` options (Example 10).
+4. **Install `express@5`, start the app,** and fix every `PathError` and `TypeError` thrown at startup. A `PathError` means the route string uses syntax the new path matcher rejects.
+5. **Run the tests again** and walk the silent changes below one by one.
 
-**Removed methods and signatures.** Results from Examples 1 and 2:
+**Removed methods and the silent signature changes.** Measured in Examples 1 and 2:
 
-| Guide item | Express 4.22.3 (measured) | Express 5.3.0 (measured) | Replace with |
+| What you wrote | Express 4.22.3 | Express 5.3.0 | Write this instead |
 |---|---|---|---|
-| `app.del()` | works, `deprecated app.del` | `TypeError: app.del is not a function` at registration | `app.delete()` |
-| `app.param(fn)` / `router.param(fn)` | works, `deprecated router.param(fn)` | `TypeError: argument name must be a string` | `app.param(name, fn)` |
-| `req.acceptsCharset/Encoding/Language()` | works, deprecated | `TypeError: req.acceptsCharset is not a function` (500) | `acceptsCharsets/Encodings/Languages()` |
-| leading colon, `app.param(':id', fn)` | runs, deprecated | **never runs, no warning** (stored under the name `':id'`) | `app.param('id', fn)` |
-| `req.param(name)` | works, deprecated | `TypeError: req.param is not a function` | `req.params.x`, `req.body.x` or `req.query.x`, whichever the value really comes from |
-| `res.json(obj, status)`, `res.jsonp(obj, status)` | status 201 used, deprecated | **200**, second argument ignored | `res.status(201).json(obj)` |
-| `res.send(body, status)` | status used, deprecated | **200**, second argument ignored | `res.status(s).send(body)` |
-| `res.send(404)` | `404 Not Found`, deprecated | **200**, JSON body `404` | `res.sendStatus(404)` |
-| `res.redirect(url, status)` | redirect works, deprecated | 500 `TypeError: Invalid status code: "/users"` | `res.redirect(301, url)` |
-| `res.redirect('back')`, `res.location('back')` | uses `Referer` (or `/`), deprecated | **`Location: back`** (a literal relative URL) | `req.get('Referrer') \|\| '/'` |
+| `app.del()` | works, deprecated | `TypeError: app.del is not a function` | `app.delete()` |
+| `app.param(fn)` | works, deprecated | `TypeError: argument name must be a string` | `app.param(name, fn)` |
+| `req.acceptsCharset()` and the Encoding and Language forms | works, deprecated | `TypeError` and a 500 | `acceptsCharsets()`, `acceptsEncodings()`, `acceptsLanguages()` |
+| `app.param(':id', fn)` | runs, deprecated | never runs, no warning | `app.param('id', fn)` |
+| `req.param(name)` | works, deprecated | `TypeError: req.param is not a function` | `req.params`, `req.body`, or `req.query`, whichever source is real |
+| `res.json(obj, status)` and `res.jsonp(obj, status)` | status 201 used | **200**, second argument ignored | `res.status(201).json(obj)` |
+| `res.send(body, status)` | status used | **200**, second argument ignored | `res.status(s).send(body)` |
+| `res.send(404)` | 404 Not Found | **200**, JSON body `404` | `res.sendStatus(404)` |
+| `res.redirect(url, status)` | redirect works | 500 `TypeError: Invalid status code: "/users"` | `res.redirect(301, url)` |
+| `res.redirect('back')` and `res.location('back')` | uses the Referer, or `/` | **`Location: back`** | `req.get('Referrer') \|\| '/'` |
 | `res.sendfile()` | works, deprecated | `TypeError: res.sendfile is not a function` | `res.sendFile()` |
-| `sendFile`/`static` option `hidden` | `hidden: true` serves dotfiles, deprecated | option ignored, dotfiles 404 | `dotfiles: 'allow'` |
-| `from` option | not usable through `res.sendFile` in 4.22.3 either | same `TypeError` | `root` |
-| `express.static.mime` | an object (`mime` 1.6.0) | `undefined` | the `mime-types` package |
-| MIME types | `.js` → `application/javascript` | `.js` → `text/javascript` | nothing. Update tests that compare `Content-Type`. |
-| debug output | `DEBUG=express:*` shows router lines | router lines moved to `router`, `router:*` | `DEBUG=express:*,router,router:*` |
 
-The guide says Express 5 "will silently ignore" a leading colon in `app.param(name, fn)` and "use the name parameter without prefixing it with a colon". In router 2.2.0, `Router.prototype.param` stores the name exactly as given. So `app.param(':uid', fn)` registers a callback for a parameter literally named `:uid`. That callback never matches, and Example 1 shows it never runs.
+The migration guide says Express 5 will ignore a leading colon in `app.param(name, fn)` and store the name without it. In router 2.2.0 the name is stored exactly as given. `app.param(':uid', fn)` registers a callback for a parameter literally named `:uid`. That callback never matches. Example 1 shows it never runs.
 
-**Path syntax.** path-to-regexp 8 removed `?`, `+`, `*`, `(…)` and `[…]` from string patterns. Old strings throw a `PathError` at registration. [Express Routing Extras](53-express-routing-extras.md) (lesson 53) has the full before/after table and the real errors (its Examples 2 and 3). Note that Express 4 accepts the new syntax and just never matches it. Wildcards now give arrays (`req.params.splat` is `['foo', 'bar']`), and an unmatched optional parameter is absent from `req.params` instead of being `undefined` (Example 4).
+**Path syntax.** path-to-regexp 8 removed `?`, `+`, `*`, parentheses, and square brackets from string patterns. Old strings throw a `PathError` at registration. Lesson 53 has the before and after table. Express 4 accepts the new syntax and simply never matches it. A wildcard is now an array, so `req.params.splat` is `['foo', 'bar']`. An unmatched optional parameter is absent from `req.params` instead of being `undefined` (Example 4).
 
-**Async errors.** An Express 4 route handler is called inside a synchronous `try/catch`. An `async` handler returns a promise straight away, so when that promise rejects later, nothing in Express is listening. The rejection becomes an unhandled rejection. Node's default `--unhandled-rejections=throw` mode (since Node 15) turns it into an uncaught exception, and **the process exits with code 1**. Every other in-flight request is dropped with it (Example 3). In Express 5, the router checks whether a handler returned a promise. If it did, the router attaches `.then(null, err => next(err || new Error('Rejected promise')))`. A rejected or throwing `async` handler or middleware therefore reaches your error middleware exactly as if you had called `next(err)`. A rejection with a falsy value (`throw undefined`) arrives as `Error: Rejected promise`. You can delete `asyncHandler` wrappers and `express-async-errors` after the upgrade. They still work, but they are redundant.
+**Async errors.** An Express 4 route runs inside a synchronous try/catch. An `async` handler returns a promise immediately, so a later rejection has nobody listening. It becomes an unhandled rejection. Node's default since Node 15 is to throw on that, and **the process exits with code 1**. Every other in-flight request dies with it (Example 3). In Express 5 the router checks whether the handler returned a promise. If it did, the router attaches a failure handler that calls `next(err)`. A falsy rejection, such as `throw undefined`, arrives as `Error: Rejected promise`. After the upgrade you can delete `asyncHandler` wrappers and `express-async-errors`. They still work. They are redundant.
 
 ![Middleware A calls next(), the handler throws or calls next(err), the normal middleware after it is skipped, and the error jumps straight to the 4-argument error handler; notes say Express 4 does not catch async throws while Express 5 auto-forwards a rejected async handler to next(err)](assets/i34_01_6ef3f077.svg)
-*Figure: How an error skips ahead. Look at: the two notes at the bottom. "Express 4: async throws are NOT caught" (in practice the process crashes), while "Express 5: a rejected async handler auto-forwards to next(err)".*
+*Figure: an error skips normal middleware and lands in the four-argument error handler. Express 4 does not catch an async throw, so the process crashes. Express 5 forwards a rejected async handler to `next(err)`.*
 
 **Request changes** (Example 4):
 
-- **`req.body`** is `undefined` until a body parser has set it. In Express 4 it was `{}` whenever a parser was registered, even if that parser skipped the request (for example a `text/plain` body with only `express.json()`). Code that destructures `req.body` must use `req.body ?? {}`.
-- **`req.query`** is a getter (not a writable property). It re-parses the query string **on every read**, so `req.query === req.query` is `false`. Assigning to it throws in strict code (ES modules and `'use strict'` files) and is silently ignored in sloppy code. Mutating it (`req.query.page = 1`) changes an object that the next read throws away. Put normalised values somewhere else, for example `res.locals.validated` (the pattern used in lesson 65).
-- **The default query parser** is `"simple"` (Node's `querystring`). `?a[b]=c` gives `{ 'a[b]': 'c' }`. Repeated keys still give arrays. `app.set('query parser', 'extended')` restores qs parsing.
-- **`req.host`** keeps the port (`example.com:8080`). In Express 4 it dropped the port and was deprecated in favour of `req.hostname`, which never includes the port in either version.
-- **`req.params`** has a null prototype for string paths (`req.params.hasOwnProperty` is `undefined`; use `Object.hasOwn`). A RegExp route still gives a normal object.
+- **`req.body`** is `undefined` until a body parser sets it. In Express 4 it was `{}` whenever a parser was registered, even when that parser skipped the request, for example a `text/plain` body with only `express.json()`. Code that destructures `req.body` needs `req.body ?? {}`.
+- **`req.query`** is a getter, not a writable property. It parses the query string again on every read, so `req.query === req.query` is `false`. Assigning to it throws in strict code, which includes ES modules and files with `'use strict'`, and is ignored in non-strict code. Mutating it, as in `req.query.page = 1`, changes an object that the next read throws away. Put normalised values on an object you own, for example `res.locals.validated` (lesson 65).
+- **The default query parser** is `"simple"`, which is Node's `querystring` module. `?a[b]=c` gives `{ 'a[b]': 'c' }`. Repeated keys still give arrays. `app.set('query parser', 'extended')` restores the old qs parsing, where brackets build nested objects.
+- **`req.host`** keeps the port, so you see `example.com:8080`. In Express 4 it dropped the port. `req.hostname` never includes the port in either version.
+- **`req.params`** has a null prototype for string paths, so `req.params.hasOwnProperty` is `undefined`. Use `Object.hasOwn`. A RegExp route still gives a normal object.
 
-**Body parsers** (Example 5). `express.urlencoded()` now defaults to `extended: false` (Node's `querystring`, flat keys). Express 4 defaulted to `extended: true` (qs, nested objects) and printed `body-parser deprecated undefined extended: provide extended option`. All four parsers (`json`, `urlencoded`, `text`, `raw`) now also decompress `Content-Encoding: br`. All four go through body-parser 2.3.0's shared `lib/read.js`, and only `json` was exercised here. Express 4 rejected it with `415 unsupported content encoding "br"`.
+**Body parsers** (Example 5). `express.urlencoded()` now defaults to `extended: false`, which is flat keys from Node's `querystring`. Express 4 defaulted to `extended: true`, nested objects from qs, and printed a deprecation warning when you omitted the option. All four parsers, `json`, `urlencoded`, `text`, and `raw`, now also decompress a body with `Content-Encoding: br` (Brotli). Express 4 rejected that with `415 unsupported content encoding "br"`. Only `json` was exercised here. They share body-parser 2.3.0's `lib/read.js`.
 
-**Static files and `sendFile`** (Example 6). The guide's sentence is "In Express 4, dotfiles were served by default." That is not what Express 4.22.3 (serve-static 1.16.3 / send 0.19.2) does. With no `dotfiles` option, it returned **404 for a dotfile itself** (`/.env`) but **served files inside a dot-directory** (`/.well-known/acme-challenge/token`). Express 5 (serve-static 2.2.1 / send 1.2.1) defaults `dotfiles` to `"ignore"` for **every** path segment that starts with a dot. So `/.env` is still 404, `/.well-known/…` becomes 404, and `res.sendFile('/abs/path/.cache/index.html')` becomes 404 too. The fix the guide recommends is a separate mount, `app.use('/.well-known', express.static('public/.well-known', { dotfiles: 'allow' }))`, which opens only that directory. With `root`, only the part of the path below `root` is checked.
+**Static files and `sendFile`** (Example 6). The guide says "In Express 4, dotfiles were served by default." Express 4.22.3 does not do that. With no `dotfiles` option it returned **404 for a dotfile itself** (`/.env`) and **served files inside a dot-directory** (`/.well-known/acme-challenge/token`). Express 5 defaults `dotfiles` to `"ignore"` for every path segment that starts with a dot. So `/.env` is still 404, `/.well-known/…` becomes 404, and `res.sendFile` of a file under a dot-directory becomes 404 too. The guide's fix is a separate mount, `app.use('/.well-known', express.static('public/.well-known', { dotfiles: 'allow' }))`, which opens only that directory. With `root`, only the part of the path below `root` is checked.
 
-**Response validation** (Example 7). `res.status()` now throws on anything that is not an integer from 100 to 999. The message is `RangeError: … must be greater than 99 and less than 1000` or `TypeError: … must be an integer`. Express 4 accepted the string `"201"` and rounded `200.5` with a warning. `res.vary()` with no argument throws `TypeError: field argument is required`. Express 4 only warned. `res.clearCookie(name, { maxAge, expires })` ignores both options and always sends `Expires=Thu, 01 Jan 1970`. In Express 4, `maxAge: 60000` produced a "cleared" cookie that lived for 60 more seconds.
+**Response checks** (Example 7). `res.status()` now throws unless the code is an integer from 100 to 999. Express 4 accepted the string `"201"` and rounded `200.5`, with a warning. `res.vary()` with no argument throws. Express 4 only warned. `res.clearCookie(name, { maxAge, expires })` ignores both options and always sends `Expires=Thu, 01 Jan 1970`. In Express 4, `maxAge: 60000` produced a cleared cookie that lived for 60 more seconds.
 
-**The rest** (Example 8). `app.listen(port, cb)` now calls `cb(err)` on a listen error such as `EADDRINUSE`. Express 4 threw it as an uncaught exception. If your callback ignores its argument, the error is now swallowed. `app.router` exists again as a reference to the app's base router (Express 4 threw `'app.router' is deprecated!`). `res.render` always calls back asynchronously, even with a view engine that calls back synchronously.
+**Listen, router, and render** (Example 8). `app.listen(port, cb)` now calls `cb(err)` on a listen error such as `EADDRINUSE`. Express 4 threw that as an uncaught exception. If your callback ignores its argument, the error is now swallowed. `app.router` exists again as the app's base router. Express 4 threw on that read. `res.render` always calls back asynchronously, even when the view engine calls back synchronously.
 
 ## Code examples
 
@@ -876,71 +865,83 @@ The codemod's output compiles and starts, and every request that used to work no
 
 ## Common mistakes & gotchas
 
-- **Trusting a green startup.** Removed methods called inside handlers (`req.param`, `res.sendfile`, `req.acceptsLanguage`) only fail when that route runs, and the signature changes (`res.json(obj, 201)`, `res.send(404)`) never fail at all. Exercise every route.
-- **Keeping `res.send(statusNumber)`.** Express 5 sends `200` with the JSON body `404`. Use `res.sendStatus(404)`. To send a number as the body, convert it to a string first.
-- **Keeping `res.redirect('back')`.** It sends `Location: back`. Use `req.get('Referrer') || '/'`, and validate the referrer if you do not want an open redirect (see lesson 86).
-- **`app.param(':id', fn)`.** In Express 5 the callback silently never runs (Example 1).
-- **Mutating or assigning `req.query`.** Assigning throws in strict code. Mutations are lost on the next read. Store normalised data in `res.locals`.
-- **Assuming `req.body` exists.** Destructuring `undefined` throws `Cannot destructure property … of 'req.body' as it is undefined.` Use `req.body ?? {}`.
-- **Relying on nested `?filter[status]=x` or nested form fields.** Both the query parser and `express.urlencoded()` default to flat keys now. Opt in to `extended` explicitly.
-- **Losing `/.well-known` (ACME challenges, Apple/Android app links).** It returns 404 after the upgrade. Add a dedicated `dotfiles: 'allow'` mount for that directory only.
-- **Passing a status straight from a variable.** `res.status('201')` now throws. Convert and check with `Number.isInteger()`.
-- **Ignoring the `app.listen` callback's error.** `EADDRINUSE` no longer crashes the process. It is handed to your callback, and if the callback ignores it, the error disappears.
-- **Taking the codemod's output on trust.** It skips route strings and rewrites `req.param()` to `req.params` even where the value came from the query (Example 11).
+- **Trusting a green startup.** `req.param`, `res.sendfile`, and `req.acceptsLanguage` fail only when that route runs. `res.json(obj, 201)` and `res.send(404)` never fail. Exercise every route.
+- **Keeping `res.send(statusNumber)`.** Express 5 sends 200 with the JSON body `404`. Use `res.sendStatus(404)`. To send a number as the body, convert it to a string first.
+- **Keeping `res.redirect('back')`.** It sends `Location: back`. Use `req.get('Referrer') || '/'`, and check the referrer if you do not want an open redirect (lesson 86).
+- **`app.param(':id', fn)`.** The callback never runs (Example 1).
+- **Assigning or mutating `req.query`.** Assignment throws in strict code. A mutation is lost on the next read. Store normalised data in `res.locals`.
+- **Assuming `req.body` exists.** Destructuring `undefined` throws. Use `req.body ?? {}`.
+- **Relying on nested `?filter[status]=x` or nested form fields.** The query parser and `express.urlencoded()` now default to flat keys. Opt in to `extended` on purpose.
+- **Losing `/.well-known`.** ACME challenges and app-link files return 404. Mount that directory with `dotfiles: 'allow'`.
+- **Passing a status from a variable.** `res.status('201')` throws. Check `Number.isInteger`.
+- **Ignoring the error argument of `app.listen`.** `EADDRINUSE` no longer crashes the process. If the callback ignores it, the error disappears.
+- **Trusting the codemod.** It skips route strings, and it rewrites `req.param()` to `req.params` even when the value came from the query (Example 11).
 
 ## Best practices
 
-**The migration checklist, in order:**
+1. Upgrade Node to a version Express 5 supports (18 or newer, on an Active LTS line) and get the suite green on Express 4.
+2. Fix every Express 4 deprecation warning. Each line names a file and a line.
+3. Commit, then run `npx codemod@latest @expressjs/v5-migration-recipe`. Review `req.param` rewrites and any `dotfiles: 'allow'` the script added.
+4. Run `audit.sh` (Example 10). Rewrite route strings with lesson 53's table. Replace `router.param` arrays with one call per name. Set `extended` on `express.urlencoded`. Move `req.query` writes to `res.locals`.
+5. Install `express@5`. Start the app and fix every `PathError`. Replace integrations pinned to Express 4, for example the Apollo package in lesson 112.
+6. Choose parsing on purpose: keep the flat defaults, or set `app.set('query parser', 'extended')` and `express.urlencoded({ extended: true })`.
+7. Guard `req.body` with `req.body ?? {}`, or validate it (lesson 65).
+8. Check `/.well-known`, any `sendFile` path that crosses a dot-directory, and tests that compare `Content-Type` for `.js` files.
+9. Handle `err` in the `app.listen` callback.
+10. Delete `asyncHandler` and `express-async-errors` once the suite passes. Leave the error middleware.
+11. Smoke-test every route: status codes, `Location`, and response type, not only the body.
 
-1. **Upgrade Node first** to a version Express 5 supports (it requires `>= 18`; use an Active LTS line), and get the test suite green on Express 4.
-2. **Fix every Express 4 deprecation warning.** Run the tests and the app, and read stderr for `express deprecated` and `body-parser deprecated`. Each line names a file and line.
-3. **Commit, then run** `npx codemod@latest @expressjs/v5-migration-recipe`. Review the diff line by line, especially `req.param` rewrites (check where the value really comes from) and the added `dotfiles: 'allow'` options (keep them only where you really serve dotfiles).
-4. **Run `audit.sh` (Example 10)** and fix each hit. Rewrite route strings using lesson 53's table. Replace `router.param` arrays with one call per name. Set `extended` explicitly on `express.urlencoded`. Move `req.query` writes to `res.locals`. Drop `maxAge`/`expires` from `clearCookie`. Give `res.vary()` a field name.
-5. **Install `express@5`** (and replace integrations pinned to Express 4, for example `@as-integrations/express5` for Apollo, see lesson 112). Start the app and fix every `PathError`.
-6. **Decide on parsing explicitly.** Either keep the new flat defaults, or set `app.set('query parser', 'extended')` and `express.urlencoded({ extended: true })`. Make that choice deliberately.
-7. **Guard `req.body`** with `req.body ?? {}` (or validate it, lesson 65).
-8. **Check static and file routes:** `/.well-known`, any `sendFile` path that crosses a dot-directory, and tests that compare `Content-Type` for `.js` files.
-9. **Handle `err` in the `app.listen` callback,** and switch debug settings to `DEBUG=express:*,router,router:*`.
-10. **Delete async wrappers** (`asyncHandler`, `express-async-errors`) once the suite passes. Leave the error middleware in place.
-11. **Run the full suite plus a smoke test of every route** (status codes, `Location` headers and response types, not just bodies), then deploy.
-
-Other habits:
-
-- **Upgrade in a branch with both versions installed** (`express4@npm:express@4`) so you can run a failing test against both and see which change caused it.
-- **Write the new form even while still on Express 4** wherever it already works there: `res.status(201).json()`, `res.sendStatus()`, `res.redirect(301, url)`, `res.sendFile()`, `acceptsLanguages()`, `express.urlencoded({ extended })`. Then the version bump itself is small.
+Keep both versions installed (`express4@npm:express@4`) so a failing test can run against each. Write the new form while you are still on Express 4 wherever Express 4 already accepts it: `res.status(201).json()`, `res.sendStatus()`, `res.redirect(301, url)`, `res.sendFile()`, `acceptsLanguages()`, and `express.urlencoded({ extended })`.
 
 ## ⭐ Interview lens
 
 > **Q: “What is the most important behavioural change in Express 5 for application code?”**  
-> A: Rejected promises from handlers and middleware are forwarded to the error middleware as `next(err)`. In Express 4, an `async` handler that throws produces an unhandled rejection, which on Node 15+ crashes the whole process with exit code 1 (or hangs the request if something swallows the rejection). So Express 5 lets you write plain `async` handlers without wrappers. *Trap:* saying Express 4 "just hangs". That was Node ≤ 14 behaviour, or a swallowed rejection.
+> Express 5 watches the value a handler or middleware returns. If that value is a promise and the promise rejects, Express calls `next(err)`, the same path as your four-argument error middleware. Middleware is a function in the chain in front of the handler. Express 4 wrapped the call in a normal try/catch. An async function returns its promise immediately, so the catch block has already finished when the promise rejects later. That rejection is unhandled. Since Node 15 the default is to throw, and the process exits with code 1, which drops every other request still in flight. Example 3 shows the crash on Express 4 and the error middleware on Express 5. A rejection with no value, such as `throw undefined`, arrives as `Error: Rejected promise`, so the error middleware does not see the original empty value. On Node 14, or when something else swallows the rejection, Express 4 can hang the request instead of exiting.
 
 > **Q: “Your app starts fine on Express 5, but a client reports that creating a user now returns 200 instead of 201. Why?”**  
-> A: The code uses a removed signature that fails silently: `res.json(obj, 201)` or `res.send(body, 201)`. Express 5 ignores the second argument. Express 4 honoured it and printed a deprecation warning. Fix it as `res.status(201).json(obj)`. The same class of bug: `res.send(404)` now sends 200 with the body `404`.
+> The route is still calling a signature Express 4 accepted and Express 5 ignores. `res.json(obj, 201)`, `res.jsonp(obj, 201)`, and `res.send(body, 201)` used to set the status from the second argument and print a deprecation warning. Express 5 keeps the method, drops the second argument, and answers 200. The process never throws, which is why startup stays green. The same family is `res.send(404)`: Express 4 sent 404 Not Found, and Express 5 sends 200 with a JSON body of the number 404. The fix is `res.status(201).json(obj)` or `res.sendStatus(404)`. The limit is that tests which only check the body still pass. The suite has to assert the status code.
 
 > **Q: “Why can't Express 5 validation middleware do `req.query = parsed`?”**  
-> A: In Express 5, `req.query` is a getter on the request prototype that parses the query string on each access. There is no setter, so assignment throws in strict mode (ESM) and is ignored in sloppy mode, and mutations are lost on the next read. Put the validated object in `res.locals` (or another property you own).
+> In Express 5, `req.query` is a getter on the request prototype. A getter is a function that runs on every read. Each read parses the query string again and returns a new object, so `req.query === req.query` is false. There is no setter. In strict code, which includes ES modules, the assignment throws. In non-strict code it is ignored. Writing `req.query.page = 1` edits an object the next read throws away. Put the parsed object on `res.locals`, for example `res.locals.validated`, which is a plain object you own. The limit is specific to the query string. `req.body` and `req.params` are ordinary properties, so assigning those still works.
 
 > **Q: “Does the official codemod do the whole migration?”**  
-> A: No. `@expressjs/v5-migration-recipe` rewrites removed APIs and signatures (`app.del`, `req.param`, `res.json(obj, status)`, `res.redirect(url, status)`, `'back'`, `sendfile`, pluralised `accepts*`, `hidden` → `dotfiles`, `express.static.mime`) and bumps `package.json`. It leaves route strings such as `'/*'` alone, so the result can still crash at startup. It does not touch `req.query` writes, parser defaults or `clearCookie` options. And it maps `req.param('id')` to `req.params.id` even when the value came from the query. Review the diff, grep for the rest, and test.
-
-> **Q: “After upgrading, Let's Encrypt renewals fail. What changed?”**  
-> A: `express.static` now applies its `dotfiles: 'ignore'` default to dot-directories too, so `/.well-known/acme-challenge/<token>` returns 404. Express 4.22.3 already hid dotfiles themselves (`/.env`) but served files inside dot-directories. Mount the directory explicitly: `app.use('/.well-known', express.static('public/.well-known', { dotfiles: 'allow' }))`.
+> No. `@expressjs/v5-migration-recipe` rewrites removed methods and old signatures: `app.del`, `req.param`, `res.json(obj, status)`, `res.redirect(url, status)`, the string `'back'`, `sendfile`, the plural `accepts*` names, `hidden` to `dotfiles`, and `express.static.mime`. It also bumps `package.json`. It leaves route strings such as `'/*'` alone, so the app can still throw a `PathError` at startup. It does not touch writes to `req.query`, the new parser defaults, or `clearCookie` options. And it maps `req.param('id')` to `req.params.id` even when that id came from the query string. Example 11 shows a request that answered 201 before the rewrite and 400 after it. Review the diff, run the grep audit, and test status codes.
 
 ## Cheat-card
 
-- **Versions:** Express 5.3.0 needs Node ≥ 18. Compare locally with `express4@npm:express@4` (4.22.3).
-- **Now throw:** `app.del`, `app.param(fn)`, `router.param(fn | [names])`, `req.param`, `res.sendfile`, `req.acceptsCharset/Encoding/Language`, old route strings (`PathError`).
-- **Now silent:** `res.json/jsonp/send(x, status)` → 200. `res.send(404)` → 200 with body `404`. `redirect('back')` → `Location: back`. `app.param(':id')` never runs.
-- **Redirect order:** `res.redirect(status, url)`. The old order gives a 500.
-- **Async:** a rejection goes to `next(err)` (v5). In v4 it is an unhandled rejection → process exit 1.
-- **`req.body`:** `undefined` without a matching parser (v4: `{}`).
-- **`req.query`:** a re-parsing getter, `"simple"` parser by default. Validated data goes in `res.locals.validated`.
-- **`express.urlencoded()`:** `extended: false` by default. Brotli request bodies are accepted.
-- **Static:** dot-directories are ignored too. `/.well-known` needs `dotfiles: 'allow'`. `hidden` → `dotfiles`, `from` → `root`. `.js` is `text/javascript`.
-- **`res.status`:** integers 100–999 only. **`res.vary()`** needs a field. **`clearCookie`** ignores `maxAge`/`expires`.
-- **`req.host`** keeps the port. **`req.params`** has a null prototype (string paths), wildcards give arrays, unmatched optional keys are omitted.
-- **`app.listen(port, cb)`:** `cb(err)` on `EADDRINUSE`. `app.router` is back.
-- **Tools:** `npx codemod@latest @expressjs/v5-migration-recipe`, then the grep audit, then the tests.
+- Express 5.3.0 needs Node 18 or newer. Compare locally with `express4@npm:express@4` (4.22.3).
+- These throw: `app.del`, `app.param(fn)`, `req.param`, `res.sendfile`, `req.acceptsCharset` / `Encoding` / `Language`, and old route strings (`PathError`).
+- These stay quiet: `res.json` / `jsonp` / `send(x, status)` answer 200. `res.send(404)` answers 200 with body `404`. `redirect('back')` sends `Location: back`. `app.param(':id')` never runs.
+- Redirect argument order is status, then url. The old order is a 500.
+- A rejected async handler calls `next(err)`. On Express 4 it is an unhandled rejection and the process exits with code 1.
+- `req.body` is `undefined` until a parser matches. Express 4 used `{}`.
+- `req.query` is a getter that reparses. Default parser is `"simple"`. Store validated data on `res.locals`.
+- `express.urlencoded()` defaults to `extended: false`.
+- Dot-directories are ignored. `/.well-known` needs its own mount with `dotfiles: 'allow'`.
+- `res.status` accepts integers 100 to 999 only.
+- `app.listen(port, cb)` calls `cb(err)` on `EADDRINUSE`.
+- Then run `npx codemod@latest @expressjs/v5-migration-recipe`, the grep audit, and the tests.
+
+## Good to know
+
+- Express 5.0 was released in September 2024. Express 5.3.0 declares `"engines": {"node": ">= 18"}`. Express 4.22.3 declares `>= 0.10.0`.
+- Router: built in (`lib/router`) on 4.22.3, package `router` 2.2.0 on 5.3.0.
+- Path matching: path-to-regexp 0.1.13 on Express 4.22.3, path-to-regexp 8.4.2 on Express 5.3.0.
+- Body parsers: body-parser 1.20.8 on Express 4.22.3, body-parser 2.3.0 on Express 5.3.0.
+- Static files: serve-static 1.16.3 and send 0.19.2 on Express 4.22.3, serve-static 2.2.1 and send 1.2.1 on Express 5.3.0.
+- MIME: mime 1.6.0 and mime-db 1.52.0 on Express 4, mime-types 3.0.2 and mime-db 1.54.0 on Express 5. `.js` is `application/javascript` on 4 and `text/javascript` on 5.
+- Final error handler: finalhandler 1.3.2 on Express 4.22.3, finalhandler 2.1.1 on Express 5.3.0.
+- Default query parser: `"extended"` (qs) on Express 4, `"simple"` (Node `querystring`) on Express 5.
+- `express.static.mime` is an object on Express 4 (`mime` 1.6.0) and `undefined` on Express 5. Use the `mime-types` package.
+- The `hidden: true` option is ignored in Express 5. Use `dotfiles: 'allow'`. The `from` option was already unusable through `res.sendFile` on 4.22.3. Use `root`.
+- Router debug lines moved off `DEBUG=express:*`. Use `DEBUG=express:*,router,router:*`.
+- All four body parsers accept `Content-Encoding: br`. Express 4 answered `415 unsupported content encoding "br"`.
+- `res.vary()` with no field throws `TypeError: field argument is required`. Express 4 only warned.
+- `res.clearCookie` ignores `maxAge` and `expires` and sends `Expires=Thu, 01 Jan 1970`. On Express 4, `maxAge: 60000` left the cookie alive for 60 more seconds.
+- `res.status("201")` and `res.status(200.5)` throw. Express 4 accepted the string and rounded the float, with a warning.
+- `req.params` for a string path has a null prototype. Wildcards are arrays. An unmatched optional key is omitted, not set to `undefined`.
+- `app.router` is the base router again. Express 4 threw `'app.router' is deprecated!`. `res.render` always delivers its callback asynchronously.
+- Q: After upgrading, Let's Encrypt renewals fail. What changed? `express.static` applies `dotfiles: 'ignore'` to dot-directories, so `/.well-known/acme-challenge/<token>` is 404. Express 4.22.3 already hid `/.env` and still served files inside dot-directories. Mount that directory with `{ dotfiles: 'allow' }`.
 
 ---
 

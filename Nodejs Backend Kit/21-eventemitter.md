@@ -13,35 +13,37 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+An EventEmitter is an object that keeps a list of functions per event name and, when you call emit, runs those functions immediately, in the order they were added, on the current stack. It exists for things that happen many times, such as socket data or a new connection, which a promise cannot model because a promise settles once. The trade-off is that a slow or throwing listener blocks or interrupts the others, and an error event with no listener throws and can crash the process.
+
 ## Why it matters
 
-Promises and `async/await` model a *single* future result. But a huge amount of Node is about things that happen *repeatedly* over time: a socket receiving many chunks, an HTTP server handling request after request, a stream emitting `data` then `end`, a file watcher firing on every change. A promise can't model "this will happen many times." That's what the **EventEmitter** is for, and it sits at the heart of Node's most important subsystems — streams, servers, sockets, the process object itself.
+Promises model one future result. A lot of Node is things that happen repeatedly: a socket receiving chunks, a server accepting connections, a stream emitting data and then end, a file watcher firing on every change. EventEmitter is the tool for that, and streams, servers, sockets, and the process object itself are built on it.
 
-Understanding `EventEmitter` is what lets you read Node's own APIs fluently (`req.on('data', ...)`, `server.on('connection', ...)`) and build clean decoupled architectures of your own. It's also a classic interview topic: the memory-leak warning about too many listeners, the difference between `on` and `once`, the fact that emission is synchronous, and the special status of the `'error'` event all trip up people who've only ever used it casually.
+You read Node's own APIs with it, such as req.on('data') and server.on('connection'). Interviews ask whether emit is synchronous, what the error event does with no listener, and what the too-many-listeners warning means.
 
 ## The concept, simply
 
-An `EventEmitter` is an object that lets you **publish** named events and **subscribe** to them — the observer (pub/sub) pattern, built into Node's core. You register a listener with `emitter.on('event', handler)`, and later something calls `emitter.emit('event', ...args)`, which invokes every registered handler for that name, in order, passing along the arguments. The emitter and the listeners don't know about each other's internals — that decoupling is the whole point.
+An EventEmitter lets you publish named events and subscribe to them. That is the observer pattern, also called publish and subscribe, built into Node's core. You register a listener with emitter.on(event, handler). Later something calls emitter.emit(event, ...args), which runs every handler for that name, in order, and passes the arguments along. The emitter and the listeners do not need to know each other's internals.
 
 ![One emitter calling emit('data') which fans out synchronously to three registered listeners A, B, and a once-listener C, in registration order](assets/i17_01_18b4f9c1.svg)
 
-A single emit call invokes every registered listener for that event synchronously, in the order they were added.
+One emit runs every listener for that event immediately, in the order they were added.
 
-Two subscription verbs matter: `on` (alias `addListener`) registers a handler that fires *every* time the event is emitted; `once` registers one that fires *only the first time* and then removes itself automatically. You unsubscribe with `off` (alias `removeListener`). Most Node objects you use daily — streams, servers, sockets — *are* EventEmitters or inherit from one.
+on, also called addListener, registers a handler that runs on every emit. once registers one that runs only the first time and then removes itself. You unsubscribe with off, also called removeListener. Streams, servers, and sockets are EventEmitters, or they inherit from one.
 
 ## How it works
 
-Internally an emitter keeps a map from event name to an array of listener functions. `emit(name, ...args)` looks up that array and calls each function **synchronously**, one after another, on the current stack — right there, before `emit` returns. This surprises people: emitting an event is *not* asynchronous. If a listener does slow synchronous work, it blocks. If a listener throws, it propagates out of the `emit` call and can stop later listeners from running. Listeners fire in registration order; `emit` returns `true` if there were listeners, `false` if none.
+An emitter keeps a map from event name to an array of listener functions. emit looks up that array and calls each function synchronously, on the current stack, before emit returns. Emitting is not asynchronous. A listener that does slow synchronous work blocks. A listener that throws propagates out of emit and can stop later listeners from running. Listeners run in registration order. emit returns true if there were listeners and false if there were none.
 
-`once` works by wrapping your handler: the wrapper removes itself from the listener array before (or as) it calls your function, guaranteeing a single invocation. `removeListener`/`off` splices the function out of the array — which is why you must pass the *same function reference* you registered; an inline arrow can't be removed because you no longer hold its reference.
+once wraps your handler. The wrapper removes itself from the array before it calls your function, so it runs once. off removes a function by reference, which is why you must pass the same function you registered. An inline arrow function cannot be removed, because you no longer hold that reference.
 
-Two special behaviours are worth memorising. First, the `'error'` event is privileged: if an emitter emits `'error'` and there is **no** listener for it, Node *throws* the error, typically crashing the process. So any long-lived emitter must have an `'error'` listener. Second, there's a built-in leak guard: if you add more than `defaultMaxListeners` (10) listeners for a single event, Node prints a `MaxListenersExceededWarning`. It's not an error — it's a heuristic that you're probably adding listeners in a loop and forgetting to remove them.
+Two special cases are worth remembering. First, the error event is special. If you emit error and nobody is listening, Node throws that error, which typically crashes the process. Any long-lived emitter needs an error listener. Second, there is a leak guard. If you add more than defaultMaxListeners, which is 10, listeners for one event, Node prints a MaxListenersExceededWarning. It is a warning, not an error. It usually means you are adding listeners in a loop and forgetting to remove them.
 
-It helps to contrast the EventEmitter with a promise directly, because they solve genuinely different shapes of problem. A promise is a *value*: it settles exactly once, it caches its result, and a consumer that subscribes *after* it settles still gets the value. An event is a *notification*: `emit` fans out to whoever is listening *at that moment*, keeps no history, and a listener that subscribes after the emission simply misses it. That single difference — replayable value versus fire-and-forget signal — is the deciding factor when you're choosing between them. Repeated occurrences, multiple independent subscribers, or "tell me each time X happens" all point to events; "give me the one result of this operation" points to a promise.
+A promise is a value. It settles once, it remembers the result, and a consumer that subscribes after it settles still receives the value. An event is a notification. emit fans out to whoever is listening at that moment, keeps no history, and a listener that arrives late misses it. Repeated occurrences, several independent subscribers, or "tell me each time" point to events. "Give me the one result" points to a promise.
 
-A few more mechanics round out the model. `emitter.listenerCount(name)` tells you how many handlers are registered, and `emitter.eventNames()` lists the events that currently have any. `prependListener` adds a handler to the *front* of the array so it runs before existing ones — occasionally useful for instrumentation. `emitter.setMaxListeners(n)` raises the warning threshold for that instance, and `EventEmitter.defaultMaxListeners` changes it globally. And because listeners run synchronously, the value `emit` returns (`true` if any listener ran, else `false`) is known immediately — there is no waiting involved.
-
-The core method surface is small; this table is effectively the whole working vocabulary:
+listenerCount tells you how many handlers are registered. eventNames lists events that currently have any. prependListener adds a handler at the front so it runs before the others. setMaxListeners raises the warning threshold for one emitter. EventEmitter.defaultMaxListeners changes it for emitters created after that. Because listeners run synchronously, the true or false that emit returns is known immediately.
 
 | Method | Effect |
 | --- | --- |
@@ -54,7 +56,7 @@ The core method surface is small; this table is effectively the whole working vo
 | `listenerCount(name)` / `eventNames()` | Introspect current subscriptions |
 | `setMaxListeners(n)` | Raise this instance's leak-warning threshold |
 
-Because listeners run synchronously and share the emitter's stack, a listener that `await`s does *not* make `emit` wait: `emit` returns the instant the synchronous portion of every listener has run, long before any async work inside them settles. The EventEmitter contract simply has no way to report "all listener work finished" — if you need that, collect the listeners' promises yourself or model the flow with a promise instead. The same shared stack is why a throw inside one listener can stop the listeners registered after it from running at all: the exception unwinds `emit` before it reaches them. Keeping each listener fast, non-throwing, and self-contained is therefore not just style — it is what keeps one subscriber from silently breaking the others.
+A listener that uses await does not make emit wait. emit returns as soon as the synchronous part of every listener has run, long before async work inside them settles. The contract has no "all listener work finished". If you need that, collect the listeners' promises yourself, or model the flow with a promise. The same shared stack is why a throw in one listener can skip the listeners registered after it.
 
 ## Code examples
 
@@ -131,56 +133,55 @@ async function waitForConnect(server) {
 
 ## Common mistakes & gotchas
 
-- **No `'error'` listener.** An emitted `'error'` with no handler is *thrown* and usually crashes the process. Always attach an `'error'` listener to long-lived emitters (streams, sockets, servers).
-- **Assuming `emit` is async.** Listeners run synchronously on the current stack before `emit` returns. Slow listener work blocks; if you need async, defer inside the listener.
-- **The memory leak: adding listeners in a loop.** Registering a listener per request/iteration without removing them grows the array unboundedly. The `MaxListenersExceededWarning` at 11 listeners is Node telling you so.
-- **Removing an anonymous listener.** You can only `off`/`removeListener` a function you hold a reference to. Inline arrows can never be removed — keep a named reference or use `once`.
-- **A throwing listener halting the rest.** An exception in one synchronous listener propagates out of `emit` and can prevent later listeners from running. Keep listeners defensive.
-- **Bumping `setMaxListeners` to silence the warning.** That hides a real leak. Fix the registration/removal logic instead, and only raise the limit when you genuinely need many listeners.
-- **Using events for one-shot request/response.** If something happens exactly once and you need its value, a promise is clearer than wiring up and tearing down listeners.
+- An error event with no listener is thrown and usually crashes the process. Attach an error listener on long-lived emitters such as streams, sockets, and servers.
+- emit is synchronous. Slow work in a listener blocks. If the work is async, schedule it inside the listener. emit will not wait for it.
+- Adding a listener per request and never removing it grows the array without bound. The warning at more than 10 listeners is Node telling you that.
+- You can only off a function you still hold. An inline arrow cannot be removed. Keep a named reference, or use once.
+- A throw in one synchronous listener propagates out of emit and can skip later listeners. Keep listeners from throwing.
+- Raising setMaxListeners to silence the warning hides a leak. Fix the add and remove logic, and raise the limit only when you truly need that many listeners.
+- For something that happens once and whose value you need, a promise is clearer than wiring up listeners and tearing them down.
 
 ## Best practices
 
-- Always register an `'error'` listener on any emitter that can emit one; unhandled `'error'` crashes the process.
-- Use `once` for one-time events so the listener cleans itself up automatically.
-- Keep named references to listeners you'll need to remove, and remove them when the subscriber goes away to prevent leaks.
-- Keep listeners fast and non-throwing; do heavy or async work by scheduling it, not inline in the listener.
-- Treat the `MaxListenersExceededWarning` as a leak signal to investigate, not noise to suppress.
-- Reach for `events.once(emitter, name)` to `await` a single future event, and `events.on` (async iterator) to consume a stream of them.
-- Choose events for *recurring* or *broadcast* notifications; choose promises for a *single* eventual result.
+- Always register an error listener on an emitter that can emit error.
+- Use once for one-time events so the listener removes itself.
+- Keep a reference to any listener you will need to remove, and remove it when the subscriber goes away.
+- Keep listeners fast and non-throwing. Schedule heavy or async work instead of doing it inline.
+- Treat MaxListenersExceededWarning as a leak to investigate.
+- Use events.once when you want to await the next occurrence, and events.on when you want a loop of them.
+- Use events for repeated or broadcast notifications. Use a promise for a single result.
 
 ## ⭐ Interview lens
 
 > **Q: Is `emit` synchronous or asynchronous?**  
-> Synchronous. It invokes every listener for the event in registration order, on the current stack, before `emit` returns. This surprises people who assume events are always deferred.
+> emit is synchronous. It looks up the array of listeners for that name and calls each one, in registration order, on the current stack, before emit returns. It is not queued on the event loop. If a listener does a long synchronous loop, every other listener and the rest of your request wait. If a listener throws, the exception comes out of emit and listeners registered after that one may not run. For example, emitter.emit('data', chunk) will have already run the handlers by the next line. The limit is that this says nothing about async work inside a listener. If the listener is an async function, emit still returns immediately and ignores the promise it got back, so a rejection there is not handled by emit itself.
 
 > **Q: What happens if you emit `'error'` with no listener? (trap)**  
-> Node throws the error as an exception, which typically crashes the process. The `'error'` event is special-cased precisely so silent failures don't go unnoticed — always attach a handler.
+> Node throws that error as an exception, which typically crashes the process. The error event is the one name with this special case, so a failure is not silent. Streams, sockets, and servers all use it. Any long-lived emitter you create needs an error listener, even if that listener only logs. For example, a stream with no error listener will take the process down on a read failure. The limit is that adding the listener changes the outcome: emit then calls your listener instead of throwing. If your listener itself throws, that throw still propagates out of emit.
 
 > **Q: Difference between `on` and `once`?**  
-> `on` fires the listener on every emission; `once` fires it only the first time and then auto-removes it. `once` is implemented as a self-removing wrapper around your handler.
-
-> **Q: What causes the MaxListenersExceededWarning and is it an error?**  
-> Adding more than 10 listeners (the default) for one event name. It's a warning, not an error — a heuristic that you're likely leaking listeners by adding them repeatedly without removing them.
-
-> **Q: Why can't you remove an inline arrow-function listener?**  
-> `removeListener`/`off` matches by function reference. An inline arrow creates a new function you don't keep a handle to, so there's nothing to pass back to remove it. Keep a named reference.
+> on registers a listener that runs on every emit of that name and stays registered. once registers a listener that runs on the next emit and then removes itself. once is implemented as a wrapper that unsubscribes before it calls your function, so you still see the arguments of that one event. Use on for data chunks or connection events. Use once for "the next ready" or "the next end" so you do not leak a listener. The limit of once is that it really is only the next occurrence. If you needed the one after that, you have to subscribe again. And off still requires the same function reference if you want to cancel a once listener early.
 
 > **Q: When would you use an EventEmitter over a promise?**  
-> When the thing happens more than once or is broadcast to multiple independent subscribers — streaming data, connection events, progress updates. Promises model a single eventual value; events model an ongoing stream of occurrences.
+> Use an EventEmitter when the thing happens more than once, or when several independent subscribers all need to hear it: streaming chunks, connection events, progress ticks. A promise models one eventual value. It settles once, remembers the result, and a late subscriber still receives it. An event does not remember. A listener that subscribes after the emit misses it. For example, a file download's chunks are events, and the final "here is the whole buffer" can be a promise. The limit of events is the missing history and the synchronous fan-out: one throwing listener can interrupt the others, and there is no built-in result value.
 
 ## Cheat-card
 
-- **Pattern:** pub/sub — `on`/`once` to subscribe, `emit` to publish.
-- **`emit` is synchronous** — listeners run in order, on the current stack.
-- **`once`** fires once and self-removes; `off` needs the same reference.
-- **`'error'`** with no listener throws and crashes — always handle it.
-- **Leak guard:** >10 listeners on one event → warning; fix removal, don't mute.
-- **Use events** for many/broadcast occurrences; **promises** for a single result.
-- **`events.on(ee, name, { close, signal })`:** async iterator; buffers events while the loop body is busy; `'error'` makes the loop throw; give it an exit.
-- **`captureRejections: true`:** routes rejected promises from `async` listeners to `'error'` (or `Symbol.for('nodejs.rejection')`); off by default.
-- **`errorMonitor`:** observe `'error'` first without handling it; no regular listener still means `emit` throws.
-- **`EventTarget`:** web API (`addEventListener`/`dispatchEvent`, one `Event` object), used by `AbortSignal`; no duplicate listeners, no special `'error'`, a throwing listener does not stop the others.
+- Subscribe with on or once. Publish with emit. Unsubscribe with off and the same function reference.
+- emit is synchronous, in registration order, on the current stack. It returns true if any listener ran.
+- once runs once and removes itself.
+- error with no listener throws and can crash the process. Always handle it.
+- More than 10 listeners on one event prints MaxListenersExceededWarning. Fix the leak before you raise the limit.
+- Events are for many or broadcast occurrences. A promise is for one result.
+
+## Good to know
+
+- What causes the MaxListenersExceededWarning and is it an error? Adding more than 10 listeners for one event name prints MaxListenersExceededWarning. It is a warning, not a throw. It usually means listeners were added in a loop and not removed.
+
+- Why can't you remove an inline arrow-function listener? off and removeListener match by function reference. An inline arrow is a new function you do not still hold, so there is nothing to pass back. Keep a named reference.
+- Additional examples: 7 Oct 2026, examples verified on Node v24.19.0.
+- `events.on(emitter, eventName[, options])`: added in v13.6.0 and v12.16.0.
+- `events.errorMonitor`: added in v13.6.0 and v12.17.0.
 
 ---
 
@@ -195,11 +196,9 @@ async function waitForConnect(server) {
 
 ## Additional topics
 
-*Added 7 Oct 2026 · examples verified on Node v24.19.0*
-
 ### `events.on`: consuming events with `for await`
 
-`events.on(emitter, eventName[, options])` (added in v13.6.0 and v12.16.0) returns an **async iterator**. Each `await` of it gives you the argument array of the next `eventName` emission. It turns "call me back on every event" into a loop you can write top to bottom, with `try/catch`, `break` and sequential `await`s inside. Without it, a consumer that must process events one at a time has to manage its own queue and its own "am I busy?" flag inside a listener. `events.once` (shown above) covers a single event; `events.on` covers a stream of them.
+`events.on(emitter, eventName[, options])` returns an **async iterator**. Each `await` of it gives you the argument array of the next `eventName` emission. It turns "call me back on every event" into a loop you can write top to bottom, with `try/catch`, `break` and sequential `await`s inside. Without it, a consumer that must process events one at a time has to manage its own queue and its own "am I busy?" flag inside a listener. `events.once` (shown above) covers a single event; `events.on` covers a stream of them.
 
 How it works:
 
@@ -352,7 +351,7 @@ console.log('captureRejectionSymbol is', captureRejectionSymbol.toString());
 
 ### `errorMonitor`: observing errors without handling them
 
-`events.errorMonitor` (added in v13.6.0 and v12.17.0) is a symbol you can use as an event name. A listener registered with `emitter.on(errorMonitor, fn)` runs on every `'error'` emission **before** the regular `'error'` listeners, and it does **not** count as handling the error. It is meant for instrumentation (metrics, tracing, logging) added by code that does not own the emitter. If that code added a normal `'error'` listener instead, an emitter that used to crash on an unexpected error would quietly carry on.
+`events.errorMonitor` is a symbol you can use as an event name. A listener registered with `emitter.on(errorMonitor, fn)` runs on every `'error'` emission **before** the regular `'error'` listeners, and it does **not** count as handling the error. It is meant for instrumentation (metrics, tracing, logging) added by code that does not own the emitter. If that code added a normal `'error'` listener instead, an emitter that used to crash on an unexpected error would quietly carry on.
 
 How it works:
 

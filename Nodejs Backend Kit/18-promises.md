@@ -13,37 +13,41 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A promise is an object that stands for a value that is not ready yet: it starts pending, then settles once as fulfilled with a value or rejected with a reason, and you attach later work with then. It exists so async results can be returned, stored, and combined, which callbacks could not do without nesting. The trade-off is that a rejection nobody handles can crash the process, and combinators such as Promise.all do not stop the other jobs when one of them fails.
+
 ## Why it matters
 
-Promises are the backbone of modern asynchronous JavaScript. `async/await` — the syntax you probably reach for first — is not a separate mechanism; it is sugar over promises. Every `await` unwraps a promise, and every `async` function returns one. If your mental model of promises is fuzzy, then `async/await` will occasionally do surprising things and you won't know why. Master promises and the rest of asynchronous Node stops being mysterious.
+async/await is syntax on top of promises. Every await unwraps a promise, and every async function returns one. If promises are fuzzy, await will surprise you.
 
-Promises also solved the concrete problems callbacks created: the rightward nesting, the duplicated error checks, the inability to compose. A promise is a *value you can pass around and combine* — you can return it, store it, hand it to `Promise.all`, or chain transformations onto it. That composability is why the whole ecosystem migrated. In interviews, promise combinators (`all`, `allSettled`, `race`, `any`) and the exact rules of chaining are among the most common questions because they reveal whether you can reason about concurrency, not just await one thing.
+Promises also fixed the practical problems of callbacks: the nesting, the repeated error checks, and the fact that a callback is not a value you can pass around. You can return a promise, store it, hand it to Promise.all, or chain transformations. Interviews ask about the combinators all, allSettled, race, and any because they show whether you can reason about several jobs at once.
 
 ## The concept, simply
 
-A promise is an object representing the eventual result of an asynchronous operation. It is a placeholder for a value that isn't ready yet. A promise is always in exactly one of three states: **pending** (still working), **fulfilled** (finished with a value), or **rejected** (failed with a reason). The move from pending to either fulfilled or rejected is called **settling**, and it happens *at most once*. After a promise settles, its state and value are frozen forever — you cannot un-settle it or change the value.
+A promise is always in one of three states. Pending means it is still working. Fulfilled means it finished with a value. Rejected means it failed with a reason. The move from pending to either result is called settling, and it happens at most once. After that, the state and the value are frozen.
 
 ![A promise starts pending and transitions one-way to either fulfilled via resolve or rejected via reject, and once settled the value is frozen](assets/i14_01_9c7501db.svg)
 
-A promise settles once and only once; the transition is one-way and irreversible.
+A promise settles once, and it does not go back.
 
-You read a promise's outcome with three methods. `.then(onFulfilled, onRejected)` registers what to do when it fulfils (and optionally when it rejects). `.catch(onRejected)` handles rejection. `.finally(fn)` runs a cleanup callback regardless of outcome, without touching the value. All three return *new* promises, which is what makes chaining possible.
+You read the outcome with three methods. then registers what to do on fulfilment, and optionally on rejection. catch handles rejection. finally runs cleanup either way and does not change the value. All three return a new promise, which is what makes a chain possible.
 
 ## How it works
 
-Consider the resolution process. When you construct `new Promise((resolve, reject) => {...})`, the executor runs **synchronously** right away. Calling `resolve(value)` settles the promise as fulfilled; `reject(reason)` settles it as rejected. Crucially, resolving with another promise (a "thenable") doesn't fulfil with that promise as a value — it *adopts* it, waiting for the inner promise to settle first. This flattening is why you rarely see promises nested inside promises.
+new Promise runs its executor function immediately, on the current stack. resolve settles it as fulfilled. reject settles it as rejected. If you resolve with another promise, or with any thenable, meaning any object that has a then method, the outer promise does not fulfil with that object as the value. It adopts the inner one and waits for it to settle. That flattening is why you rarely see a promise nested inside a promise.
 
-The handlers you attach with `.then` never run synchronously, even if the promise is already settled. They are scheduled as **microtasks**. The microtask queue drains completely after the current synchronous call stack finishes and *before* the event loop processes the next macrotask (like a `setTimeout` callback or I/O event). This is why a `.then` callback runs before a `setTimeout(fn, 0)` queued at the same time.
+Handlers you attach with then never run synchronously, even if the promise has already settled. They are scheduled as microtasks. The microtask queue drains completely after the current stack finishes and before the event loop runs the next macrotask, such as a timer or an I/O callback. I/O means input and output. That is why a then callback runs before a setTimeout of 0 that was queued at the same time.
 
 ![Three lanes showing synchronous call stack first, then the microtask queue draining fully, then the macrotask queue, illustrating that promise callbacks run before timers](assets/i14_02_11c5707a.svg)
 
-Promise callbacks are microtasks: they drain fully before the next timer or I/O callback.
+Promise callbacks drain before the next timer or I/O callback.
 
-Chaining works because each `.then` returns a new promise resolved with whatever its callback returns. Return a plain value and the next `.then` receives it; return a promise and the chain waits for it to settle before continuing. **Throw** inside a handler (or return a rejected promise) and the chain skips every subsequent `.then` until it hits a `.catch` — errors propagate down the chain looking for a rejection handler, exactly like exceptions bubble up a call stack.
+Each then returns a new promise for whatever its callback returns. A plain value is passed to the next then. A returned promise makes the chain wait. A throw, or a returned rejection, skips every later then until a catch. That is the same idea as an exception walking up a call stack, except the rejection walks down the chain.
 
-Two mechanics are worth pinning down because interview answers hinge on them. First, `Promise.resolve(x)` returns `x` unchanged when it is already a native promise and otherwise wraps it — so it is the cheap, correct way to normalise a "value or promise" without the `new Promise` anti-pattern. Second, a "thenable" is *any* object with a `.then` method, not only a real `Promise`; the resolution algorithm calls that `.then` to adopt it, which is how promises from different libraries interoperate. Adopting a thenable costs an **extra microtask tick** — the engine schedules an internal `.then` to unwrap it — so a handler that returns `Promise.resolve(v)` resumes one tick later than one that returns `v` directly. This rarely affects correctness but explains surprising ordering in tight benchmarks.
+Promise.resolve(x) returns x unchanged when x is already a native promise, and wraps anything else. Use it to normalise "a value or a promise" instead of wrapping an existing promise in new Promise. Adopting a thenable costs an extra microtask, because the engine schedules an internal then to unwrap it. A handler that returns Promise.resolve(v) therefore resumes one tick later than a handler that returns v directly.
 
-Working through an explicit ordering puzzle cements the microtask rule. Predict the output before reading it:
+Predict this order before you read the output. Synchronous logs run first, then microtasks, then the timer:
 
 javascript
 
@@ -62,7 +66,7 @@ console.log('5 sync');
 // 2 timeout     ← macrotask — only after every microtask
 ```
 
-A single table captures how the four combinators differ on the two axes that matter — when they settle and how they treat failure:
+The four combinators differ in when they settle and what they do with failure:
 
 | Combinator | Fulfils when | Rejects when | Result shape |
 | --- | --- | --- | --- |
@@ -71,7 +75,7 @@ A single table captures how the four combinators differ on the two axes that mat
 | `Promise.race` | First input to settle was a fulfilment | First input to settle was a rejection | Single value / reason |
 | `Promise.any` | First input fulfils | Every input rejects | Value / `AggregateError` |
 
-All four accept any iterable and, apart from `allSettled`, propagate the first relevant settlement without cancelling the others — there is no cancellation primitive in the promise model, so siblings always run to completion regardless of which combinator you chose.
+All four accept any iterable. Apart from allSettled, they propagate the first relevant settlement and do not cancel the others. There is no cancel operation on a promise, so the siblings run to completion no matter which combinator you used.
 
 ## Code examples
 
@@ -141,54 +145,54 @@ Pick the combinator by intent: every result (all), every outcome (allSettled), f
 
 ## Common mistakes & gotchas
 
-- **Forgetting to return inside `.then`.** If you call `fetchOrders(...)` without `return`, the chain doesn't wait for it and the next `.then` gets `undefined`. Always return the promise you want the chain to await.
-- **The floating promise.** Starting a promise without `await`, `return`, or `.catch` means its rejection goes unhandled and its completion is unordered relative to your code.
-- **The forgotten `.catch`.** An unhandled rejection triggers a process warning and, by default in current Node, can crash the process. Every chain needs a terminal `.catch` (or an `await` inside a `try/catch`).
-- **The explicit-construction anti-pattern.** Wrapping a function that already returns a promise in `new Promise((resolve) => fn().then(resolve))` loses error propagation and is pointless — just return `fn()`.
-- **Assuming `Promise.all` cancels siblings on rejection.** It rejects immediately, but the other promises keep running to completion — there is no cancellation. Their later rejections may become unhandled.
-- **Mixing up `race` and `any`.** `race` settles on the first to settle, so an early rejection wins; `any` ignores rejections and waits for the first fulfilment.
-- **Expecting a settled promise's `.then` to run synchronously.** It never does — it's always a microtask, so ordering with sync code can surprise you.
+- Forgetting to return inside then means the chain does not wait, and the next then receives undefined.
+- A floating promise, one you neither return, await, nor catch, can reject with nobody listening, and its completion is unordered relative to your code.
+- A chain with no catch leaves an unhandled rejection. In current Node that warns and, by default, can crash the process.
+- Wrapping a function that already returns a promise in new Promise loses error propagation. Just return that promise.
+- Promise.all does not cancel the others when one rejects. A later rejection with no handler can surface on its own.
+- race settles on the first outcome, so a fast rejection wins. any ignores rejections until every input rejects.
+- A then on an already settled promise still runs as a microtask, never in the current stack.
 
 ## Best practices
 
-- Always terminate a chain with `.catch`, or `await` it inside `try/catch` — never leave a rejection unhandled.
-- Return the promise from inside `.then` so the chain waits; a missing return is the most common promise bug.
-- Prefer the built-in combinators over hand-rolled counters, and choose the one that matches your intent (all / allSettled / race / any).
-- Reject with `Error` objects, not strings, so you keep a stack trace and a `.message`.
-- Don't wrap existing promises in `new Promise`; return or chain them directly.
-- Use `allSettled` when partial failure is acceptable and you need to report each outcome; use `all` only when you truly need every result.
+- End every chain with catch, or await it inside try/catch.
+- Return the promise from inside then so the chain waits.
+- Use the built-in combinator that matches the job: all, allSettled, race, or any.
+- Reject with Error objects, not strings, so you keep a stack and a message.
+- Do not wrap an existing promise in new Promise.
+- Use allSettled when a partial failure is acceptable. Use all only when you need every result.
 
 ## ⭐ Interview lens
 
 > **Q: What are the three states of a promise and which transitions are legal?**  
-> Pending, fulfilled, rejected. It starts pending and moves once — pending → fulfilled or pending → rejected. Settling is one-way and happens at most once; the value is then frozen.
+> A promise has three states: pending, fulfilled, and rejected. It starts pending and moves once, either to fulfilled with a value or to rejected with a reason. That move is called settling, and it is one-way. A second resolve or reject is ignored, and the value cannot be changed later. You observe it with then, catch, and finally, and each of those returns a new promise. For example, fs.promises.readFile gives you a promise that fulfils with the file bytes or rejects with the error. The limit is that settling is not "the work stopped". If you built the promise around a job that keeps running, the promise can ignore a later result, but it does not cancel that job.
 
 > **Q: Does a `.then` handler run synchronously if the promise is already resolved?**  
-> No. `.then` callbacks are always scheduled as microtasks, running after the current synchronous stack finishes but before the next timer or I/O callback.
+> No. then always schedules its handlers as microtasks, even when the promise is already fulfilled. A microtask runs after the current synchronous stack finishes and before the next timer or I/O callback. So a log after Promise.resolve().then(...) still prints before the then handler, and that handler still prints before a setTimeout of 0 queued in the same turn. The same rule is why code after an await runs before the next timer. The limit is ordering, not speed: the handler is deferred by one microtask, which is usually soon, but it is never "right now" on this stack.
 
 > **Q: Difference between `Promise.all` and `Promise.allSettled`?**  
-> `all` rejects as soon as any input rejects (fail-fast) and otherwise fulfils with an array of values. `allSettled` never rejects; it waits for all and returns an array of `{status, value|reason}` descriptors.
+> Promise.all fulfils only when every input fulfils, and it rejects as soon as any input rejects. The fulfilment value is an array of results in input order. Promise.allSettled never rejects. It waits for every input to settle and gives you an array of objects with status and either value or reason. Use all when one failure should fail the whole batch, such as loading three records you cannot proceed without. Use allSettled when you are sending ten notifications and you need to report which ones failed. The limit of all is that the rejection does not stop the other promises. They keep running.
 
 > **Q: `Promise.race` vs `Promise.any`? (trap)**  
-> `race` settles with the first promise to *settle*, so a fast rejection can win. `any` settles with the first to *fulfil*, ignoring rejections, and only rejects (with an `AggregateError`) if every input rejects.
-
-> **Q: If `Promise.all` rejects, what happens to the other promises?**  
-> Nothing stops them — there's no cancellation. They keep running; `all` just ignores their later results. If one of those later rejects with no handler, you can get an unhandled rejection.
-
-> **Q: What does `resolve`-ing a promise with another promise do?**  
-> It adopts the inner promise: the outer stays pending until the inner settles, then takes on its state and value. This thenable-flattening is why promises don't nest.
+> Promise.race settles with whichever promise settles first, fulfilment or rejection, so a fast failure can win. Promise.any settles with the first fulfilment and ignores rejections. It rejects only when every input rejects, and the reason is an AggregateError whose errors array holds each failure. race is the one you use for "timeout versus the real call" if you only care which result you observe. any is the one you use for "first healthy mirror". The limit is the same for both: the losers keep running. race does not cancel them, and a later rejection can still be unhandled.
 
 ## Cheat-card
 
-- **States:** pending → fulfilled | rejected. Settles once, frozen after.
-- **Read with:** `.then` / `.catch` / `.finally` — each returns a new promise.
-- **Handlers:** always microtasks; run before timers, never sync.
-- **all** = every result, fail-fast. **allSettled** = every outcome, never rejects.
-- **race** = first to settle (loss can win). **any** = first to fulfil (ignores rejects).
-- **Rules:** return inside `.then`; always terminate with `.catch`; reject with `Error`.
-- **`Promise.withResolvers()`** → `{ promise, resolve, reject }` to settle from elsewhere (Node 22+).
-- **`Promise.try(fn, ...args)`** runs `fn` now and turns a sync throw into a rejection (Node 23+, not in 22).
-- **Cancel for real:** pass an `AbortSignal` to the operation; `race` alone never stops the loser.
+- States: pending, then fulfilled or rejected. Settles once.
+- then, catch, and finally each return a new promise. Handlers are microtasks.
+- all: every result, fail fast. allSettled: every outcome, never rejects.
+- race: first to settle, so a rejection can win. any: first fulfilment, or AggregateError if all reject.
+- Return inside then. End the chain with catch. Reject with an Error.
+- None of the combinators cancel the other jobs.
+
+## Good to know
+
+- If `Promise.all` rejects, what happens to the other promises? Nothing stops them. all ignores their later results, and a later rejection with no handler can become an unhandled rejection.
+
+- What does `resolve`-ing a promise with another promise do? The outer promise stays pending and adopts the inner one, taking its state and value when it settles. That thenable flattening is why promises do not nest.
+- Promise.withResolvers is ES2024, not a Node-only API. typeof is undefined on Node v21.7.3 (V8 11.8) and function on Node v22.0.0 (V8 12.4) and on v24.19.0.
+- Promise.try is ES2025. It is undefined on Node v22.0.0, v22.9.0, v22.10.0, and v22.23.3 (V8 12.4), and a function on Node v23.0.0 (V8 12.9) and on v24.19.0. Code that must run on Node 22 cannot call it.
+- Additional examples: 7 Oct 2026, examples verified on Node v24.19.0.
 
 ---
 
@@ -204,13 +208,9 @@ Pick the combinator by intent: every result (all), every outcome (allSettled), f
 
 ## Additional topics
 
-*Added 7 Oct 2026 · examples verified on Node v24.19.0*
-
 ### `Promise.withResolvers()`
 
 `Promise.withResolvers()` returns a plain object `{ promise, resolve, reject }`: a new pending promise plus the two functions that settle it. It is the same as writing `let resolve, reject; const promise = new Promise((res, rej) => { resolve = res; reject = rej; });`, without the outer `let` variables. You need it when the code that creates the promise is not the code that settles it: a request map that resolves when a reply with the matching id arrives, a queue, a "ready" latch, a test helper. Without it, every such place repeats the executor trick, and the `let` variables are easy to read before the executor has assigned them.
-
-It is part of the language (ES2024), not a Node API, so the Node docs have no History entry for it. Measured with `npx node@<version> -p "typeof Promise.withResolvers"`: `undefined` on Node v21.7.3 (V8 11.8), `function` on Node v22.0.0 (V8 12.4) and on v24.19.0 (`node -p "typeof Promise.withResolvers"` → `function`).
 
 How it works:
 
@@ -262,8 +262,6 @@ console.log('pending entries left:', pending.size);
 ### `Promise.try()`
 
 `Promise.try(fn, ...args)` calls `fn(...args)` **right away, synchronously**, and returns a promise for the result. If `fn` returns a value, the promise fulfils with it. If `fn` returns a promise, the returned promise follows it. If `fn` throws synchronously, the promise rejects with the thrown error instead of the throw escaping to the caller. It exists because a function that "returns a promise" can still throw before it gets to return one (bad arguments, a `JSON.parse` on the first line), and a caller that only attached `.catch()` never sees that error.
-
-It is also ES2025 language, not a Node API. Measured the same way: `undefined` on every Node 22 release tested (v22.0.0, v22.9.0, v22.10.0, v22.23.3; V8 12.4), `function` on Node v23.0.0 (V8 12.9) and on v24.19.0. So code that must also run on Node 22 cannot use it.
 
 How it works:
 

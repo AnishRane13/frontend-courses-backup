@@ -13,23 +13,27 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+The cluster module forks one Node process per CPU core, and those worker processes accept connections from one shared listening socket so the machine can use every core. It exists because your JavaScript runs on a single thread, so one process leaves the other cores idle. The trade-off is that workers share no memory, so a cache or session kept in one worker is invisible to the others, and a request that does heavy computation still blocks the one worker that received it.
+
 ## Why it matters
 
-Node.js runs your JavaScript on a **single thread**. That is the defining fact of the runtime, and it has a blunt consequence: a plain Node process uses exactly *one* CPU core, no matter how many the machine has. Rent an 8-core server, run `node server.js`, and seven cores sit idle while one does all the work. Under real traffic that single core saturates, the event loop backs up, and latency climbs — while `htop` shows the box is 88% idle. This is one of the most common "why is production slow?" surprises for engineers new to Node.
+Node.js runs your JavaScript on a single thread. A plain Node process uses one CPU core, no matter how many the machine has. An 8-core server running `node server.js` leaves seven cores idle. Under real traffic that one core saturates, the event loop backs up, and latency climbs. This is a common "why is production slow?" surprise.
 
-The **cluster** module is Node's built-in answer. It lets you fork the process into one *worker* per core, all sharing the same server port, so incoming connections are spread across every core. For a typical I/O-bound web service, moving from one process to N workers is close to an **N× throughput** increase for zero application-code changes. In interviews, "how do you make Node use all the cores?" is a near-guaranteed question, and cluster (or a process manager that wraps it, like PM2) is the canonical answer. Knowing how it works — and its limits — separates people who have run Node in production from people who have only read about it.
+The cluster module forks one worker per core, all sharing the same server port, so connections spread across every core. For a typical service that spends its time waiting on input and output, moving from one process to N workers is close to an N-times throughput increase, with no change to application code. In an interview, "how do you make Node use all the cores?" is answered with cluster, or with a process manager that wraps it, such as PM2.
 
 ## The concept, simply
 
-Cluster follows a **primary / worker** model (older docs and APIs say "master/worker"; the modern term is primary). One *primary* process starts first. Its only job is to **fork worker processes** and supervise them — it does not handle requests itself. Each worker is a full, independent Node process with its own memory, its own V8 heap, and its own event loop. The workers are where your actual app runs.
+Cluster uses a primary and worker model. Older docs say master and worker. The modern term is primary. The primary starts first. Its job is to fork worker processes and supervise them. It does not handle requests. Each worker is a full Node process with its own memory, its own V8 heap, and its own event loop. Your app runs in the workers.
 
-The clever part is the shared port. Normally two processes cannot both `listen` on port 3000 — you would get `EADDRINUSE`. Under cluster, the workers do not each open their own socket. The primary opens the listening socket once and hands it down, so all workers accept connections from the *same* socket. The operating system (or the primary, depending on platform) then distributes new connections among them.
+Two processes cannot both `listen` on port 3000. You would get `EADDRINUSE`. Under cluster the workers do not each open their own socket. The primary opens the listening socket once and hands it down, so all workers accept from the same socket. The operating system, or the primary, distributes new connections.
 
 ![Diagram of a primary process forking four worker processes that all share one listening socket on port 3000](assets/i58_01_a12f626e.svg)
 
 The primary forks one worker per core; all workers accept from a single shared listening socket, and connections are distributed among them.
 
-The mental model to lock in: **cluster is horizontal scaling *inside a single machine***. It is the same idea as running many replicas behind a load balancer, except the "load balancer" is the kernel and the "replicas" are sibling processes sharing a port. Because each worker is a separate process, they share *nothing* in memory — no shared variables, no shared in-process cache, no shared counters. That isolation is both the safety (one worker crashing doesn't take the others down) and the main constraint (any shared state must live outside the process, e.g. in Redis).
+Cluster is horizontal scaling inside a single machine. It is the same idea as many replicas behind a load balancer, except the distributor is the kernel and the replicas are sibling processes sharing a port. They share nothing in memory: no shared variables, no shared in-process cache, no shared counters. One worker crashing does not take the others down. Any shared state has to live outside the process, for example in Redis.
 
 ![Comparison showing a single Node process using one core while three others sit idle versus cluster keeping all four cores busy](assets/i58_02_e545dec8.svg)
 
@@ -37,15 +41,15 @@ A lone process pins one core; cluster spreads workers so every core does useful 
 
 ## How it works
 
-When you run a cluster program, the same file executes in both the primary and every worker — the code uses `cluster.isPrimary` (aliased `cluster.isMaster` in older code) to branch. In the primary branch you call `cluster.fork()` once per core; in the worker branch you start your normal HTTP server. Under the hood `fork()` uses `child_process.fork()`, so each worker is a genuine OS process with an IPC channel back to the primary.
+The same file runs in the primary and in every worker. `cluster.isPrimary` branches. Older code uses the alias `cluster.isMaster`. The primary calls `cluster.fork()` once per core. The worker starts your normal HTTP server. `fork()` uses `child_process.fork()`, so each worker is a real OS process with an IPC channel back to the primary. IPC means inter-process communication, a message pipe, not shared memory.
 
-**Connection distribution** has two strategies. On Linux and macOS the default is `SCHED_RR` (round-robin): the primary accepts connections and hands each one to the next worker in turn, which spreads load evenly. On Windows the default is `SCHED_NONE`: the primary passes the listening socket to all workers and lets the OS decide, which can be uneven because the kernel tends to favour whichever worker is ready first. You can force round-robin everywhere by setting `cluster.schedulingPolicy = cluster.SCHED_RR` before forking. Round-robin distributes *connections*, not requests — with HTTP keep-alive, one connection can carry many requests, so a long-lived connection stays pinned to one worker.
+**Connection distribution** has two strategies. On Linux and macOS the default is `SCHED_RR`, round-robin. The primary accepts each connection and hands it to the next worker. On Windows the default is `SCHED_NONE`. The primary passes the listening socket to all workers and the OS decides, which can be uneven because the kernel favours whichever worker is ready first. Set `cluster.schedulingPolicy = cluster.SCHED_RR` before forking to force round-robin. Round-robin distributes connections, not requests. With HTTP keep-alive, one connection can carry many requests and stay pinned to one worker.
 
-Workers communicate with the primary only through **message passing** over IPC (`worker.send()` / `process.on('message')`). Messages are serialized (structured-clone by default), so you cannot pass a live object or a shared buffer through this channel and expect shared memory — each side gets a copy. This is exactly why cluster is *not* a tool for sharing CPU-heavy data structures; it is a tool for accepting more concurrent connections.
+Workers talk to the primary only by message passing: `worker.send()` and `process.on('message')`. Messages are serialized, structured-clone by default, so each side gets a copy. You cannot pass a live object and get shared memory. Cluster accepts more concurrent connections. It is not a tool for sharing CPU-heavy data structures.
 
-**Resilience** is a first-class feature. The primary receives an `'exit'` event when a worker dies. The standard pattern is to fork a replacement immediately, so a crash (an uncaught exception, an OOM kill) degrades throughput for milliseconds instead of taking the service down. This also enables **zero-downtime reloads**: on a deploy signal, fork new workers, wait for them to come up, then gracefully retire the old ones one at a time — the port never stops listening.
+**Resilience.** The primary gets an `'exit'` event when a worker dies. Fork a replacement immediately, so a crash or an out-of-memory kill drops throughput for a moment instead of taking the service down. The same idea gives a zero-downtime reload: on a deploy signal, fork new workers, wait until they are listening, then retire the old ones one at a time. The port never stops listening.
 
-One subtlety: the right number of workers is usually the number of *logical* cores, which you read from `os.availableParallelism()` (added in Node 19.4; prefer it over the older `os.cpus().length` because it respects cgroup/container CPU limits). In a container capped at 2 CPUs, spawning 16 workers just creates scheduler thrash and memory bloat — each worker carries its own V8 heap.
+The worker count should be the number of logical cores from `os.availableParallelism()`, which respects cgroup and container CPU limits. In a container capped at 2 CPUs, spawning one worker per host core just thrashes the scheduler and multiplies memory, because each worker carries its own V8 heap.
 
 ## Code examples
 
@@ -129,57 +133,58 @@ process.on('SIGUSR2', reload);                  // trigger on a deploy signal
 
 ## Common mistakes & gotchas
 
-- **Assuming shared memory.** Workers are separate processes. An in-memory cache, rate-limit counter, or session map in one worker is invisible to the others. Round-robin means consecutive requests from the same user can land on different workers — so a login stored in worker A's RAM looks logged-out on worker B. Put shared state in Redis/DB or a sticky session layer.
-- **Thinking cluster fixes CPU-bound code.** Cluster multiplies your capacity for *concurrent I/O*. If a *single* request does heavy synchronous computation, it still blocks its worker's one thread; cluster just means fewer requests are affected at once. For per-request CPU work, reach for worker\_threads instead.
-- **Forking too many workers.** More workers than cores causes context-switch thrash and multiplies memory (each worker = a full V8 heap). In containers, `os.cpus().length` reports host cores, not your CPU limit — use `availableParallelism()`.
-- **WebSockets / sticky sessions.** Round-robin distributes the initial connection, but stateful protocols (Socket.IO with in-memory adapters, long polling) assume a client stays on one worker. Without sticky routing and a shared adapter (e.g. the Redis adapter), messages get lost across workers.
-- **No respawn logic.** Forgetting the `'exit'` handler means every crashed worker permanently reduces capacity until the whole service is restarted.
-- **Sharing a DB connection object across the fork.** Connections are per-process; each worker must open its own pool. You cannot inherit a live socket handle as a usable client.
+- **Assuming shared memory.** An in-memory cache, rate-limit counter, or session map in one worker is invisible to the others. Consecutive requests can land on different workers, so a login stored in worker A's RAM looks logged out on worker B. Put shared state in Redis, the database, or a sticky session layer.
+- **Thinking cluster fixes CPU-bound code.** Cluster multiplies capacity for concurrent input and output. One request that computes heavily still blocks that worker's single thread. For per-request CPU work, use worker threads.
+- **Forking too many workers.** More workers than cores causes context-switch thrash and multiplies memory. In containers, `os.cpus().length` reports host cores, not your CPU limit. Use `availableParallelism()`.
+- **WebSockets and sticky sessions.** Round-robin spreads the initial connection, but Socket.IO with an in-memory adapter assumes the client stays on one worker. Without sticky routing and a shared adapter, such as the Redis adapter, messages get lost across workers.
+- **No respawn logic.** Forgetting the `'exit'` handler means every crashed worker permanently reduces capacity.
+- **Sharing a database connection object across the fork.** Each worker must open its own pool. You cannot inherit a live socket as a usable client.
 
 ## Best practices
 
-- **Prefer a process manager in production.** PM2 (`pm2 start app.js -i max`) or the container orchestrator's replicas wrap cluster's fork/respawn/reload logic so you don't hand-roll it. Many teams run one process per container and let Kubernetes do the horizontal scaling instead of clustering inside the container.
-- **Keep workers stateless.** Externalize sessions, caches, counters, and locks to Redis or the database. Stateless workers can be killed and respawned freely.
-- **Size workers to available parallelism** via `availableParallelism()`, and leave headroom for the primary and OS.
-- **Implement graceful shutdown per worker** — on `disconnect`/`SIGTERM`, stop accepting, drain in-flight requests, then exit (see the graceful-shutdown topic).
-- **Log the worker pid** in every log line so you can trace which worker served a request.
-- **Don't cluster CPU-bound single requests** — profile first; if one request pins a core, offload to worker\_threads or a queue.
+- **Prefer a process manager in production.** PM2 with `pm2 start app.js -i max`, or the orchestrator's replicas, wraps fork, respawn, and reload. Many teams run one process per container and let Kubernetes scale.
+- **Keep workers stateless.** Sessions, caches, counters, and locks belong in Redis or the database.
+- **Size workers with `availableParallelism()`**, and leave headroom for the primary and the OS.
+- **On `disconnect` or `SIGTERM`, stop accepting, drain in-flight requests, then exit.**
+- **Log the worker pid** so you can see which worker served a request.
+- **Profile before you cluster a CPU-bound request.** If one request pins a core, offload it to worker threads or a queue.
 
 ## ⭐ Interview lens
 
 > **Q: Why does a Node process only use one CPU core, and how does cluster change that?**  
-> A: Your JavaScript runs on a single main thread (libuv has a thread pool for some I/O, but *your* code is single-threaded). One process therefore pins one core. Cluster forks one worker process per core, each with its own event loop, all sharing one listening socket, so connections spread across every core — roughly N× throughput for I/O-bound work.
+> A: Your JavaScript runs on one main thread. libuv has a thread pool for some input and output, but your code is single-threaded, so one process pins one core. An 8-core box running `node server.js` leaves seven cores idle, the event loop backs up, and latency climbs while the machine still looks mostly idle. Cluster forks one worker process per core. Each worker has its own event loop and its own heap. The primary opens one listening socket and the workers accept from it, so connections spread across the cores. On Linux and macOS the default is round-robin: the primary hands each new connection to the next worker. For a service that mostly waits on the database or the network, that is close to one multiple of throughput per worker, with no change to the request handler. The limit is the work itself. Cluster does not make one heavy synchronous request faster, and workers do not share variables, so sessions and caches have to live in Redis or the database.
 
 > **Q: Do cluster workers share memory?**  
-> A: No. They are independent OS processes with separate heaps. They communicate only via IPC message passing, and messages are serialized copies. Any shared state must live outside the process, e.g. Redis. (Trap: interviewers wait for candidates to suggest a shared in-memory cache across workers — it doesn't exist.)
-
-> **Q: How are incoming connections distributed to workers?**  
-> A: Default is round-robin (`SCHED_RR`) on Linux/macOS — the primary accepts and hands each connection to the next worker. Windows defaults to letting the OS decide (`SCHED_NONE`), which can be uneven. Note it distributes *connections*, not requests, so keep-alive pins many requests to one worker.
+> A: No. They are independent operating-system processes. Each has its own V8 heap and its own event loop. They talk only through IPC, `worker.send()` and `process.on('message')`, and the message is serialized with structured clone, so each side gets a copy. A live object or a shared buffer sent on that channel is not shared memory. For example, a login stored in an in-memory map on worker A is invisible when the next request lands on worker B, which is what round-robin will do. Put sessions, rate-limit counters, and caches in Redis or the database. The limit people miss in interviews is suggesting a shared in-memory cache across workers. It does not exist. The same isolation is why one worker can crash and the primary can fork a replacement without taking the others down.
 
 > **Q: Does cluster help with a CPU-bound endpoint?**  
-> A: Only indirectly. Each worker is still single-threaded, so a heavy synchronous request blocks its worker. Cluster reduces how many requests are affected at once but doesn't speed up the computation. For genuinely CPU-heavy work per request, use worker\_threads or a job queue. (Common trap.)
+> A: Only indirectly. Each worker is still one JavaScript thread. A request that hashes, parses a huge file, or loops on the CPU blocks that worker until it finishes. Cluster means the other workers can keep serving, so fewer requests stall at once. It does not make that computation faster, and it does not move the work off the worker that accepted the connection. For computation inside one request, use worker threads, which run extra threads in one process, or a job queue. For example, an image resize on the request path still freezes the worker that took the request, even if you have one worker per core. The limit of reaching for cluster first is that you multiply memory, one V8 heap per worker, and you still have a blocked event loop on the hot request. Profile before you add processes.
 
 > **Q: cluster vs running multiple containers behind a load balancer — when each?**  
-> A: Same idea at different layers. Cluster maximizes a single machine's cores cheaply, in-process. Multiple containers/replicas add cross-machine scaling, isolation, and independent rolling deploys. Many modern setups run one Node process per small container and let the orchestrator scale horizontally — simpler ops, no in-process supervisor to maintain.
-
-> **Q: How do you achieve zero-downtime reloads with cluster?**  
-> A: On a reload signal, fork new workers, wait for each to emit `listening`, then `disconnect()` old workers one at a time so they finish in-flight requests before exiting. The shared listening socket stays open the whole time, so the port never drops.
+> A: Both spread traffic across Node processes. Cluster does it inside one machine: one primary, one worker per core, one shared port, no shared memory. Multiple containers behind a load balancer do it across machines, with isolation and independent rolling deploys. Cluster is the cheap way to fill the cores on a VM. Containers are how you add machines and let an orchestrator restart and scale. A common modern setup runs one Node process per small container and lets Kubernetes scale the replicas, because the platform already supervises processes and you do not keep an in-process primary. For example, PM2 cluster mode on a VM wraps this module with `pm2 start app.js -i max`. Inside Kubernetes, that same cluster mode double-counts CPU against the pod limit. The limit of cluster alone is the one machine. A dead host takes every worker with it. The limit of one process per container is that you still need an external store for sessions, because replicas share memory no more than workers do.
 
 ## Cheat-card
 
-- Node app code is **single-threaded** → one process = one core. Cluster = one worker process per core.
-- **Primary** forks + supervises (no request handling); **workers** run your server, share one listening socket.
-- Branch on `cluster.isPrimary`; scale to `os.availableParallelism()` (container-aware).
-- Distribution: **round-robin** (Linux/macOS default), by connection not request.
-- **No shared memory** — IPC copies only; externalize state to Redis/DB.
-- Respawn on `'exit'`; graceful reload = fork new, `disconnect()` old one-by-one.
-- Great for I/O concurrency; **not** a fix for CPU-bound single requests (→ worker\_threads).
-- In production, usually let PM2 (`-i max`) or the orchestrator manage it.
-- **nginx upstream keepalive (1.28 and older):** `keepalive 16;` in the `upstream` block plus `proxy_http_version 1.1;` and `proxy_set_header Connection "";`, or every request opens a new connection (measured: 300 for 300 requests, 10–17 with keepalive). Default since 1.29.7.
-- **Node behind a proxy:** `server.keepAliveTimeout` (default 5000 ms, +1000 ms `keepAliveTimeoutBuffer`) must be longer than the proxy's idle timeout (nginx upstream `keepalive_timeout` 60 s).
-- **Stickiness in open-source nginx:** `ip_hash` (first three IPv4 octets, so a whole /24 shares an instance) or `hash $cookie_sid consistent`. `sticky` was NGINX Plus only before 1.29.6; 1.28.3 says `unknown directive "sticky"`.
-- **Forwarded headers:** `X-Forwarded-For $proxy_add_x_forwarded_for`, `X-Forwarded-Proto $scheme`; in Express trust only the proxy (`app.set('trust proxy', '127.0.0.1')`), see lesson 52.
-- **nginx without root:** `apt-get download nginx nginx-common`, `dpkg -x` each `.deb`, then `nginx -p <dir>/ -c nginx.conf` with your own `pid`, `error_log` and `*_temp_path`.
+- Node app code is single-threaded, so one process uses one core. Cluster runs one worker process per core.
+- The **primary** forks and supervises. **Workers** run the server and share one listening socket.
+- Branch on `cluster.isPrimary`. Scale with `os.availableParallelism()`, which sees container limits.
+- Default distribution on Linux and macOS is round-robin, by connection, not by request.
+- **No shared memory.** IPC sends copies. Put shared state in Redis or the database.
+- Respawn on `'exit'`. A reload forks new workers, then `disconnect()` retires the old ones one by one.
+- Strong for concurrent input and output. A CPU-bound request still blocks its worker. Use worker threads for that.
+- In production, PM2 `-i max` or the orchestrator usually owns the processes.
+
+## Good to know
+
+- **How are connections distributed?** On Linux and macOS the default is `SCHED_RR`: the primary hands each connection to the next worker. Windows defaults to `SCHED_NONE` and lets the OS decide, which can be uneven. Set `cluster.schedulingPolicy = cluster.SCHED_RR` before forking to force round-robin. Keep-alive pins many requests on one connection to one worker.
+- **How do you reload with no dropped port?** On the deploy signal, fork new workers, wait for each `listening` event, then `disconnect()` the old workers one at a time so they finish in-flight requests. The shared socket stays open.
+- **The idle-machine picture in this lesson:** under that single-core saturation, `htop` can show the box about 88% idle.
+- **`os.availableParallelism()` was added in Node 19.4.** Prefer it over `os.cpus().length` because it respects cgroup and container CPU limits.
+- **nginx upstream keepalive on 1.28 and older:** `keepalive 16;` in the `upstream` block plus `proxy_http_version 1.1;` and `proxy_set_header Connection "";`, or every request opens a new connection. Measured here: 300 connections for 300 requests, and 10 to 17 with keepalive. Default since nginx 1.29.7.
+- **Node behind a proxy:** `server.keepAliveTimeout` defaults to 5000 ms, plus 1000 ms `keepAliveTimeoutBuffer`, and must be longer than the proxy idle timeout. nginx upstream `keepalive_timeout` is 60 s.
+- **Stickiness in open-source nginx:** `ip_hash` uses the first three IPv4 octets, so a whole /24 shares an instance, or use `hash $cookie_sid consistent`. `sticky` was NGINX Plus only before 1.29.6. nginx 1.28.3 says `unknown directive "sticky"`.
+- **Forwarded headers:** `X-Forwarded-For $proxy_add_x_forwarded_for` and `X-Forwarded-Proto $scheme`. In Express, trust only the proxy, `app.set('trust proxy', '127.0.0.1')`, as in lesson 52.
+- **nginx without root:** `apt-get download nginx nginx-common`, `dpkg -x` each `.deb`, then `nginx -p <dir>/ -c nginx.conf` with your own `pid`, `error_log`, and `*_temp_path`.
 
 ---
 

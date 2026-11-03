@@ -13,62 +13,66 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Schema patterns are named shapes between embedding and referencing: group many tiny events into buckets, keep only the few items a page shows, store a running total, or copy a stable field so a list does not join. You pick one by naming the read you want to make cheap and the extra work each write will do. They exist because real data is often too big to embed and too costly to join on every page. The trade-off is an invariant you must keep true, such as "this array holds at most three reviews," or the copies drift.
+
 ## Why it matters
 
-[Lesson 68](68-schema-design-amp-data-modeling.md) gives you two tools: embed the related data, or reference it by id. Real collections rarely fit either tool cleanly. A sensor writes one reading a minute for years, so embedding all of them in one document is impossible and one document per reading creates millions of tiny documents. A product page wants the three newest reviews, not all 40,000. A bestseller has a buyer list 1,000 times longer than a normal book.
+Lesson 68 gives you embed or reference. Real collections often fit neither. A sensor that writes once a minute for years cannot embed every reading, and one document per reading creates millions of tiny documents. A product page wants the three newest reviews, not all 40,000. A bestseller's buyer list is a thousand times longer than a normal book's.
 
-The schema patterns are named, reusable answers to those shapes. Each one moves cost from one place to another: from reads to writes, from many small documents to fewer large ones, or from a join to a copy that can go stale. You choose a pattern by naming the read you want to make cheap and the cost you are willing to pay for it. In an interview, "I'd use the bucket pattern" is a weak answer. A strong one is "I'd bucket by sensor-hour, which cut the documents from 100,000 to 1,670 and the index from 2 MB to 68 KB, at the cost of an upsert per write".
+Each pattern moves cost: from reads to writes, from many small documents to fewer larger ones, or from a join to a copy that can go stale. "I would use the bucket pattern" is a weak interview answer. A strong one names the grouping, the measured change in document count and index size, and the cost on the write.
 
 ## The concept, simply
 
-Every pattern in this lesson sits somewhere between the two baselines from lesson 68. **Embedding** puts owned, bounded data inside the parent, so one read returns everything. **Referencing** keeps the data in a second collection and joins it at read time with `populate()` or `$lookup`. The patterns are compromises between the two: embed *some* of it (subset, extended reference), embed a *summary* of it (computed), group many small things into a few medium documents (bucket), or treat the rare huge case differently from the common small one (outlier).
+Every pattern sits between the two baselines. Embedding puts owned, bounded data inside the parent so one read returns it. Referencing keeps a second collection and joins at read time with `populate()` or `$lookup`. The patterns embed some of it, embed a summary, group small things into medium documents, or treat the rare huge case differently.
 
 ![Embedding vs referencing: an order with items nested inside it, read in one query, versus an order holding a userId that points into a separate users collection and is joined at read time](assets/i41_01_7b178f88.svg)
 *Figure: the two baselines every schema pattern trades between. Look at: "One read gets everything" on the embed side versus "Needs populate / $lookup" on the reference side.*
 
 | Pattern | Problem it solves | Read it makes cheap | What it costs |
 |---|---|---|---|
-| Bucket | Millions of tiny documents (time series, events) | "All readings for sensor S in this range" | Upsert logic on write; a bucket is the unit you read and update |
-| Subset | A large array where only the first few items are read often | The page that shows the top N | Two writes per item; the subset is a duplicate |
-| Computed | The same aggregate recomputed on every read | A count, sum or average | Extra write per change; drift if a write is missed |
-| Extended reference | A join on every read for a few stable fields | A list screen that shows the related name | Copies go stale until you fan the change out |
-| Outlier | A few documents are far larger than the rest | The common case stays one read | Extra code path and a second query for outliers |
-| Polymorphic | Different shapes that are queried together | One query across all types | Validation and indexes must handle absent fields |
-| Tree: parent ref | Hierarchies where you mostly move or list children | Direct children | Subtree needs recursion (`$graphLookup`) |
+| Bucket | Millions of tiny documents, such as time series or events | "All readings for sensor S in this range" | An upsert on every write. You read and update a bucket, not a row |
+| Subset | A large array when the page shows only the first few | The page that shows the top N | Two writes per item, and the subset is a duplicate |
+| Computed | The same aggregate recomputed on every read | A count, sum, or average | An extra write per change, and drift if a write is missed |
+| Extended reference | A join on every read for a few stable fields | A list that shows the related name | Copies stay stale until a fan-out runs |
+| Outlier | A few documents are far larger than the rest | The common case stays one read | A second code path and a second query for the outliers |
+| Polymorphic | Different shapes that are queried together | One query across all types | Validation and indexes must allow missing fields |
+| Tree: parent reference | Hierarchies where you move nodes or list children | Direct children | A subtree needs recursion (`$graphLookup`) |
 | Tree: materialized path | Hierarchies where you read whole subtrees | A subtree, as one prefix scan | Moving a node rewrites every descendant |
 
 ## How it works
 
-How to choose a pattern, in order:
+Choose in this order:
 
-1. **Write down the hot reads**, with their filter and sort. For example, "one sensor, one day, ordered by time" or "the product page with its 3 newest reviews".
-2. **Write down the writes and how often they happen:** a reading a minute, a review a day, a customer rename once a year.
-3. **Start from the baseline** that lesson 68 gives you: embed if the data is owned and bounded, reference if not.
-4. **Find the cost that hurts.** The document count is too high, a document is too large, a join runs on every read, or an aggregate runs on every read.
-5. **Pick the pattern that moves that cost** onto something rarer, usually the write path.
-6. **Measure both shapes** with `$collStats` (sizes and counts) and `explain('executionStats')` (keys and documents examined), as the examples below do.
-7. **Write down the new invariant.** Examples: "`recentReviews` holds at most 3 entries", "`ratingSum` equals the sum of `ratings.stars`", "`customer.name` on an order may lag the customer by one fan-out job". The pattern is only correct while that invariant holds.
+1. Write down the hot reads, with filter and sort. "One sensor, one day, ordered by time." "The product page and its 3 newest reviews."
+2. Write down the writes and how often they happen. A reading a minute, a review a day, a rename once a year.
+3. Start from lesson 68: embed if the data is owned and bounded, reference if not.
+4. Name the cost that hurts: too many documents, a document that is too large, a join on every read, or an aggregate on every read.
+5. Pick the pattern that moves that cost onto something rarer, usually the write.
+6. Measure both shapes with `$collStats` for sizes and counts, and `explain('executionStats')` for keys and documents examined.
+7. Write down the invariant. "`recentReviews` holds at most 3." "`ratingSum` equals the sum of `ratings.stars`." "`customer.name` on an order may lag by one fan-out job." The pattern is correct only while that stays true.
 
-**Bucket.** One document holds a group of related small items: all readings for one sensor in one hour, plus summary fields such as `count` and `sum`. Writes become an upsert that `$push`es into the open bucket. The filter includes `count: { $lt: N }` so that a full bucket stops matching and the upsert starts a new one. Reads fetch a handful of buckets instead of thousands of documents. The index has one entry per bucket instead of one per reading, which is where most of the space saving in Example 1 comes from. Each document also carries its own `_id` and field names, so fewer documents means fewer repeated bytes. MongoDB's *time series collections* (added in 5.0) do this bucketing for you inside the server. If your data is measurements over time, read [the time series docs](https://www.mongodb.com/docs/manual/core/timeseries-collections/) before you build buckets by hand.
+**Bucket.** One document holds a group of small items, such as all readings for one sensor in one hour, plus `count` and `sum`. A write is an upsert that `$push`es into the open bucket. The filter includes `count: { $lt: N }` so a full bucket stops matching and the next upsert starts a new one. Reads fetch a handful of buckets instead of thousands of documents. The index has one entry per bucket, which is where most of the space saving in Example 1 comes from. Fewer documents also means less repeated `_id` and field-name overhead. MongoDB time series collections, added in 5.0, do this bucketing inside the server. For measurements over time, read those docs before you build buckets by hand.
 
-**Subset.** The parent embeds only the part of a large related set that the hot read shows: the newest 3 reviews, the top 10 comments. The full set lives in its own collection. `$push` with `$each`, `$position: 0` and `$slice: N` keeps the embedded array at exactly N entries in one atomic update, so the document cannot grow without bound. The cost is two writes per new item and a duplicate of the newest items.
+**Subset.** The parent embeds only the slice the hot read shows, such as the newest 3 reviews. The full set lives in its own collection. `$push` with `$each`, `$position: 0`, and `$slice: N` keeps the embedded array at exactly N in one atomic update. The cost is two writes per new item.
 
-**Computed.** Store the result of a calculation (`ratingCount`, `ratingSum`, a running total) and update it with `$inc` on each write. Reads no longer scan the detail rows. The invariant is that the stored values equal what an aggregation would return. A write path that forgets the `$inc`, or crashes between the two writes, breaks it. Use a transaction (see [lesson 75](75-transactions-amp-acid.md); it needs a replica set) or a periodic recompute job if exactness matters.
+**Computed.** Store `ratingCount` and `ratingSum`, and `$inc` them on each write. Reads no longer scan the detail rows. The stored values must equal what an aggregation would return. A write path that forgets the `$inc`, or crashes between the two writes, breaks that. Use a transaction when exactness matters (lesson 75, which needs a replica set), or a periodic recompute.
 
-**Extended reference.** Instead of only `customerId`, the order stores `{ _id, name, city }`, which are the few fields the order list shows. The full customer stays in `customers`. You gain a join-free list screen. The cost is *staleness*: a rename updates `customers` but not the copies, until you run `updateMany` on every order that references the customer. Copy only fields that change rarely, and decide whether the order *should* keep the old value. A shipping address on an order is often meant to be a snapshot.
+**Extended reference.** The order stores `{ _id, name, city }` instead of only `customerId`. The full customer stays in `customers`. The list screen needs no join. A rename updates `customers` and not the copies, until `updateMany` runs. Copy fields that change rarely. A shipping address on an order is often meant to stay as a snapshot of what was true at purchase.
 
-**Outlier.** Design for the common case: embed buyers in the book, capped at a limit you choose. When a document hits the cap, set a flag (`hasOverflow: true`) and write the extra items into overflow documents in another collection. Readers check the flag and query the overflow only when it is set. The common case keeps its single read. The rare case pays for a second query and an extra code path that you have to test.
+**Outlier.** Design for the common case. Embed buyers on the book, capped at a limit you choose. When a document hits the cap, set `hasOverflow: true` and write the rest to another collection. Readers query the overflow only when the flag is set. The common case stays one read. The rare case pays a second query and a second code path.
 
-**Polymorphic.** Documents with different shapes share one collection because they are queried together: "everything under $50" across books, shirts and ebooks. A shared `type` field tells the shapes apart (Mongoose calls this a *discriminator*, see [lesson 67](67-mongodb-amp-mongoose.md)). Shared fields get normal indexes. Type-specific fields get *partial* indexes filtered on `type`, so that, for example, `isbn` is unique among books without forcing shirts to have one ([lesson 70](70-mongodb-indexes-in-depth.md)).
+**Polymorphic.** Books, shirts, and ebooks share one collection because you query them together, for example "everything under $50." A `type` field tells the shapes apart. Mongoose calls this a discriminator (lesson 67). Shared fields get normal indexes. A type-specific field such as `isbn` gets a partial index filtered on `type`, so shirts do not need an isbn (lesson 70).
 
-**Trees.** There are four common shapes, and they trade write cost for read cost:
+**Trees.** Four shapes, trading write cost for read cost.
 
-- **Parent references.** Each node stores `parent`. Listing direct children is one indexed equality query, and moving a node changes one document. A whole subtree needs `$graphLookup`, which runs a recursive search on the server.
-- **Child references.** Each node stores a `children` array. Listing children is fast, but the parent's array has to be kept in sync with the children. It is not shown below.
-- **Array of ancestors.** Each node stores `ancestors: ['Books', 'Programming']`. A subtree is an equality match on a multikey index, and a breadcrumb is already in the document.
-- **Materialized path.** Each node stores a string such as `,Books,Programming,Databases,`. A subtree is an *anchored* regex prefix `^,Books,Programming,`, which the index turns into a key range scan. Sorting by `path` gives depth-first order. Moving a node rewrites the path of every descendant.
+- **Parent references.** Each node stores `parent`. Direct children are one indexed equality query. Moving a node changes one document. A subtree needs `$graphLookup`.
+- **Child references.** Each node stores a `children` array. Listing children is fast, and the array has to stay in sync. Not shown in the examples.
+- **Array of ancestors.** Each node stores `ancestors: ['Books', 'Programming']`. A subtree is an equality match on a multikey index. The breadcrumb is already on the document.
+- **Materialized path.** Each node stores a string such as `,Books,Programming,Databases,`. A subtree is an anchored prefix regex, `^,Books,Programming,`, which the index turns into a key range. Sorting by `path` is depth-first. Moving a node rewrites every descendant's path.
 
-**What "anchored" buys you.** For a regex that starts with `^` and has no case-insensitive flag, the query planner converts the literal prefix into index bounds. In Example 7 the bounds are `[",Books,Programming,", ",Books,Programming-")`; `-` is the character after `,` in ASCII. So only the keys inside that range are examined. Any other regex still uses the index, but it has to test every key (Example 8).
+**What "anchored" buys you.** A regex that starts with `^` and is case-sensitive lets the planner turn the literal prefix into index bounds. In Example 7 the bounds are `[",Books,Programming,", ",Books,Programming-")`. The character after the comma in ASCII is the hyphen, so only keys inside that range are examined. Any other regex may still use the index and still has to test every key (Example 8).
 
 ## Code examples
 
@@ -498,53 +502,58 @@ All three regexes return the same 4 documents. The anchored one examines 5 index
 
 ## Common mistakes & gotchas
 
-- **Bucketing without a cap in the filter.** An upsert on `{ sensorId, start }` alone keeps pushing into one document forever. Include `count: { $lt: N }`, or bound the bucket by time so it cannot exceed N entries.
-- **Treating a bucket as a row.** The day query in Example 1 returns 24 documents, not 1,440 readings. Code that expects one result per reading has to `$unwind` or flatten.
-- **Subset with `$push` but no `$slice`.** The "recent" array then grows without bound, which is the anti-pattern the subset was meant to fix.
-- **Computed fields updated outside the write path.** If one service `$inc`s and another inserts directly, the totals drift without any error. Put both writes behind one function, use a transaction when the total must be exact, or schedule a recompute.
-- **Extended reference to volatile fields.** Copying `lastLoginAt` or a stock level means a fan-out on every change. Copy only fields that change rarely, and know which collection is the source of truth.
-- **Forgetting the index that the fan-out needs.** `updateMany({ 'customer._id': id })` without an index on `customer._id` scans the whole orders collection.
-- **Outlier logic that only some writers know about.** A writer that `$push`es directly bypasses the cap. Route every write through the same function.
-- **Unanchored or case-insensitive path regexes.** They examine every key (Example 8). Anchor with `^` and normalise case when you write the path.
-- **Paths without delimiters at both ends.** `/^,Books,Prog/` also matches `,Books,Programming,` and `,Books,Prognosis,`. End the prefix with the delimiter, as in `^,Books,Programming,`.
-- **Polymorphic collection with a full unique index on a type-only field.** A plain unique index on `isbn` indexes every shirt as `isbn: null`, so a second document without an `isbn` collides. Use a partial index filtered on `type`.
+- **A bucket upsert with no cap in the filter.** `{ sensorId, start }` alone pushes into one document forever. Include `count: { $lt: N }`, or bound the bucket by time.
+- **Treating a bucket as a row.** The day query in Example 1 returns 24 documents, not 1,440 readings. Flatten with `$unwind` if you need one result per reading.
+- **`$push` with no `$slice`.** The "recent" array then grows without a bound, which is the problem the subset was meant to solve.
+- **A computed field updated on only some write paths.** One service `$inc`s and another inserts directly, and the totals drift with no error. One function should do both writes, or you recompute on a schedule.
+- **Copying a volatile field.** `lastLoginAt` or a stock level means a fan-out on every change. Copy fields that rarely change, and name the source of truth.
+- **A fan-out with no index.** `updateMany({ 'customer._id': id })` without an index on `customer._id` scans every order.
+- **Outlier logic that only some writers know.** A direct `$push` bypasses the cap. Route every write through one function.
+- **An unanchored or case-insensitive path regex.** It examines every key (Example 8). Anchor with `^` and write the path in one case.
+- **A prefix with no delimiter at the end.** `^,Books,Prog` also matches `,Books,Programming,` and `,Books,Prognosis,`. End the prefix with the delimiter.
+- **A full unique index on a type-only field.** A unique index on `isbn` indexes every shirt as `isbn: null`, so a second document with no isbn collides. Use a partial index filtered on `type`.
 
 ## Best practices
 
-- **Name the read first.** Each pattern is justified by one query that it makes cheaper. Write that query down, with `explain('executionStats')`, before and after.
-- **Measure with `$collStats` and `explain`,** not by intuition: document count, `size`, `totalIndexSize`, `totalKeysExamined` and `totalDocsExamined`.
-- **Use time series collections for measurements over time** before you build buckets by hand. Hand-built buckets are for groupings the server does not know about, such as "all events of one order".
-- **Bound every embedded array** with `$slice`, a count in the filter, or a cap plus overflow.
-- **Keep each pattern's invariant in one place:** one function writes the detail and the summary, or the detail and the subset.
-- **Plan the fan-out for every copy:** which job updates it, which index the job uses, and how stale the copy may be.
-- **For trees, pick the shape by the most common operation.** Use parent references if moves are common, a materialized path or an ancestors array if subtree reads are common, and both if you need both. Each extra shape is another field to keep in sync.
+- Name the read first. Each pattern is justified by one query. Record `explain('executionStats')` before and after.
+- Measure with `$collStats` and `explain`: document count, `size`, `totalIndexSize`, `totalKeysExamined`, `totalDocsExamined`.
+- Prefer a time series collection for measurements over time. Hand-built buckets are for groupings the server does not know, such as "all events of one order."
+- Bound every embedded array with `$slice`, a count in the filter, or a cap plus overflow.
+- Keep the invariant in one function: the detail and the summary, or the detail and the subset.
+- Plan the fan-out: which job updates the copies, which index it uses, and how stale a copy may be.
+- For trees, pick the shape from the common operation. Parent references when moves are common. A path or an ancestors array when subtree reads are common. Both if you need both, and then both fields must stay in sync.
 
 ## ⭐ Interview lens
 
 > **Q: “We store one document per IoT reading and the collection has 2 billion documents. What would you change?”**  
-> A: Bucket by device and time window, for example one document per device-hour with `count`, `sum`, `min` and `max` beside the readings, or use a time series collection, which does this in the server. In my measurement, 100,000 readings went from 100,000 documents and a 2 MB index to 1,670 documents and a 68 KB index, and a one-day query went from 1,440 documents examined to 24. The cost is an upsert with a `count < N` filter on each write, and the read returns buckets that you flatten. *Trap:* claiming bucketing shrinks the data by 60×. The reading values still have to be stored, so only the per-document overhead and index entries shrink.
+> Bucket by device and time, or use a time series collection, which buckets inside the server. A hand-built bucket is one document per device-hour holding the readings plus `count`, `sum`, `min`, and `max`. The write is an upsert whose filter includes `count` less than N, so a full hour starts a new document. In the measurement in Example 1, 100,000 readings went from 100,000 documents and a 2,072 KB index to 1,670 documents and a 68 KB index, and a one-day query went from 1,440 documents examined to 24. The reading values themselves are still stored, so the data does not shrink by the same factor as the document count. What shrinks is per-document overhead and index entries. The limit is the read shape: you get buckets, not one document per reading, so callers that expect a row per sample have to flatten.
 
 > **Q: “How do you show the 3 newest reviews on a product page without loading all of them?”**  
-> A: Use the subset pattern. Store every review in `reviews` with an index on `{ productId, at: -1 }`, and embed the newest 3 in the product with `$push: { recentReviews: { $each: [r], $position: 0, $slice: 3 } }`. The page is one read. The cost is two writes per review and a duplicate of the 3 newest.
+> Use the subset pattern. Store every review in `reviews`, with an index on `{ productId: 1, at: -1 }`, and embed only the newest three on the product. The update is `$push` with `$each`, `$position: 0`, and `$slice: 3`, which inserts at the front and keeps the array at length 3 in one atomic write. The page is one read of the product. The full history stays queryable in `reviews`. The cost is two writes per review, and the three newest reviews exist twice. The limit is a writer that `$push`es without `$slice`: the embedded array grows without a bound, which is the problem you were avoiding. One function should write the review document and the subset together.
 
 > **Q: “What goes wrong with the extended reference pattern?”**  
-> A: The copied fields go stale. After the source changes, every copy shows the old value until a fan-out `updateMany` runs, and that update needs an index on the reference field. Copy only fields that rarely change, decide whether some copies are meant as snapshots (an address on a shipped order), and make one job responsible for the fan-out.
+> The copied fields go stale. An extended reference stores a few fields of the related document, such as `{ _id, name }`, so a list screen does not join. When the source changes, every copy still shows the old value until a fan-out `updateMany` runs, and that update scans the whole collection unless you indexed the copied id. For example, renaming a customer updates `customers` immediately and updates orders only when the job finishes. Copy fields that rarely change. Decide which copies are snapshots on purpose, such as the address on an order that has already shipped. The limit is a field that changes often, such as a stock level: the fan-out becomes the hot path, and you were better off with a join.
 
 > **Q: “Parent references or materialized paths for a category tree?”**  
-> A: Parent references make moves cheap (one document) and children cheap (an indexed equality query), but a subtree needs a recursive `$graphLookup`. A materialized path makes a subtree one index range scan through an anchored prefix regex, but moving a node rewrites every descendant. If subtree reads dominate and moves are rare, use paths, often together with `parent`. *Trap:* a case-insensitive or unanchored regex examines every index key, so the path index no longer narrows the scan.
+> A parent reference stores `parent` on each node. Listing children is one indexed equality query, and moving a node rewrites one document. A whole subtree needs `$graphLookup`, a recursive search on the server. A materialized path stores a string such as `,Books,Programming,Databases,`. A subtree is one index range scan from an anchored, case-sensitive prefix regex, and sorting by the path is depth-first. Moving a node rewrites the path of every descendant. If subtree reads dominate and moves are rare, use paths, often together with `parent`. The limit is the regex. A case-insensitive flag or a pattern that does not start with `^` makes the index test every key, so the path no longer narrows the scan. End the prefix with the delimiter so `,Books,Prog` does not match `Programming`.
 
 ## Cheat-card
 
-- **Bucket:** many small items → one doc per group; upsert with `count: { $lt: N }`; measured 100,000 → 1,670 docs, index 2,072 KB → 68 KB.
-- **Time series collections** (added in 5.0) bucket inside the server; prefer them for measurements over time.
-- **Subset:** `$push: { arr: { $each: [x], $position: 0, $slice: N } }` + full collection; two writes per item.
-- **Computed:** `$inc` totals on write; reads examine 1 doc instead of N; drift if a write is missed.
-- **Extended reference:** copy `{ _id, name }` of the related doc; stale until `updateMany` fan-out; index the copied `_id`.
-- **Outlier:** cap the array (`'arr.999': { $exists: false }` in the filter), flag `hasOverflow`, read overflow only when flagged.
-- **Polymorphic:** shared `type` field; partial indexes for type-only fields.
-- **Trees:** parent ref (cheap moves, `$graphLookup` for subtrees), ancestors array (multikey equality), materialized path (anchored `^prefix,` = index range; moves rewrite descendants).
-- **Regex + index:** only an anchored, case-sensitive prefix gets tight bounds; `/x/` and `/^x/i` examine every key.
-- **Measure:** `aggregate([{ $collStats: { storageStats: {} } }])` and `explain('executionStats')`.
+- Bucket: one document per group, upsert with `count: { $lt: N }`. Measured here: 100,000 documents to 1,670, index 2,072 KB to 68 KB.
+- Time series collections, added in 5.0, bucket inside the server. Prefer them for measurements over time.
+- Subset: `$push` with `$each`, `$position: 0`, and `$slice: N`, plus the full collection. Two writes per item.
+- Computed: `$inc` the totals on write. A read examines 1 document instead of N. The totals drift if a write is missed.
+- Extended reference: copy `{ _id, name }`. Stale until an `updateMany` fan-out. Index the copied `_id`.
+- Outlier: cap the array, set `hasOverflow`, and read the overflow only when the flag is set.
+- Polymorphic: a shared `type` field, and partial indexes for fields that only one type has.
+- Trees: parent reference for cheap moves, ancestors array for multikey equality, materialized path for an anchored prefix. A move rewrites descendants.
+- Only an anchored, case-sensitive prefix gets tight index bounds. `/x/` and `/^x/i` examine every key.
+- Measure with `$collStats` and `explain('executionStats')`.
+
+## Good to know
+
+- Example 1 used 100,000 readings: 10 sensors times 10,000 minutes. `fsync` forced a WiredTiger checkpoint so the on-disk sizes matched the data just written. `scale: 1024` reports kilobytes.
+- The anchored bounds in Example 7 are `[",Books,Programming,", ",Books,Programming-")`, because `-` is the character after `,` in ASCII.
 
 ---
 

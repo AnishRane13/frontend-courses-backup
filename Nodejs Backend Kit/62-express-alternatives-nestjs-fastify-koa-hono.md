@@ -13,112 +13,52 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+NestJS, Fastify, Koa, and Hono are other Node web frameworks that do the same job as Express: match a method and path, run code around the handler, and turn a throw into a response. They differ in where validation lives, what a default error looks like, and whether the app is tied to Node. You meet them when a codebase is not Express, or when you are choosing one. The trade-off is that the same JSON body can be rejected by one framework and accepted by another, because their validators do not share rules.
+
 ## Why it matters
 
-Express is the default Node web framework, and lessons 47–61 and 63–66 use it throughout. Real codebases also use four other frameworks: **NestJS**, **Fastify**, **Koa** and **Hono**. Each one makes different choices about four things:
+Lessons 47 to 61 and 63 to 66 use Express. Real codebases also use NestJS, Fastify, Koa, and Hono. Each one chooses four things: where validation lives, what an error response looks like, how code wraps a handler, and whether the app is tied to Node. Those choices show up as bugs when you switch frameworks without knowing them. Measured in this lesson:
 
-- where validation lives;
-- what an error response looks like;
-- how middleware wraps a handler;
-- whether the app is tied to Node at all.
-
-Those choices show up as bugs when you switch frameworks without knowing them. Some examples from this lesson's runs:
-
-- **Unknown routes get very different answers.** With no custom handler, Express answers an unknown route with an HTML page, Koa with the text `Not Found`, Hono with the text `404 Not Found`, and Fastify and Nest with two different JSON shapes (Example 7).
+- **Unknown routes get different answers.** With no custom handler, Express answers with an HTML page, Koa with the text `Not Found`, Hono with the text `404 Not Found`, and Fastify and Nest with two different JSON shapes (Example 7).
 - **Default 500s can leak.** Fastify's default 500 body includes the thrown error's message. Express's default 500 page includes the full stack trace unless `NODE_ENV=production` (Example 7).
-- **The same payload gets different verdicts.** `{"qty":"2"}` is rejected by zod, rejected by class-validator, and **accepted as the number 2** by Fastify, because Fastify's JSON-schema validator coerces types by default (Example 12).
-- **A forgotten `await` in Koa gives a 404.** The route ran, but nothing had set the body when the middleware chain finished, so Koa answered 404 (Example 10).
+- **The same payload gets different verdicts.** `{"qty":"2"}` is rejected by zod and by class-validator, and **accepted as the number 2** by Fastify, because Fastify's JSON Schema validator coerces types by default (Example 12). Coercion means the validator converts a string into a number instead of rejecting it.
+- **A forgotten `await` in Koa gives a 404.** The route ran, but nothing had set the body when the middleware chain finished (Example 10).
 
-This lesson builds the same tiny API five times, runs the same curl script against all five, and shows the real responses. That way you can compare the frameworks on facts rather than on reputation.
+This lesson builds the same tiny API five times and runs the same curl script against all five.
 
 ## The concept, simply
 
-All five frameworks sit on top of Node's `http` server (lesson 40). Each one adds four parts:
+All five sit on Node's `http` server (lesson 40). Each adds a router that matches method plus path, a request and response object, a way to run code around the handler, and an error path.
 
-- a **router** that matches method + path to a handler;
-- a **request/response abstraction**;
-- a way to **chain code around the handler**: middleware, hooks, pipes or plugins;
-- an **error path** that turns a thrown error into a response.
-
-Here is how each framework fills those four parts:
-
-- **Express 5** (`express` 5.3.0). Middleware is a list of `(req, res, next)` functions run in order (lesson 49). Express has no built-in validation, so you bring a library such as zod. Errors go to a 4-argument `(err, req, res, next)` function. Express 5 also forwards errors thrown in async handlers there (lesson 50).
-- **Fastify** (`fastify` 5.12.5). Each route can declare a JSON Schema for its body, query, params, headers and response. When the route is registered, Fastify compiles the input schema into a validation function with **Ajv**. It compiles the response schema into a serializer with **fast-json-stringify**. Both are dependencies in Fastify's `package.json`. Errors go to `setErrorHandler`, and unknown routes go to `setNotFoundHandler`.
-- **Koa** (`koa` 3.2.1). There is one context object, `ctx`, per request. Middleware is `async (ctx, next) => {}`, and `next()` **returns a promise** that settles once everything downstream has finished. That makes the "onion" real: code after `await next()` runs after the handler. Koa's core has no router and no body parser. You add `@koa/router` 15.7.0 and `@koa/bodyparser` 6.1.0.
-- **Hono** (`hono` 4.13.13). Handlers receive a context `c` and return a Web-standard `Response`. The app itself is `app.fetch(request) → Response`, the same signature as the Fetch API. On Node, `@hono/node-server` 2.1.4 adapts Node's request and response objects to that function. Validation is middleware, such as `zValidator` from `@hono/zod-validator` 0.9.1.
-- **NestJS** (`@nestjs/core` 12.1.2). This is a structure layer on top of an HTTP library: Express by default (here `@nestjs/platform-express` 12.1.2, which installs Express 5.2.1), or Fastify. The building blocks are TypeScript classes with decorators:
-  - modules group the parts;
-  - controllers hold the routes;
-  - providers are services that the dependency-injection container creates and passes into constructors;
-  - pipes validate or transform handler arguments;
-  - exception filters turn thrown errors into responses.
+- **Express 5** (`express` 5.3.0). Middleware is a list of `(req, res, next)` functions run in order (lesson 49). Express has no built-in validation, so you bring a library such as zod. Errors go to a function with four arguments, `(err, req, res, next)`. Express 5 also forwards a throw inside an async handler there (lesson 50).
+- **Fastify** (`fastify` 5.12.5). A route can declare a JSON Schema for its body, query, params, headers, and response. When the route is registered, Fastify compiles the input schema into a validation function with **Ajv**, and the response schema into a serializer with **fast-json-stringify**. Both are dependencies in Fastify's `package.json`. Errors go to `setErrorHandler`. Unknown routes go to `setNotFoundHandler`.
+- **Koa** (`koa` 3.2.1). There is one context object, `ctx`, per request. Middleware is `async (ctx, next) => {}`, and `next()` returns a promise that settles when everything downstream has finished. Code after `await next()` runs after the handler. That is the onion. Koa's core has no router and no body parser. You add `@koa/router` 15.7.0 and `@koa/bodyparser` 6.1.0.
+- **Hono** (`hono` 4.13.13). Handlers receive a context `c` and return a Web-standard `Response`. The app itself is `app.fetch(request)`, the same shape as the Fetch API. On Node, `@hono/node-server` 2.1.4 adapts Node's request and response to that function. Validation is middleware, such as `zValidator` from `@hono/zod-validator` 0.9.1.
+- **NestJS** (`@nestjs/core` 12.1.2). This is a structure layer on an HTTP library. The default here is Express, through `@nestjs/platform-express` 12.1.2, which installs Express 5.2.1. You can use Fastify instead. You write TypeScript classes with decorators. A decorator is a marker on a class or method that records metadata. Modules group the parts. Controllers hold the routes. Providers are services the dependency-injection container creates and passes into constructors. Pipes validate or transform arguments. Exception filters turn thrown errors into responses.
 
 ## How it works
 
-The same `POST /items` request goes through these steps in every framework. Only the names and the order of some steps change:
+The same `POST /items` goes through these steps in every framework. The names change.
 
 1. **Node's `http` server** parses the request line and headers and emits a request with a readable body stream.
-2. **The router matches** method + path:
-   - Express 5 uses the `router` package (path-to-regexp);
-   - Fastify uses `find-my-way` (a radix tree);
-   - Koa uses `@koa/router`;
-   - Hono uses its own router;
-   - Nest registers each decorated controller method on the underlying Express (or Fastify) app at startup.
-3. **The body is read and parsed as JSON**:
-   - Express: `express.json()`;
-   - Fastify: its built-in content-type parser;
-   - Koa: `@koa/bodyparser`;
-   - Hono: `c.req.json()`, which `zValidator('json', …)` calls for you;
-   - Nest: Express's parser.
+2. **The router matches** method plus path. Express 5 uses the `router` package (path-to-regexp). Fastify uses `find-my-way`, a radix tree. Koa uses `@koa/router`. Hono uses its own router. Nest registers each decorated controller method on the underlying Express or Fastify app at startup.
+3. **The body is read and parsed as JSON.** Express uses `express.json()`. Fastify uses its built-in content-type parser. Koa uses `@koa/bodyparser`. Hono uses `c.req.json()`, which `zValidator('json', …)` calls for you. Nest uses Express's parser. Malformed JSON fails here, and each framework reports it differently (request 4 in Example 6).
+4. **Validation runs.** Express and Koa: you call `schema.safeParse()` yourself. Fastify: the Ajv function compiled from `schema.body`. Hono: `zValidator` before the handler. Nest: `ValidationPipe`. It uses class-transformer to turn the plain body into an instance of the DTO class, then runs the class-validator decorators on that instance. A DTO is the class that describes the body.
+5. **The handler returns data.** Express calls `res.json()`. Fastify returns an object or calls `reply.send()`. Koa assigns `ctx.body`. Hono returns `c.json()`. Nest returns a value that Nest serializes.
+6. **The response is serialized.** Fastify uses the compiled response schema when the route has one, and drops fields the schema does not list (Example 13). The other four call `JSON.stringify`.
+7. **Errors.** A throw in steps 3 to 6 goes to the error path: Express's four-argument middleware, Fastify's `setErrorHandler`, a Koa middleware that wraps `await next()` in try/catch, Hono's `app.onError`, or a Nest exception filter. A request that matches no route goes to the 404 path: a final Express `app.use()`, Fastify's `setNotFoundHandler`, Koa when no body was set, Hono's `app.notFound`, or a Nest `NotFoundException` that reaches the filter.
 
-   Malformed JSON fails at this step. Each framework reports that failure differently (request 4 in Example 6).
-4. **Validation runs**:
-   - Express and Koa: you call `schema.safeParse()` yourself;
-   - Fastify: the Ajv function compiled from the route's `schema.body`;
-   - Hono: `zValidator` middleware before the handler;
-   - Nest: `ValidationPipe`. It uses class-transformer to turn the plain body into an instance of the DTO class, then runs the class-validator decorators on that instance.
-5. **The handler runs** and returns data:
-   - Express: `res.json()`;
-   - Fastify: returns an object, or calls `reply.send()`;
-   - Koa: assigns `ctx.body`;
-   - Hono: returns `c.json()`;
-   - Nest: returns a value that Nest serializes.
-6. **The response is serialized**:
-   - Fastify uses the compiled response schema if the route has one. It drops fields the schema does not list (Example 13).
-   - The other four call `JSON.stringify`.
-7. **Errors.** A throw anywhere in steps 3–6 goes to the error path:
-   - Express: the 4-argument middleware;
-   - Fastify: `setErrorHandler`;
-   - Koa: whatever middleware wraps the throw in `try/catch`;
-   - Hono: `app.onError`;
-   - Nest: an exception filter.
+**What `next()` returns.** In Express 5, `next()` returns `undefined`. `await next()` does not wait for an async handler. Koa builds its chain with `koa-compose`. Each `next()` returns the promise of the rest of the chain, so code after `await next()` runs after the handler. Example 9 shows both orders. That is why one outer Koa middleware can time the request, catch errors, and set a default body.
 
-   A request that matches no route goes to the 404 path:
-   - Express: a final `app.use()`;
-   - Fastify: `setNotFoundHandler`;
-   - Koa: no body was set when the chain ended;
-   - Hono: `app.notFound`;
-   - Nest: a `NotFoundException` that reaches the filter.
+**Async handlers.** The `/boom` route in every server is an async function that throws. In the versions used here, all five await the promise and send the rejection to their error hook. Express 4 did not. The rejection was unhandled and the process crashed (lesson 50).
 
-**Express vs Koa: what `next()` returns.** In Express 5, `next()` returns `undefined`. It gives you nothing to wait on, so `await next()` in Express does not wait for an async handler. Koa builds its chain with `koa-compose`. There, each `next()` returns the promise of the downstream chain, so code after `await next()` runs after the handler has finished. Example 9 shows both orders. This is why Koa can do timing, error handling and "set a default body if none was set" all in one outer middleware.
+**Fastify compiles schemas when the route is registered.** Ajv turns `schema.body` into a function once, not on each request. Fastify's default Ajv options, in `node_modules/@fastify/ajv-compiler/lib/default-ajv-options.js`, are `coerceTypes: 'array'`, `useDefaults: true`, `removeAdditional: true`, and `allErrors: false`. So `"2"` becomes `2` for an integer field, and only the first error is reported. zod and class-validator list every failure.
 
-**Async handlers and Express 4.** The `/boom` route in every server is an `async` function that throws. In the versions used here, all five frameworks await the handler's promise and send the rejection to their error hook. Express 4 did not: the rejection was unhandled and the process crashed (lesson 50, corrected). On Express 4 you would wrap the handler or call `next(err)` yourself.
+**Hono is a function from Request to Response.** `app.fetch` takes a Web `Request` and returns a `Response`. You can call it in a test with no server (Example 8). On Node, `@hono/node-server`'s `serve({ fetch: app.fetch })` does the conversion.
 
-**Fastify: schemas are compiled when the route is registered.** Ajv turns `schema.body` into a JavaScript function when the route is registered, not on each request. Fastify's default Ajv options are in `node_modules/@fastify/ajv-compiler/lib/default-ajv-options.js`: `coerceTypes: 'array'`, `useDefaults: true`, `removeAdditional: true`, `allErrors: false`. Two things follow from those options:
-
-- **Coercion is on.** `"2"` becomes `2` for an `integer` field.
-- **Only the first error is reported.** With `allErrors: false`, Ajv stops at the first failure, so the 400 lists one problem. zod and class-validator list all of them.
-
-**Hono: the app is a function from Request to Response.** `app.fetch` takes a Web `Request` and returns a `Response`. You can call it in a test with no server at all (Example 8). Runtimes such as Cloudflare Workers, Deno and Bun call a `fetch(request)` export directly. On Node, `@hono/node-server`'s `serve({ fetch: app.fetch })` does the conversion.
-
-> ⚠️ Unverified: running the Hono app on Cloudflare Workers, Deno or Bun. Only Node is installed on this machine; the list of supported runtimes comes from hono.dev.
-
-**Nest: decorators plus type metadata.** `@Controller()`, `@Get()`, `@Body()`, `@Injectable()` and the class-validator decorators (`@IsInt()` and so on) are TypeScript "experimental" decorators. They record metadata on the classes using `reflect-metadata`. With `emitDecoratorMetadata`, `tsc` also writes the constructor and method parameter types into the output as `__metadata("design:paramtypes", [CreateItemDto])`, and Nest reads two things from that metadata:
-
-- the DI container uses it to find which provider goes into each constructor;
-- `ValidationPipe` uses it to find which DTO class to validate against.
-
-Turn that metadata off and both fail silently (Common mistakes). Node's built-in type stripping (lesson 95) cannot run this code. It fails on the parameter property with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, and a decorator alone fails with `SyntaxError: Invalid or unexpected token`. So the Nest project is compiled with `tsc` and the compiled JS is what runs.
+**Nest records types with decorators.** `@Controller()`, `@Get()`, `@Body()`, `@Injectable()`, and class-validator decorators such as `@IsInt()` are TypeScript experimental decorators. They record metadata with `reflect-metadata`. With `emitDecoratorMetadata`, `tsc` also writes constructor parameter types into the output, and Nest reads that metadata for two jobs: which provider to inject, and which DTO class `ValidationPipe` should validate. Turn the metadata off and both fail silently (Common mistakes). Node's built-in type stripping (lesson 95) cannot run this code. It fails on a parameter property with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`, and a decorator alone fails with `SyntaxError: Invalid or unexpected token`. The Nest project is compiled with `tsc`, and the compiled JavaScript is what runs.
 
 ## Code examples
 
@@ -1011,106 +951,73 @@ for (const [name, file, port] of apps) {
 //   nest     POST /items  req/s runs=8151,6875,8229 median=8151  p99 ms median=2  non-2xx+errors=0,0,0
 ```
 
-| Median req/s | Hono 4.13.13 | Fastify 5.12.5 | Koa 3.2.1 | Express 5.3.0 | NestJS 12.1.2 (on Express) |
-|---|---|---|---|---|---|
-| `GET /health` | 28,107 | 22,165 | 18,853 | 15,252 | 13,228 |
-| `POST /items` (parse + validate) | 17,772 | 16,724 | 12,122 | 11,446 | 8,151 |
-
-On this machine, for these handlers:
-
-- **Ranking:** Hono and Fastify served the most requests per second, and Nest on Express the fewest.
-- **Repeatability:** a second full run of the same script (load average 4.36 before, 6.03 after) gave GET medians of 24,466 / 22,456 / 18,889 / 12,806 / 12,522 and POST medians of 16,268 / 17,349 / 12,375 / 11,394 / 8,601, in the table's column order. Fastify edged ahead of Hono on POST in that run, so treat those two as tied.
-- **POST cost:** adding JSON parsing and validation cut each server's median throughput by 25–38 % in the table's run.
-- **p99 latency** was 0–2 ms everywhere.
-
-A real handler that waits on a database usually spends far longer there than in the framework, so measure your own workload before choosing on this basis.
+The medians from this run, and from the second run, are listed under Good to know. A handler that waits on a database usually spends far longer there than in the framework, so measure your own workload before choosing on speed.
 
 ## Common mistakes & gotchas
 
-- **Koa: not awaiting async work.** The route runs, nothing has set `ctx.body` when the chain settles, and the client gets `404 Not Found` (Example 10). Always `await` the async steps, or `return` their promise.
-- **Koa: error middleware registered too late.** Koa's `try { await next() } catch` only catches errors from middleware that runs *after* it, so register it first. Also note that Koa's core does not parse bodies or route requests. Without `@koa/bodyparser`, `ctx.request.body` is `undefined`.
-- **Hono: calling `c.req.json()` without a guard.** Malformed JSON throws `SyntaxError`, and `onError` turns it into a 500 (Example 11). Use `zValidator('json', …)`, or wrap the call in `try/catch` and return a 400.
+- **Koa: not awaiting async work.** The route runs, nothing has set `ctx.body` when the chain settles, and the client gets `404 Not Found` (Example 10). `await` the async steps, or return their promise.
+- **Koa: error middleware registered too late.** `try { await next() } catch` only catches errors from middleware registered after it, so register it first. Koa's core does not parse bodies or route. Without `@koa/bodyparser`, `ctx.request.body` is `undefined`.
+- **Hono: calling `c.req.json()` without a guard.** Malformed JSON throws `SyntaxError`, and `onError` turns it into a 500 (Example 11). Use `zValidator('json', …)`, or catch it and return 400.
 - **Fastify: trusting the default error handler.** Its 500 body includes `err.message` (Example 7: `"message":"db password is hunter2"`). Set `setErrorHandler` and send a generic body for 5xx.
 - **Fastify: expecting strict types.** The default Ajv options coerce `"2"` to `2` and silently remove properties that `additionalProperties: false` forbids (Example 12). Validation messages stop at the first error.
 - **Express: default error page in development.** Without your own error handler, a 500 renders the stack trace as HTML unless `NODE_ENV=production` (Example 7).
-- **Nest: `emitDecoratorMetadata` turned off.** The build succeeds and the server starts. However:
-  - the DI container injects `undefined`;
-  - `ValidationPipe` no longer knows the DTO type, so it validates nothing.
-
-  A run compiled with `--emitDecoratorMetadata false` gave `500 {"error":"Internal Server Error"}` for **both** the valid and the invalid body, logging `TypeError: Cannot read properties of undefined (reading 'create')`. The invalid body reached the handler unvalidated.
-- **Nest: running `.ts` files with plain `node`.** Type stripping cannot handle decorators or parameter properties. `node src/main.ts` failed with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX: TypeScript parameter property is not supported in strip-only mode`. Compile with `tsc` (or the Nest CLI) and run `dist/`.
-- **Nest: forgetting that `@Catch()` with no argument catches everything.** That includes `NotFoundException` and the `BadRequestException` from `ValidationPipe`. If the filter turns every error into a 500, your 400s and 404s disappear. Check `instanceof HttpException` first, as Example 5 does.
-- **Comparing 400 bodies across services.** Each validator has its own shape: a zod issue list, Ajv's single `message`, or class-validator's `message` array. If several services share one client, map them all to one error shape in the error hook (lesson 66).
+- **Nest: `emitDecoratorMetadata` turned off.** The build succeeds and the server starts. The container injects `undefined`, and `ValidationPipe` no longer knows the DTO type, so it validates nothing. A run compiled with `--emitDecoratorMetadata false` gave `500 {"error":"Internal Server Error"}` for both the valid and the invalid body, and logged `TypeError: Cannot read properties of undefined (reading 'create')`.
+- **Nest: running `.ts` files with plain `node`.** Type stripping cannot handle decorators or parameter properties. `node src/main.ts` failed with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. Compile with `tsc` or the Nest CLI and run `dist/`.
+- **Nest: `@Catch()` with no argument catches everything.** That includes `NotFoundException` and the `BadRequestException` from `ValidationPipe`. If the filter turns every error into a 500, your 400s and 404s disappear. Check `instanceof HttpException` first, as Example 5 does.
+- **Comparing 400 bodies across services.** zod returns an issue list, Ajv a single `message`, class-validator a `message` array. If several services share one client, map them to one error shape (lesson 66).
 
 ## Best practices
 
-**Decision table: when to pick each one.**
-
-| If you need… | Pick | Why (mechanism) |
+| If you need… | Pick | Why |
 |---|---|---|
-| The largest middleware ecosystem, the most tutorials and answers, the least surprise for new hires | **Express 5** | `(req, res, next)` middleware is what most Node packages target (helmet, cors, multer, passport); lessons 47–61 and 63–66 |
-| Schema-first routes: request validation and response filtering from one JSON Schema per route | **Fastify** | `schema.body` is compiled by Ajv and `schema.response` by fast-json-stringify; the response schema also allow-lists output fields (Example 13) |
-| An enforced structure for a large team: modules, DI, guards, interceptors, testable providers | **NestJS** | the DI container builds providers from constructor types recorded by `emitDecoratorMetadata`; it runs on Express (default) or Fastify underneath |
-| A small core where every behaviour is middleware you can read, with real before/after around the handler | **Koa** | `koa-compose` makes `await next()` wait for downstream, so one outer middleware can catch errors, time requests and set default bodies (Example 9) |
-| The same code on Node and on edge or serverless runtimes that call `fetch(request)` | **Hono** | the app *is* `app.fetch(Request) → Response` (Example 8); `@hono/node-server` adapts it to Node. Other runtimes: see the ⚠️ note in How it works |
-| Plain Node, nothing else | none | lesson 40 / 42: `http.createServer` plus your own routing |
+| The largest middleware ecosystem and the least surprise for new hires | **Express 5** | `(req, res, next)` is what most Node packages target. Lessons 47 to 61 and 63 to 66. |
+| Request validation and response filtering from one JSON Schema per route | **Fastify** | Ajv compiles `schema.body`. fast-json-stringify compiles `schema.response`, which also allow-lists output fields (Example 13). |
+| Modules, dependency injection, and testable providers for a large team | **NestJS** | The container builds providers from constructor types recorded by `emitDecoratorMetadata`. It runs on Express or Fastify. |
+| A small core where one outer middleware can wrap the whole request | **Koa** | `await next()` waits for downstream (Example 9). |
+| The same handler shape on Node and on a runtime that calls `fetch(request)` | **Hono** | The app is `app.fetch` (Example 8). `@hono/node-server` adapts it to Node. |
+| Plain Node | none | Lessons 40 and 42: `http.createServer` and your own routing. |
 
-Practices that apply whichever framework you pick:
-
-- **Pin and record versions.** Nest 12, Fastify 5, Koa 3, Hono 4 and Express 5 all changed behaviour across major versions (for Express, see lesson 61).
-- **Always install your own 404 and error hooks.** All five defaults differ, and two of them can leak details (Example 7). Map every error to one JSON shape and log the original error on the server.
-- **Make validation rules explicit.** State coercion (`z.coerce`, Ajv `coerceTypes`), unknown-field handling (`z.strictObject`, `additionalProperties: false` plus `removeAdditional`, Nest `forbidNonWhitelisted`) and whether all errors or only the first are reported.
-- **Keep business logic out of the framework layer**, in plain functions or services. Switching frameworks then means rewriting only the thin route layer, as these five servers show: each handler is a few lines.
-- **Benchmark your own workload before choosing on speed.** Use the method in Example 14: same route, same payload, a warm-up, several runs, and the machine and load noted.
-- **Test with the same black-box script** (Example 6) when migrating. Responses that differ show exactly which behaviour changed.
+- Pin versions. Nest 12, Fastify 5, Koa 3, Hono 4, and Express 5 all changed behaviour across majors (lesson 61 for Express).
+- Install your own 404 and error hooks. The five defaults differ, and two can leak details (Example 7). Log the original error on the server.
+- State coercion, unknown-field handling, and whether you report every error or only the first.
+- Keep business logic in plain functions. Switching frameworks then rewrites only the route layer.
+- Benchmark your own workload before choosing on speed. Example 14 shows the method: same route, same payload, a warm-up, several runs, and the machine noted.
+- When migrating, run the same black-box script (Example 6).
 
 ## ⭐ Interview lens
 
 > **Q: “What concretely is the difference between Koa's middleware and Express's?”**  
-> A: In Koa every middleware is `async (ctx, next)`, and `next()` returns the promise of the rest of the chain (koa-compose). Code after `await next()` therefore runs after the handler has finished, so one outer middleware can wrap the whole request in `try/catch` or time it. In Express 5, `next()` returns `undefined`. Code after it runs before an async handler finishes, and errors go to a separate 4-argument handler instead. *Trap:* in Koa a missing `await` gives a 404, because no body was set before the chain settled.
+> Koa middleware is an async function of `(ctx, next)`. `ctx` is the one object for the request and the response. `next()` returns a promise, built by `koa-compose`, that settles when the rest of the chain has finished. Code after `await next()` therefore runs after the handler, so one outer middleware can time the request and wrap it in try/catch. Express 5 middleware is `(req, res, next)`, and `next()` returns `undefined`. Code after `next()` runs before an async handler finishes, and errors go to a separate function with four arguments. For example, an outer Koa middleware can set a default body if the handler set none. The limit shows up when you forget `await`: the chain ends with no `ctx.body`, and Koa answers 404 even though the route ran (Example 10).
 
 > **Q: “How does Fastify validate a request body, and what defaults should you know?”**  
-> A: You declare a JSON Schema in the route's `schema.body`. Fastify compiles it with Ajv into a function when the route is registered, and a failure becomes an error with `err.validation` and status 400. Fastify's default Ajv options are `coerceTypes: 'array'`, `removeAdditional: true`, `useDefaults: true` and `allErrors: false`. So `"2"` passes as an integer, extra properties are stripped rather than rejected, and only the first error is reported.
-
-> **Q: “Why can't you run a NestJS app with `node --experimental-strip-types` or Node's default type stripping?”**  
-> A: Type stripping only removes type annotations. Nest relies on decorators and parameter properties, which are syntax that has to be rewritten into real code. It also relies on `emitDecoratorMetadata`, which emits constructor parameter types (`design:paramtypes`) for the DI container and `ValidationPipe`. Only a compiler such as `tsc` produces that. Node v24 fails with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
+> You put a JSON Schema on the route as `schema.body`. When the route is registered, Fastify compiles that schema with Ajv into a function, so the check is not rebuilt on every request. A failure becomes an error with `err.validation` and status 400. The defaults in Fastify's Ajv options are `coerceTypes: 'array'`, `removeAdditional: true`, `useDefaults: true`, and `allErrors: false`. So the string `"2"` passes an integer field, extra properties are removed rather than rejected, and the 400 lists only the first problem. Example 12 shows `{"qty":"2"}` accepted by Fastify and rejected by zod. The limit is the response schema: fields you return that the schema does not list are dropped, which is useful as an allow-list and surprising if you expected them in the JSON (Example 13).
 
 > **Q: “What makes Hono portable across runtimes?”**  
-> A: A Hono app is a function from a Web `Request` to a Web `Response` (`app.fetch`). Any runtime that hands your code a `Request` can run it. On Node, `@hono/node-server` converts Node's request and response objects to and from that interface. You can test it by calling `app.fetch(new Request(url))` with no server. *Trap:* Node-only APIs used inside handlers, such as `fs`, break that portability.
+> A Hono app is a function from a Web `Request` to a Web `Response`, exposed as `app.fetch`. Anything that can hand you a `Request` and take a `Response` can call that function. On Node, `@hono/node-server` converts Node's request and response objects to and from that pair, with `serve({ fetch: app.fetch })`. Example 8 calls `app.fetch(new Request(url))` in a test with no server listening. The limit is any Node-only API inside a handler, such as `fs`. That call works on Node and breaks on a runtime that does not have it. So the portable part is the handler that only sees `c` and returns a `Response`. The moment the handler opens a file or reads `process`, that file is a Node program again.
 
 > **Q: “Which of these frameworks leak error details by default?”**  
-> A: These runs checked it directly. Fastify's default 500 body includes `err.message`. Express's default final handler renders the stack trace as HTML unless `NODE_ENV=production`. Koa, Hono and Nest return a generic body. The fix is the same everywhere: a custom error hook that logs the error and sends a fixed body for 5xx.
+> A default error response is what you get when you have not installed your own error hook. In these runs, Fastify's default 500 body includes `err.message`, and Example 7 shows that message containing `db password is hunter2`. Express's default final handler renders the stack trace as HTML unless `NODE_ENV=production`. Koa, Hono, and Nest return a generic body. The fix is the same everywhere: log the real error on the server and send a fixed body for 5xx. The limit of that fix is 4xx. You still want the validation message in a 400, so the hook has to tell a client error from a server error before it hides the text.
 
 ## Cheat-card
 
-- **Same API, five shapes:**
-  - Express: `res.json`;
-  - Fastify: `return x`;
-  - Koa: `ctx.body = x`;
-  - Hono: `c.json(x)`;
-  - Nest: a controller method returning `x`.
-- **Validation:**
-  - Express and Koa: zod `safeParse` in the handler;
-  - Fastify: route `schema` compiled by Ajv;
-  - Hono: `zValidator('json', schema, hook)`;
-  - Nest: `ValidationPipe` + class-validator DTO.
-- **404 hooks:**
-  - Express: last `app.use`;
-  - Fastify: `setNotFoundHandler`;
-  - Koa: no body after `await next()`;
-  - Hono: `app.notFound`;
-  - Nest: `NotFoundException` in a filter.
-- **Error hooks:**
-  - Express: 4-argument middleware;
-  - Fastify: `setErrorHandler`;
-  - Koa: outer `try { await next() } catch`;
-  - Hono: `app.onError`;
-  - Nest: `@Catch()` filter.
-- **Koa:** `await next()` waits for downstream; no body set means 404; the core has no router or body parser.
-- **Fastify defaults:** coerces types, strips extra properties, reports only the first error, and its default 500 body includes `err.message`.
-- **Hono:** `app.fetch(Request) → Response`; `c.req.json()` throws on bad JSON.
-- **Nest:** needs `experimentalDecorators` + `emitDecoratorMetadata` and a real compile; without the metadata, DI and validation silently do nothing.
-- **Bench (this laptop, toy routes, autocannon 8.0.0):** Hono ≈ Fastify > Koa > Express > Nest-on-Express. Measure your own workload.
+- Express answers with `res.json`. Fastify returns the value. Koa sets `ctx.body`. Hono returns `c.json`. Nest returns from the controller method.
+- Validation: zod `safeParse` in Express and Koa, Ajv from the route schema in Fastify, `zValidator` in Hono, `ValidationPipe` plus a class-validator DTO in Nest.
+- 404: last Express `app.use`, Fastify `setNotFoundHandler`, Koa when no body was set, Hono `app.notFound`, Nest `NotFoundException` in a filter.
+- Errors: Express four-argument middleware, Fastify `setErrorHandler`, Koa `try { await next() } catch`, Hono `app.onError`, Nest `@Catch()` filter.
+- Koa: `await next()` waits. No body means 404. The core has no router or body parser.
+- Fastify defaults: coerce types, strip extra properties, report the first error, and include `err.message` in the default 500.
+- Hono: `app.fetch(Request)` returns a `Response`. `c.req.json()` throws on bad JSON.
+- Nest: needs `experimentalDecorators` and `emitDecoratorMetadata`, and a real `tsc` compile. Without the metadata, injection and validation silently do nothing.
+
+## Good to know
+
+- Benchmark method: autocannon 8.0.0, 10 connections, over loopback, one 3-second warm-up discarded, then three 5-second runs, median of the three. Each server was its own Node v24.19.0 process with no logger, on an Intel Core i5-1135G7 (4 cores / 8 threads, up to 4.2 GHz) with 14 GiB RAM. Load average 2.94 before and 5.33 after. Expect 10 to 20 percent spread.
+- `GET /health` median requests per second: Hono 4.13.13 = 28,107; Fastify 5.12.5 = 22,165; Koa 3.2.1 = 18,853; Express 5.3.0 = 15,252; NestJS 12.1.2 on Express = 13,228.
+- `POST /items` median requests per second: Hono 17,772; Fastify 16,724; Koa 12,122; Express 11,446; NestJS 8,151.
+- Second full run, load average 4.36 before and 6.03 after, GET medians 24,466 / 22,456 / 18,889 / 12,806 / 12,522 and POST medians 16,268 / 17,349 / 12,375 / 11,394 / 8,601, in that column order. Fastify edged Hono on POST, so treat those two as tied.
+- Adding JSON parsing and validation cut each server's median throughput by 25 to 38 percent in the table's run. p99 latency was 0 to 2 ms everywhere.
+- Q: Why can't you run a NestJS app with Node's type stripping? Type stripping only removes type annotations. Nest needs decorators, parameter properties, and `emitDecoratorMetadata`, which writes `design:paramtypes` for the container and `ValidationPipe`. Only a compiler such as `tsc` emits that. Node v24 fails with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`.
+> ⚠️ Unverified: running the Hono app on Cloudflare Workers, Deno or Bun. Only Node is installed on this machine; the list of supported runtimes comes from hono.dev.
 
 ---
 

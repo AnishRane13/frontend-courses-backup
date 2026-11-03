@@ -13,42 +13,46 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+An integration test sends a real HTTP request through your Express app and checks both the response and what actually changed in a test database. It exists because every unit test can pass while the route, the middleware order, or the query is still wrong. The trade-off is that it is slower and needs a disposable database you reset before each test, and if parallel workers share that database the suite passes alone and fails in continuous integration.
+
 ## Why it matters
 
-Unit tests can all be green while your API is completely broken. That is not a paradox — it is the structural limitation of unit tests, and it is exactly the gap integration tests fill. A unit test proves `createUser()` returns the right object; it says nothing about whether the route is registered at the right path, whether the auth middleware runs before the handler, whether the request body is parsed, whether the validation rejects garbage, or whether the record actually lands in the database with the right shape. Those are **wiring** questions, and wiring is where a huge share of real backend bugs live.
+Unit tests can all be green while the API is broken. A unit test proves `createUser()` returns the right object. It says nothing about the route path, whether auth middleware runs before the handler, whether the body is parsed, whether validation rejects garbage, or whether the row lands in the database. Those are wiring bugs, and wiring is where a large share of backend bugs live.
 
-For a Node backend the highest-value integration test is the **HTTP-level API test**: fire a real request at your Express app and assert on the real response and the resulting database state. One such test exercises routing, body parsing, middleware order, the controller, the model, and the database in a single pass — the whole vertical slice a user's request actually travels. When it's green you know the endpoint genuinely works, not just that its pieces work in isolation.
+The highest-value version for a Node API is one HTTP-level test: a real request, a real response, and the resulting database state. One green test means the vertical slice works.
 
-In interviews this is where you prove you understand a request's full lifecycle and can reason about test *infrastructure* — test databases, setup and teardown, isolation between tests. "How do you test an Express endpoint?" is a standard question, and the strong answer names **supertest**, a real test database, and a clean lifecycle. Getting the infrastructure right is the difference between a suite that's trustworthy and one that's flaky.
+In an interview, "how do you test an Express endpoint?" should name supertest, a real test database, and a clean lifecycle. Supertest is the library that sends the request. The lifecycle is when you connect, wipe, and disconnect.
 
 ## The concept, simply
 
-An integration test exercises several real components together across a boundary, mocking only the genuinely external world (a payment gateway, an email provider). The canonical backend version sends an HTTP request into your app and checks two things: the **response** (status code, body, headers) and the **side effects** (what changed in the database).
+An integration test runs several real components together across a boundary. You replace only the genuinely external world, such as a payment gateway or an email provider. You check two things: the response, meaning status, body, and headers, and the side effect, meaning what changed in the database.
 
-The tool that makes this ergonomic is **supertest**. You hand it your Express `app` object — not a URL — and it spins up the server on an ephemeral random port, sends a real HTTP request, and gives you a fluent API to assert on the response. Because it binds the app itself, you never hardcode a port, never manually call `app.listen()` in the test, and never collide with a port already in use.
+**Supertest** takes your Express `app` object, not a URL. It starts the server on an ephemeral port, a random free port, sends a real HTTP request, and lets you assert on the response. You do not hardcode a port, call `app.listen()` in the test, or collide with a port already in use.
 
 ![Flow from a test file calling request(app) to an ephemeral server on a random port to your real app and back with the response then expect(201)](assets/i56_01_dc096a03.svg)
 
 supertest binds your Express app to a random port, sends a real request through the full stack, and returns the response to assert on.
 
-The other half of integration testing is the **test database**. You do *not* point tests at production, and you should not mock the database (that would defeat the purpose — you want to catch real schema and query bugs). Instead you run against a real database dedicated to testing — an in-memory MongoDB, a disposable Docker Postgres, or a separate test schema — and you reset it around each test so tests don't contaminate one another.
+The database is real and dedicated to tests: an in-memory MongoDB, a disposable Docker Postgres, or a separate test schema. You do not point tests at production, and you do not mock the database, because a fake cannot catch a bad query or a schema mismatch. You reset it around each test so tests do not contaminate each other.
 
 ## How it works
 
-Structuring the app for testability is step zero. The classic mistake is calling `app.listen()` in the same file that defines the app, so importing it for a test starts a real server on a real port. The fix is to **separate app creation from server start**: one module exports the configured `app`; a thin entry file imports it and calls `listen()`. Tests import the app; production imports the entry file. supertest takes the app and manages the port itself.
+The app must be importable without starting a server. Calling `app.listen()` in the same file that builds the app means a test import binds a real port and often throws `EADDRINUSE` when a second file imports it. Export a `createApp()` that returns the configured app. Call `listen()` only in a thin entry file. Tests import the app. Supertest manages the port.
 
-Next comes the **lifecycle**, driven by the runner's hooks. Jest gives you `beforeAll`, `afterAll`, `beforeEach`, and `afterEach`. The standard shape:
+Hooks shape the lifecycle.
 
-- `beforeAll` — connect to the test database once (expensive; do it a single time for the file).
-- `beforeEach` — put the database in a known clean state (clear collections/tables, optionally seed fixtures) so every test starts from the same baseline.
-- `afterEach` — optionally clean up; often folded into the next `beforeEach` instead.
-- `afterAll` — disconnect and shut everything down so the process exits and no open handle leaks.
+- `beforeAll` connects to the test database once. Connecting is expensive.
+- `beforeEach` puts the database in a known clean state, so every test starts from the same baseline.
+- `afterEach` can clean up, and is often skipped because the next `beforeEach` already wipes.
+- `afterAll` disconnects and stops what you started, so no open handle keeps the process alive.
 
-The reason clean state belongs in `beforeEach` (not `afterEach`) is robustness: if a test crashes mid-way, its mess is cleaned by the *next* test's setup rather than being left behind by a skipped teardown. And it belongs at `beforeEach` granularity — not once per file — because tests run in an order you should not rely on, and any shared row is a source of order-dependent flakiness.
+Clean state belongs in `beforeEach`. If a test crashes, its `afterEach` may not run, and the mess leaks. The next test's setup cleans it instead. Do it per test, not once per file, because you should not rely on order.
 
-**Isolation strategy** is the deep design decision. Three common approaches, from simplest to strongest: (1) *truncate between tests* — delete all rows in `beforeEach`; simple and the most common. (2) *transaction rollback* — wrap each test in a DB transaction and roll it back afterward, so nothing is ever committed; very fast on SQL databases but fiddly with connection pooling. (3) *fresh database per worker* — because runners parallelise across worker processes, two workers hitting the same test DB will corrupt each other; giving each worker its own database (or schema) keeps parallel runs isolated. Interviewers love the parallelism angle: "your integration tests pass alone but fail in CI" is very often two workers sharing one database.
+Three isolation approaches, from simplest to strongest. Truncate between tests: delete all rows in `beforeEach`. This is the common one. Transaction rollback: wrap each test in a database transaction and roll it back, which is fast on SQL and fiddly with connection pooling. A fresh database per worker: Jest and Vitest run files in parallel processes, and two workers writing one database corrupt each other. Give each worker its own database or schema, or run integration tests serially with `--runInBand`. "Passes alone, fails in CI" is often that shared database.
 
-For the database itself, popular choices are `mongodb-memory-server` (spins up a real, in-memory MongoDB per test run — no external service, fully isolated), a Dockerised Postgres/MySQL via Testcontainers, or a dedicated test schema on a local instance. In-memory and containerised options win because they are disposable and reproducible: every run starts from nothing, so there is no "works on my machine because my local DB has old data" drift.
+Popular databases are `mongodb-memory-server`, which starts a real in-memory MongoDB, a Dockerised Postgres or MySQL via Testcontainers, or a dedicated test schema. Disposable databases start from nothing, so there is no "works on my machine because my local database has old data."
 
 ## Code examples
 
@@ -178,56 +182,55 @@ it('marks the order paid when the gateway succeeds', async () => {
 
 ## Common mistakes & gotchas
 
-- **Calling `app.listen()` in the file you import for tests.** It starts a real server and often throws `EADDRINUSE` when a second test file imports it. Separate app creation from server start; hand supertest the app, not a URL.
-- **Sharing one test database across parallel workers.** Jest and Vitest run files in parallel processes; if they all write the same DB, they corrupt each other and you get tests that pass alone but fail in CI. Give each worker its own database/schema, or run integration tests serially (`--runInBand`).
-- **Cleaning state in `afterEach` instead of `beforeEach`.** If a test crashes, its `afterEach` may not run and the mess leaks into the next test. Reset in `beforeEach` so every test guarantees its own clean start.
-- **Forgetting to close connections in `afterAll`.** An open DB connection or server handle keeps the Node process alive; Jest then warns "did not exit" or hangs. Disconnect and stop everything you started.
-- **Tests that depend on execution order.** Relying on a record a previous test created makes the suite fragile — reorder or parallelise it and it breaks. Each test must arrange its own data.
-- **Mocking the database.** Then you're not integration-testing anything — you've built a slow unit test that can't catch schema or query bugs. Use a real (disposable) test DB.
-- **Pointing tests at a shared dev or (worse) production database.** Tests must own a disposable database they can wipe freely; never run destructive setup against data you care about.
-- **Missing `await` on the supertest call.** supertest returns a thenable; without `await` the assertions in `.expect()` may not be observed and failures slip through as unhandled rejections.
+- **`app.listen()` in the file tests import.** You get `EADDRINUSE`. Hand supertest the app.
+- **One test database for parallel workers.** Tests pass alone and fail in CI. One database or schema per worker, or `--runInBand`.
+- **Cleaning in `afterEach` only.** A crash skips the cleanup. Reset in `beforeEach`.
+- **Leaving connections open in `afterAll`.** Jest warns that it did not exit, or it hangs.
+- **A test that needs a row from the previous test.** Reorder it and it breaks. Each test arranges its own data.
+- **Mocking the database.** You then have a slow unit test that cannot catch schema or query bugs.
+- **Pointing tests at a shared dev or production database.** Tests must own a database they can wipe.
+- **Missing `await` on the supertest call.** Failures slip through as unhandled rejections.
 
 ## Best practices
 
-- **Export the app, start the server separately.** One module returns the configured app; a thin entry file calls `listen()`. Tests and supertest use the app object.
-- **Use a real, disposable test database.** In-memory Mongo or a Dockerised Postgres via Testcontainers — reproducible, isolated, wiped every run.
-- **Reset state in `beforeEach`; open/close once in `beforeAll`/`afterAll`.** Clean slate per test, expensive connect/disconnect once per file.
-- **Isolate parallel workers.** A database (or schema) per worker, or run integration tests serially. Never let two workers share writable state.
-- **Assert both the response and the side effect.** Check the status/body *and* that the database actually changed (or didn't, on the error path).
-- **Mock only the true external boundary.** Stub the payment gateway or email service; keep your routes, middleware, and DB real so the wiring is genuinely exercised.
-- **Test the unhappy paths too.** 400 on bad input, 401 without a token, 404 for a missing resource, and confirm nothing was written when it shouldn't have been.
+- **Export the app. Start the server in a separate file.**
+- **Use a real disposable database,** in-memory Mongo or Dockerised Postgres, wiped every run.
+- **Connect and disconnect once. Reset data in `beforeEach`.**
+- **Isolate parallel workers.** Never let two workers share writable state.
+- **Check the response and the side effect,** including the error path where nothing should be written.
+- **Replace only the true outside boundary,** such as payments or email.
+- **Test 400, 401, and 404,** and confirm the write did not happen.
 
 ## ⭐ Interview lens
 
 > **Q: "How do you test an Express API endpoint?"**  
-> A: With supertest against a real test database. I structure the app so `createApp()` returns the configured app without calling `listen()`, then in the test I do `request(app).post('/users').send(body).expect(201)`. supertest binds the app to an ephemeral port and sends a real HTTP request through routing, middleware, and the controller. I assert on the response *and* query the DB to confirm the side effect. The database is a disposable test instance reset in `beforeEach`.
+> A: An integration test sends a real HTTP request through the app and checks the response and the database. I split the app so `createApp()` returns Express without calling `listen()`, because importing a file that listens binds a port and the next file hits `EADDRINUSE`. In the test, `request(app).post('/users').send(body).expect(201)` uses supertest, which binds that app to a random free port and runs routing, body parsing, middleware, and the controller. I then query the test database to confirm the row landed, and on the bad-body case I expect 400 and zero rows. The database is disposable, in-memory Mongo or a Docker Postgres, connected in `beforeAll` and wiped in `beforeEach`. The limit is everything outside our process. I still replace a payment gateway. I do not replace our database, or the test cannot catch a bad query.
 
 > **Q: "Why hand supertest the app object instead of a running URL?"**  
-> A: So the test owns the server lifecycle. supertest starts the app on a random free port for the duration of the request and tears it down after — no hardcoded port, no `EADDRINUSE` clashes, no manual `listen()`/close dance, and it works even if the app is never separately started. It also means the test hits your real app in-process rather than depending on an externally running server.
+> A: Supertest is a library that takes your Express app, starts it on a random free port for the request, and tears that server down afterward. You pass the app object, not a URL you already started. That means no hardcoded port, no `EADDRINUSE` when two files import the app, and no manual `listen` and close. The request is still real HTTP through routing, middleware, and the controller, in process. For example, `request(app).get('/users/me').set('Authorization', 'Bearer ' + token).expect(200)` attaches a header the same way a client would. The limit is that this does not prove a separately deployed process, a real network, or production TLS. That is an end-to-end test. Supertest also returns a thenable, so you must `await` it or a failed `.expect()` can slip through as an unhandled rejection.
 
 > **Q: "Where do you put database setup and cleanup, and why there?"**  
-> A: Connect once in `beforeAll` and disconnect in `afterAll` — connecting is expensive and should happen once per file. Reset the data in `beforeEach`, not `afterEach`, so that if a test crashes mid-way its mess is cleaned by the next test's setup rather than left behind by a skipped teardown. That gives every test a guaranteed clean slate regardless of what happened before it.
+> A: Connect once in `beforeAll` and disconnect in `afterAll`, because connecting is expensive and an open handle keeps Jest from exiting. Wipe rows in `beforeEach`, not only in `afterEach`. If a test crashes halfway, its `afterEach` may never run, and the next test's setup is what guarantees a clean slate. Each test also inserts the rows it needs, because runners do not promise order. For example, `beforeEach` calls `User.deleteMany({})`, then the create-user test posts a body and checks both status 201 and the row. The limit of wiping in the test process is parallel workers. Jest and Vitest run files in separate processes. If they share one database they overwrite each other. Give each worker its own database or schema, or run this file serially with `--runInBand`.
 
 > **Q: "Your integration tests pass locally but fail in CI. First hypothesis?"**  
-> A: Parallel workers sharing one test database. Jest and Vitest run test files in separate processes; if each connects to the same DB they overwrite each other's rows and you get order-dependent, environment-dependent failures. The fix is a database or schema per worker, or forcing integration tests to run serially with `--runInBand`. Open handles not being closed in `afterAll` is a close second.
-
-> **Q: "Should you mock the database in an integration test?"**  
-> A: No — that defeats the purpose. The whole point is to catch real schema mismatches, bad queries, and migration issues, which a mock can't surface. I use a real but disposable database (in-memory Mongo, Dockerised Postgres) that's wiped around each test. I only mock genuinely external services like a payment gateway, where I want to control the response and not hit a real third party in CI.
-
-> **Q: "What does an integration test catch that a unit test can't?"**  
-> A: Everything about how the pieces connect: a wrong route path, middleware in the wrong order, body-parsing not configured, a validation rule that doesn't fire, a schema that doesn't match what the code writes, auth that lets the wrong request through. Unit tests verify each function in isolation; the integration test verifies the vertical slice a real request travels — which is where a large share of production bugs actually originate.
+> A: My first guess is parallel workers sharing one test database. Jest and Vitest run test files in separate processes. Locally you might run one file, so it passes. In CI every file writes the same rows and you get order-dependent failures. The fix is a database or schema per worker, or `--runInBand` for the integration script. The close second is an open connection or server handle never closed in `afterAll`, which hangs or warns "did not exit." A third is state left behind because cleanup lived only in `afterEach` and a crashed test skipped it. The limit of blaming CI itself is that the failure is usually isolation you can reproduce by running the whole folder at once. I would not start by changing assertions until I have run two files against one database and watched them collide.
 
 ## Cheat-card
 
-- **Integration test =** real request → real routes/middleware/DB → assert response + side effect.
-- **supertest:** `request(app)` (pass the app, not a URL) → ephemeral port, real HTTP.
-- **Split app from server:** export `createApp()`; `listen()` only in the entry file.
-- **Lifecycle:** connect in `beforeAll` · clean in `beforeEach` · disconnect in `afterAll`.
-- **Clean in beforeEach** (survives a crashed test), not afterEach.
-- **Test DB:** real but disposable (mongodb-memory-server, Dockerised Postgres) — never mock the DB, never use prod.
-- **Parallel workers** → DB/schema per worker or `--runInBand`; shared DB = CI flakiness.
-- **Mock only** the true external boundary (payments, email).
-- **Assert response AND DB state**; test 400/401/404 paths too.
+- **Integration test =** a real request through real routes, middleware, and a database. Check the response and the side effect.
+- **Supertest:** `request(app)` on a random port. Pass the app, not a URL.
+- **Split app from server:** export `createApp()`. Call `listen()` only in the entry file.
+- **Lifecycle:** connect in `beforeAll`, wipe in `beforeEach`, disconnect in `afterAll`.
+- **Wipe in `beforeEach`** so a crashed test does not leak rows.
+- **Test database:** real and disposable. Do not mock it. Do not use production.
+- **Parallel workers** need a database per worker, or `--runInBand`.
+- **Replace only** payments, email, and other true outsiders.
+- **Check 400, 401, and 404,** and confirm nothing was written.
+
+## Good to know
+
+- **Should you mock the database in an integration test?** No. The point is to catch schema mismatches, bad queries, and migration issues. Use a disposable database, and mock only a payment gateway or similar outsider.
+- **What does an integration test catch that a unit test cannot?** A wrong route path, middleware in the wrong order, body parsing left off, a validation rule that does not fire, a schema that does not match the write, and auth that lets the wrong request through.
 
 ---
 

@@ -13,22 +13,21 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Docker Compose starts the whole stack from one YAML file: the app, Postgres, and Redis, on a private network where the app reaches the database by the service name. It exists so every developer and CI get the same versions, in an order where the database is actually accepting connections before the app starts. The trade-off is that "started" is not "ready", and `depends_on` only orders `docker compose up`. If Postgres restarts later, the app still needs its own retries and a readiness check.
+
 ## Why it matters
 
-The orders API from lesson 103 needs PostgreSQL and Redis. Without Compose, every developer installs both by hand, at whatever versions their package manager has, with whatever passwords they picked. The README grows a list of `docker run` commands that must be typed in the right order. Common results:
+The orders API from lesson 103 needs PostgreSQL and Redis. Without Compose, every developer installs both by hand, at whatever versions their package manager has, with whatever passwords they picked. The README grows a list of `docker run` commands that must be typed in order. The app starts before the database accepts connections and crashes, or keeps running and returns 500s. The schema is missing, or three app instances migrate at once. Data disappears because it lived inside a container that was removed, or the volume was mounted at the wrong path. One laptop has Postgres 16 and Redis 7 while CI has 18 and 8.
 
-- **The app starts before the database accepts connections.** It crashes on its first query, or worse, keeps running and returns 500s.
-- **The schema is missing or half-applied.** Someone forgot to run the migration, or three app instances ran it at the same time.
-- **Data disappears.** The database container was removed and its data lived inside it, or the volume was mounted at the wrong path.
-- **"Works on my machine".** One laptop has Postgres 16 and Redis 7, CI has 18 and 8.
-
-**Docker Compose** describes the whole stack in one YAML file (`compose.yaml`): which images to run, their environment, ports, volumes, networks, health checks and start order. `docker compose up` creates all of it. `docker compose down` removes it again, and leaves named volumes in place unless you add `-v`.
+**Docker Compose** describes the stack in one file, `compose.yaml`: images, environment, ports, volumes, networks, health checks, and start order. `docker compose up` creates it. `docker compose down` removes it and leaves named volumes unless you add `-v`.
 
 ## The concept, simply
 
-Each entry under `services:` becomes one or more containers. Compose puts them on a private network where each service is reachable by its name, so the app connects to `db:5432` and `cache:6379`, not to `localhost`. Data that must survive a container being recreated goes into a **named volume**.
+Each entry under `services:` becomes one or more containers. Compose puts them on a private network. Each service is reachable by its name, so the app connects to `db:5432` and `cache:6379`, not to `localhost`. Data that must survive a recreated container goes in a **named volume**.
 
-The important part is the **start order**. "Started" is not "ready": a Postgres container is running long before it accepts connections. So each dependency gets a **health check**, and the app's `depends_on` waits for it:
+The important part is start order. "Started" is not "ready". A Postgres container is running long before it accepts connections. Each dependency gets a **health check**, and the app's `depends_on` waits for it.
 
 text
 
@@ -52,66 +51,41 @@ docker compose up
 stack ready
 ```
 
-The migration runs **once**, in its own short-lived container, before any app container starts. The app never migrates the schema itself.
+The migration runs once, in its own short-lived container, before any app container starts. The app never migrates the schema itself.
 
 ## How it works
 
-What `docker compose up` does, in order (from the Compose specification and Docker's documentation; the merge and interpolation steps are shown for real in Examples 3 to 5, the rest could not be run here):
+What `docker compose up` does, from the Compose specification and Docker's documentation. The merge and interpolation steps are shown in Examples 3 to 5. The rest could not be run here.
 
-1. **Find the files.** Without `-f`, Compose reads `compose.yaml` and, if it exists in the same directory, `compose.override.yaml`. With `-f a.yaml -f b.yaml`, it reads exactly those, in that order.
-2. **Interpolate each file.** `${VAR}`, `${VAR:-default}` and `${VAR:?error}` are replaced with values from your shell environment, then from the `.env` file in the project directory. This happens per file, before merging.
-3. **Merge the files.** Later files override earlier ones (rules below).
-4. **Create the network and volumes.** Names are prefixed with the project name (`name: orders` → network `orders_backend`, volume `orders_pgdata`).
-5. **Build or pull images.** Services with `build:` are built from their Dockerfile; others are pulled.
-6. **Start services in dependency order.** `db` and `cache` first. Compose runs each health check every `interval` and waits for `healthy`. Failures during `start_period` do not count towards `retries`. Then `migrate` starts and Compose waits for it to exit with code 0. Then `app` starts. If a dependency becomes unhealthy or `migrate` exits non-zero, Compose does not start `app` and `up` fails.
-7. **Keep watching.** The app's own health check keeps running. `restart: unless-stopped` restarts the app if its process exits. `migrate` has `restart: "no"`, so it stays exited.
+1. **Find the files.** Without `-f`, Compose reads `compose.yaml` and, if it is in the same directory, `compose.override.yaml`. With `-f a.yaml -f b.yaml`, it reads exactly those, in that order.
+2. **Interpolate each file.** `${VAR}`, `${VAR:-default}`, and `${VAR:?error}` are replaced from the shell environment, then from a `--env-file`, or from `.env` in the project directory when you did not pass `--env-file`. This happens per file, before merging.
+3. **Merge the files.** Later files override earlier ones.
+4. **Create the network and volumes.** Names are prefixed with the project name. `name: orders` gives the network `orders_backend` and the volume `orders_pgdata`.
+5. **Build or pull.** Services with `build:` are built. The others are pulled.
+6. **Start in dependency order.** `db` and `cache` first. Compose runs each health check every `interval` and waits for `healthy`. Failures during `start_period` do not count toward `retries`. Then `migrate` runs and Compose waits for exit code 0. Then `app` starts. If a dependency becomes unhealthy, or `migrate` exits non-zero, Compose does not start `app` and `up` fails.
+7. **Keep watching.** The app's health check keeps running. `restart: unless-stopped` restarts the app if its process exits. `migrate` has `restart: "no"`, so it stays exited.
 
 > ⚠️ Unverified: steps 4 to 7, including the health-check timing, the exact error messages Compose prints, and restart behaviour. They need a Docker daemon, which was not available. The ordering logic itself is reproduced without Docker in Examples 6 and 7.
 
-**Health checks.** A health check is a command run inside the container. Exit code 0 means healthy, 1 means unhealthy. `test` takes `["CMD", …]` (run directly) or `["CMD-SHELL", "…"]` (run through `/bin/sh`). Four details matter here:
+**Health checks** run inside the container. Exit code 0 is healthy. Exit code 1 is unhealthy. `test` is `["CMD", …]`, run directly, or `["CMD-SHELL", "…"]`, run through `/bin/sh`.
 
-- **Postgres: check over TCP.** The `postgres` image's entrypoint, on first start, runs a temporary server to create the database, started with `-c listen_addresses=''` (from `docker-entrypoint.sh`), so it listens only on the Unix socket. `pg_isready` with no `-h` checks that socket and can report ready during that phase, and then the server restarts. `pg_isready -h 127.0.0.1` checks TCP, which only the real server listens on.
-- **Redis: `redis-cli ping`** prints `PONG` and exits 0 when the server answers.
-- **The app: no curl.** `node:24-slim` does not contain curl. Its Dockerfile installs curl to download Node, then purges the build packages. The check uses Node's own `fetch` instead.
-- **What "ready" means for the app.** `/readyz` returns 200 only when both `SELECT 1` and `PING` succeed (lesson 103, Example 1), so the app's health reflects its dependencies. Keep liveness (`/healthz`) dependency-free, as lesson 102 explains.
+Postgres must be checked over TCP. On first start the image's entrypoint runs a temporary server with `listen_addresses` empty, so it listens only on the Unix socket. `pg_isready` with no `-h` can report ready during that phase, and then the server restarts. `pg_isready -h 127.0.0.1` checks TCP, which only the real server listens on. Redis is `redis-cli ping`, which prints `PONG` and exits 0. The app image is `node:24-slim`, which has no curl, because the Dockerfile installs curl to download Node and then purges it. The check uses Node's `fetch` against `/readyz`, which returns 200 only when both `SELECT 1` and `PING` succeed. Keep `/healthz` free of dependencies, as lesson 102 explains.
 
-**`depends_on` conditions.** The long syntax takes `condition:` per dependency:
+**`depends_on` conditions.** `service_started` is what the short syntax means: the container has been started, which is not ready. `service_healthy` waits until the health check reports healthy. This lesson uses that for `db` and `cache`. `service_completed_successfully` waits until the dependency has exited 0. This lesson uses that for `migrate`. `depends_on` only orders `docker compose up`. It does nothing when Postgres restarts while the app is already running, so the app still needs connection retries and a readiness endpoint.
 
-| Condition | Compose waits until the dependency… | Used here for |
-|---|---|---|
-| `service_started` (the short syntax's meaning) | has been started | nothing: started is not ready |
-| `service_healthy` | reports `healthy` from its `healthcheck` | `db`, `cache` |
-| `service_completed_successfully` | has run to completion and exited 0 | `migrate` |
-
-Two more keys exist. `restart: true` (Compose v2.17.0+) restarts the dependent service when Compose itself restarts the dependency, for example with `docker compose restart db`. `required: false` (v2.20.0+) turns a missing dependency into a warning. `depends_on` only orders `docker compose up`. It does not help when Postgres restarts while the app is running, so the app still needs connection retries and a readiness endpoint.
-
-**Volumes and networks.** `pgdata:/var/lib/postgresql` mounts the named volume `pgdata`. **For PostgreSQL 18 and later images the mount point changed**: `PGDATA` is now `/var/lib/postgresql/18/docker` and the image declares `VOLUME /var/lib/postgresql`. The image docs say mounts "should be targeted at the updated location". If you copy an older example that mounts `…/postgresql/data` on an 18 image, `PGDATA` (`/var/lib/postgresql/18/docker`) is outside your named volume, so the database files go into the anonymous volume the image declares, not into `pgdata`.
+**Volumes.** `pgdata:/var/lib/postgresql` mounts the named volume. For PostgreSQL 18 and later, `PGDATA` is `/var/lib/postgresql/18/docker` and the image declares `VOLUME /var/lib/postgresql`. Mounts should target that updated location. An older example that mounts `…/postgresql/data` on an 18 image leaves `PGDATA` outside the named volume, so the files go into the anonymous volume the image declares, not into `pgdata`.
 
 > ⚠️ Unverified: what then happens to the data when the stack is removed and recreated (`docker compose down` then `up`) was not tested; the image documentation describes the same trap for 17 and earlier as mounts that "WILL NOT PERSIST database data when the container is re-created".
 
-Redis here runs with `--save '' --appendonly no`, a pure cache with nothing to persist. A Redis that must keep data needs a volume on `/data`. The `backend` network is a user-defined network. Services on it reach each other by service name. Only `ports:` entries are reachable from the host, which is why the dev override publishes the database on `127.0.0.1` only.
+Redis in this lesson runs with `--save '' --appendonly no`, a pure cache with nothing to persist. A Redis that must keep data needs a volume on `/data`. The `backend` network is user-defined. Services reach each other by name. Only `ports:` entries are reachable from the host. The dev override publishes the database on `127.0.0.1` only.
 
-**`.env` interpolation vs `env_file`.** Two different mechanisms with similar names:
+**`.env` and `env_file` are different.** `.env` in the project directory is read by Compose to fill `${…}` in the YAML. Those values are not passed into containers unless the YAML puts them there, as `POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?…}` does. Precedence, highest first: the shell, then the file from `--env-file`, or `.env` only when there is no `--env-file`. `${VAR:?message}` stops Compose with that message when the variable is unset or empty. `env_file:` on a service injects variables into that container. `environment:` wins over `env_file` for the same name. `docker compose config` prints the result of both, including secrets in clear text.
 
-- **`.env` in the project directory** is read by **Compose** to fill in `${…}` in the YAML. Its values are not passed to containers unless the YAML puts them there (as `POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?…}` does). Precedence, highest first: your shell's environment, then the file given with `--env-file`, or, only when there is no `--env-file`, `.env`. `${VAR:?message}` stops Compose with that message when the variable is unset or empty (Example 5).
-- **`env_file:` on a service** is read and its variables are injected **into that container**. `environment:` entries win over `env_file` entries with the same name. The long form `- path: ./app.env` with `required: false` (Compose v2.24.0+) skips a missing file instead of failing.
+**Overrides.** The base file holds what every environment shares. `compose.override.yaml` loads automatically, so it is the place for a bind mount of `src/`, `node --watch`, and database ports on localhost. Production uses `-f compose.yaml -f compose.prod.yaml`, which skips the automatic override. Mappings such as `environment` merge key by key, and the later file wins. Sequences are appended. `command`, `entrypoint`, and `healthcheck.test` are replaced, not appended. `ports`, `volumes`, `secrets`, and `configs` append unless the unique key matches. For ports that key is the host IP, target, published port, and protocol together. `"80:3000"` and `"3000:3000"` differ in the published port, so a plain override publishes both. `!reset` clears an attribute, so `build: !reset null` makes production use only `image:`. `!override` replaces a sequence instead of appending it.
 
-`docker compose config` prints the result of both, so it is the quickest way to see what a container will get. Note that it prints secrets in clear text.
+**Migrations.** Running them in the app's startup code means every replica runs them. With `docker compose up --scale app=3`, or three pods, three processes run the same migration together. `CREATE TABLE IF NOT EXISTS` is not safe under concurrency. In this lesson's runs, two of three unlocked runners failed with `duplicate key value violates unique constraint "pg_type_typname_nsp_index"` or `relation "orders" already exists`. A crashing replica restarts and tries again, and a slow migration delays every replica's readiness. If the migration fails, the app may serve traffic against the old schema, or crash-loop.
 
-**Dev vs prod override files and merging.** The base `compose.yaml` holds what every environment shares. `compose.override.yaml` is loaded automatically, so it is the natural place for development settings: a bind mount of `src/`, `node --watch`, database ports on localhost. Production uses `-f compose.yaml -f compose.prod.yaml`, which skips the automatic override. The merge rules (Compose specification, "Merge and override"):
-
-- **Mappings** (`environment`, `healthcheck`, …) are merged key by key; the later file wins on conflicts.
-- **Sequences** are appended.
-- **`command`, `entrypoint` and `healthcheck.test`** are replaced, not appended.
-- **`ports`, `volumes`, `secrets`, `configs`** are appended unless an entry has the same unique key (for `volumes`, the target path; for `ports`, the host IP, target, published port and protocol together). `"80:3000"` and `"3000:3000"` differ in the published port, so a plain override publishes **both** (Example 4, edge case).
-- **`!reset`** clears an attribute (`build: !reset null` makes production use only `image:`), and **`!override`** replaces it entirely instead of merging (`ports: !override [...]`).
-
-**Running migrations on startup safely.** The app needs the schema before its first query, so "run migrations when the app boots" is tempting. Two problems:
-
-1. **Every replica runs them.** With `docker compose up --scale app=3`, or three pods in lesson 105, three processes run the same migration at the same moment. `CREATE TABLE IF NOT EXISTS` is not safe under concurrency: in this lesson's runs, two of three unlocked runners failed with `duplicate key value violates unique constraint "pg_type_typname_nsp_index"` or `relation "orders" already exists` (Example 7). A crashing replica restarts and tries again, and a slow migration delays every replica's readiness.
-2. **Failure is mixed with serving.** If the migration fails, the app is half-started: it may serve traffic against the old schema, or crash-loop.
-
-A **one-shot `migrate` service** fixes both. It uses the same image as the app (so it has the same migration files), runs `node dist/migrate.js`, and exits. The app depends on it with `service_completed_successfully`, so the app starts only after the schema is current, and a failed migration stops the rollout before any new code serves traffic. The migration script still takes a PostgreSQL advisory lock (`pg_advisory_lock(108)`), so that a second runner started by mistake, for example two deploys at once, waits instead of racing. The same lock is used by node-pg-migrate in lesson 80. Lesson 80 also covers how to write migrations that are safe while the old app version is still running.
+A one-shot `migrate` service uses the same image, runs `node dist/migrate.js`, and exits. The app depends on it with `service_completed_successfully`, so a failed migration stops the rollout before new code serves. The script still takes a PostgreSQL advisory lock, `pg_advisory_lock(108)`, so a second runner waits. node-pg-migrate in lesson 80 uses the same kind of lock. Lesson 80 also covers migrations that are safe while the old app version is still running.
 
 ## Code examples
 
@@ -818,56 +792,65 @@ How the four runs differed in part 2 (no lock): run 1 had two failures (`duplica
 
 ## Common mistakes & gotchas
 
-- **`depends_on` without a condition.** The short form means `service_started`: the app starts while Postgres is still initialising. Add a `healthcheck` and `condition: service_healthy`.
-- **`pg_isready` without `-h`.** On first start the image's init server listens only on the Unix socket, so a socket check can pass before the real server accepts TCP connections.
-- **Postgres 18 volume at `/var/lib/postgresql/data`.** For 18+, mount `/var/lib/postgresql`. With the old path, `PGDATA` is outside your named volume and the data goes into an anonymous volume instead.
-- **`curl` in a slim-image health check.** `node:24-slim` has no curl. Use `node -e "fetch(…)"` or install curl in your Dockerfile.
-- **`localhost` in connection strings.** Inside a container, `localhost` is the container itself. Use the service name (`db`, `cache`).
-- **Migrations in the app's startup code.** Every replica runs them at once (Example 7) and a failure leaves the app half-started. Use a one-shot `migrate` service with `service_completed_successfully`, plus a lock in the runner.
-- **Expecting `.env` to reach the container.** `.env` only feeds `${…}` in the YAML. Put the variable in `environment:` or use `env_file:`.
-- **Committing `.env` with real passwords.** Commit a `.env.example`, keep `.env` in `.gitignore`, and keep it out of the image with `.dockerignore` (lesson 101's `.dockerignore` already lists it).
-- **Overriding `ports` in a prod file and getting both.** Sequences are appended. Use `!override` (Example 4).
-- **Pasting `docker compose config` output into a ticket.** It prints interpolated secrets in clear text.
-- **`docker compose down -v` on a stack with data.** `-v` removes the named volumes, including `pgdata`.
-- **Publishing the database port on all interfaces.** `"5432:5432"` listens on every host interface. Use `"127.0.0.1:5432:5432"` in development and no port at all in production.
+- **`depends_on` with no condition.** The short form means `service_started`. The app starts while Postgres is still initialising. Add a health check and `condition: service_healthy`.
+- **`pg_isready` with no `-h`.** On first start the image's init server listens only on the Unix socket, so the check can pass before TCP is open.
+- **A Postgres 18 volume at `/var/lib/postgresql/data`.** For 18 and later, mount `/var/lib/postgresql`. With the old path, `PGDATA` sits outside your named volume.
+- **`curl` in a slim-image health check.** `node:24-slim` has no curl. Use `node -e` with `fetch`, or install curl in the Dockerfile.
+- **`localhost` in a connection string inside the container.** `localhost` is the container itself. Use the service name, `db` or `cache`.
+- **Migrations in app startup.** Every replica runs them at once, and a failure leaves the app half-started. Use a one-shot `migrate` service and a lock.
+- **Expecting `.env` to reach the container.** `.env` only fills `${…}` in the YAML. Put the variable in `environment:` or use `env_file:`.
+- **Committing `.env` with real passwords.** Commit `.env.example`. Keep `.env` in `.gitignore` and `.dockerignore`.
+- **An override that publishes both port mappings.** Sequences append. Use `!override`.
+- **Pasting `docker compose config` into a ticket.** It prints interpolated secrets in clear text.
+- **`docker compose down -v` on a stack with data.** `-v` removes named volumes, including `pgdata`.
+- **Publishing the database on all interfaces.** `"5432:5432"` listens everywhere. In development use `"127.0.0.1:5432:5432"`. In production publish no database port.
 
 ## Best practices
 
-- **Pin image versions** (`postgres:18.4`, `redis:8.0.5`), the same ones CI and production use.
-- **Health checks on every dependency**, and `depends_on` with `service_healthy` and `service_completed_successfully`.
-- **One-shot `migrate` service** from the same image as the app, idempotent, with an advisory lock. The app never migrates.
-- **Keep the app tolerant anyway.** Lazy connections, retries and a `/readyz` that reports each dependency, because `depends_on` only orders the first start.
-- **Base file plus overrides.** Shared settings in `compose.yaml`, development in `compose.override.yaml`, production with `-f compose.yaml -f compose.prod.yaml` and `build: !reset null` so it runs the image CI pushed.
-- **Required variables fail loudly:** `${POSTGRES_PASSWORD:?…}` instead of a silent empty default.
-- **Run `docker compose config` in CI** (or `docker compose config --quiet`) to catch merge and interpolation errors before a deploy.
-- **`init: true`** on the Node service, so a small init process is PID 1 and forwards signals (lesson 101).
+- **Pin image versions**, `postgres:18.4` and `redis:8.0.5`, the same ones CI and production use.
+- **Health checks on every dependency**, and `depends_on` with `service_healthy` or `service_completed_successfully`.
+- **A one-shot `migrate` service** from the same image, idempotent, with an advisory lock. The app never migrates.
+- **Keep the app tolerant anyway.** Lazy connections, retries, and a `/readyz` that reports each dependency, because `depends_on` only orders the first start.
+- **A base file plus overrides.** Development lives in `compose.override.yaml`. Production is `-f compose.yaml -f compose.prod.yaml` with `build: !reset null` so it runs the image CI pushed.
+- **Fail loudly on required variables** with `${POSTGRES_PASSWORD:?…}` instead of a silent empty default.
+- **Run `docker compose config` in CI**, or `docker compose config --quiet`, before a deploy.
+- **`init: true`** on the Node service so a small init process is PID 1 and forwards signals.
 
 ## ⭐ Interview lens
 
 > **Q: “Your app container starts before Postgres is ready. How do you fix it in Compose?”**  
-> A: Give Postgres a `healthcheck` (`pg_isready -h 127.0.0.1 -U … -d …`, over TCP), and have the app use `depends_on: db: condition: service_healthy`. The short `depends_on` only waits for the container to start. The app should still connect lazily and retry, because `depends_on` only orders `docker compose up` and does nothing when Postgres restarts later. *Trap:* `pg_isready` over the Unix socket can pass during the image's first-run init.
+> A: "Started" is not "ready". Compose's short `depends_on` means `service_started`: the container process has begun, and Postgres is often still initialising. Give Postgres a health check whose command is `pg_isready -h 127.0.0.1` with the user and database, so it checks TCP. On first start the image runs a temporary server that listens only on the Unix socket, and a check with no `-h` can pass and then the real server restarts. Point the app at `depends_on` with `condition: service_healthy`. Compose runs that check on an interval, ignores failures during `start_period`, and does not start the app until the status is healthy. Redis in this lesson is `redis-cli ping`. The app's own check hits `/readyz` with Node's `fetch`, because `node:24-slim` has no curl, and `/readyz` returns 200 only when `SELECT 1` and `PING` both work. For example, `db` and `cache` become healthy, then `migrate` must exit 0, then the app starts. The limit is that `depends_on` only orders `docker compose up`. If Postgres restarts later, nothing restarts the wait. The app still needs lazy connections, retries, and a readiness route.
 
 > **Q: “Where do you run database migrations in a containerised deployment?”**  
-> A: In a one-shot job from the same image, before the new app version starts: a `migrate` service with `restart: "no"` that the app depends on with `service_completed_successfully` (in Kubernetes, a Job or an init step that runs once per rollout). Not in each replica's startup code, where N replicas run the same DDL at once and a failure leaves instances half-started. The runner should be idempotent and take a lock (an advisory lock in PostgreSQL), so two runners started by mistake do not race.
+> A: In a one-shot job from the same image, before the new app version starts serving. In Compose that is a `migrate` service with `restart: "no"` that runs `node dist/migrate.js` and exits. The app depends on it with `condition: service_completed_successfully`, so a non-zero exit means Compose never starts the app. In Kubernetes the same idea is a Job or an init step that runs once per rollout. Do not migrate inside each replica's startup. With `--scale app=3`, three processes run the same DDL together. `CREATE TABLE IF NOT EXISTS` is not safe under that race: two sessions can both pass the existence check, and the second hits `pg_type_typname_nsp_index` or `relation "orders" already exists`. This lesson saw that in unlocked runs, and saw every runner exit 0 once they took `pg_advisory_lock(108)`. The script should be idempotent and take that lock so two deploys do not race. The limit of even a good one-shot job is a migration that is unsafe while old replicas are still running. Lesson 80 is where that expand-and-contract shape is covered. A failed migration should stop the rollout, not leave the app half-started against the old schema.
 
 > **Q: “What is the difference between `.env` and `env_file`?”**  
-> A: `.env` in the project directory is read by Compose to interpolate `${VAR}` in the YAML; the shell environment overrides it. Nothing in it reaches a container unless the YAML references it. `env_file:` on a service injects the file's variables into that container's environment, and `environment:` entries override them. `docker compose config` shows the result of both.
+> A: `.env` in the project directory is for Compose itself. It fills `${VAR}` in the YAML. The shell environment wins over `--env-file`, and `--env-file` replaces `.env` rather than merging with it. Nothing in `.env` enters a container unless a YAML key references it, such as `POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set a password}`. The `:?` form makes Compose stop with your message when the variable is missing or empty. `env_file:` on a service injects that file's variables into the container. Keys under `environment:` win when the name clashes. The long form can set `required: false` so a missing file is skipped. For example, the database password is interpolated into the Postgres service, and the app receives `DATABASE_URL` through `environment`, not because `.env` magically leaks in. `docker compose config` prints the merged result of both, which is how you see what the container will get. The limit is that printout. It shows secrets in clear text, so it does not belong in a ticket. Also `$$` in the YAML is how you keep a literal dollar sign for the container.
 
 > **Q: “How do dev and prod differ in a Compose setup?”**  
-> A: The base file holds what is shared. `compose.override.yaml`, loaded automatically, adds development settings: bind-mounted source, a watch command, database ports on localhost. Production uses `-f compose.yaml -f compose.prod.yaml`, which skips the automatic override and switches `build:` to the registry `image:`. Mappings merge, sequences append, `command` and `healthcheck.test` replace, and `!reset` and `!override` handle the rest. *Trap:* a `ports` override is appended, so both port mappings are published.
+> A: One base `compose.yaml` holds the shared services, health checks, the private network, and the named volume. `compose.override.yaml` is loaded automatically when you do not pass `-f`, so it is the dev file: bind-mount `src/`, run `node --watch`, and publish Postgres on `127.0.0.1` only. Production is explicit, `-f compose.yaml -f compose.prod.yaml`, which does not load the override. It sets `build: !reset null` so Compose uses the registry `image:` CI pushed, not a local build. Merge rules: mappings merge and the later file wins, sequences append, and `command`, `entrypoint`, and `healthcheck.test` are replaced. `ports` and `volumes` append unless the unique key matches. For a port that key includes the published port, so `"80:3000"` plus `"3000:3000"` publishes both. `!override` replaces the list instead. For example, dev exposes the database on localhost for a GUI, and prod publishes no database port at all. The limit is forgetting `!override` or `!reset` and thinking the prod file replaced the dev ports or the build. `docker compose config` is the check, in CI as well, before you deploy.
 
 ## Cheat-card
 
-- **Files:** `compose.yaml` + automatic `compose.override.yaml`; `-f a -f b` replaces that default; `docker compose config` prints the merged, interpolated model.
-- **Order:** `depends_on` + `condition: service_started | service_healthy | service_completed_successfully`; optional `restart: true` (v2.17.0+), `required: false` (v2.20.0+).
-- **Health checks:** `test: ["CMD", …]` or `["CMD-SHELL", "…"]`; `interval`, `timeout`, `retries`, `start_period`, `start_interval` (v2.20.2+); exit 0 = healthy.
-- **Postgres image 18+:** volume at `/var/lib/postgresql` (`PGDATA=/var/lib/postgresql/18/docker`); check with `pg_isready -h 127.0.0.1`.
-- **Redis:** `redis-cli ping`; data dir `/data` if you persist.
-- **Interpolation:** shell > `--env-file` (replaces `.env`) > `.env`; `${V:-default}`, `${V:?error}`; `$$` for a literal `$`.
-- **`env_file:`** goes into the container; `environment:` wins; `required: false` (v2.24.0+).
-- **Merge:** mappings merge, sequences append, `command`/`entrypoint`/`healthcheck.test` replace, `ports`/`volumes` append unless the unique key matches; `!reset`, `!override`.
-- **Migrations:** one-shot `migrate` service, same image, idempotent, advisory lock; the app depends on it with `service_completed_successfully`.
-- **Versions used:** Docker Compose v5.6.0 (config only), postgres:18.4, redis:8.0.5, node:24-slim.
+- **Files:** `compose.yaml` plus automatic `compose.override.yaml`. `-f a -f b` replaces that default. `docker compose config` prints the merged, interpolated model.
+- **Order:** `service_started`, `service_healthy`, or `service_completed_successfully`.
+- **Health check:** `["CMD", …]` or `["CMD-SHELL", "…"]`. Exit 0 is healthy. `interval`, `timeout`, `retries`, and `start_period` control the wait.
+- **Postgres 18 and later:** mount `/var/lib/postgresql`. `PGDATA` is `/var/lib/postgresql/18/docker`. Check with `pg_isready -h 127.0.0.1`.
+- **Redis:** `redis-cli ping`. Persist on `/data` only if you need the data. This lesson's cache uses `--save '' --appendonly no`.
+- **Interpolation:** shell, then `--env-file`, then `.env`. `${V:-default}` and `${V:?error}`. `$$` is a literal `$`.
+- **`env_file:`** enters the container. `environment:` wins.
+- **Merge:** mappings merge, sequences append, `command`, `entrypoint`, and `healthcheck.test` replace. Use `!reset` and `!override` when append is wrong.
+- **Migrations:** one-shot service, same image, advisory lock `pg_advisory_lock(108)`, and the app waits for exit 0.
+- **Do not use `localhost` inside a container** for another service. Use the service name. `down -v` deletes named volumes.
+
+## Good to know
+
+- **`depends_on` extras:** `restart: true` was added in Compose v2.17.0 and restarts the dependent when Compose restarts the dependency, for example `docker compose restart db`. `required: false` was added in v2.20.0 and turns a missing dependency into a warning.
+- **`start_interval`** on a health check was added in Compose v2.20.2.
+- **`env_file` `required: false`** was added in Compose v2.24.0 and skips a missing file.
+- **Versions this lesson used:** Docker Compose v5.6.0, config only, no daemon. postgres 18.4. redis 8.0.5. node 24-slim. Express 5.3.0, pg 8.23.1, ioredis 6.0.0.
+- **Unlocked migration race in this lesson:** across four runs with no lock, run 1 had two failures, run 2 one, run 3 two, and run 4 none. The errors were `pg_type_typname_nsp_index` and `relation "orders" already exists`. With the advisory lock, all twelve runner processes across four runs exited 0, and exactly one per run printed `applied`.
+- **Part 1 of the ordering experiment:** the app came up without its dependencies, reported `ready: false` with a reason for each, and became ready once both answered, without a restart. `GET /orders` still returned 500 because the table did not exist. Ready is not migrated.
 
 ---
 

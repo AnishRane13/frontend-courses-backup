@@ -13,22 +13,23 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+An aggregation pipeline is an ordered list of stages that MongoDB runs next to the data, each stage taking documents in and passing documents out, so a report returns a few rows instead of the whole collection. You put a `$match` on stored fields first so it can use an index, then group, join, and shape. It exists so Node does not download every order to add them up. The trade-off is memory: a stage that must see all of its input, such as `$group` or a sort the index cannot satisfy, has a 100 MB budget and then either spills to disk or fails.
+
 ## Why it matters
 
-`find()` returns documents as they are stored. Reports need something else: revenue per month, the top customers with their latest order, a product search page with counts per category and per price range. You could fetch every order into Node and loop over it, but then the whole collection crosses the network, Node holds it in memory, and each report becomes a hand-written loop.
+`find()` returns documents as they are stored. A report wants revenue per month, the top customers with their latest order, or a search page with counts per category and per price band. Pulling every order into Node sends the whole collection over the network and turns each report into a hand-written loop.
 
-The aggregation pipeline moves that work into the database. You send an array of stages, and `mongod` runs them next to the data and returns only the result. A 2,000-order collection becomes 15 report rows before anything leaves the server.
+The pipeline moves that work into `mongod` and returns only the result. In this lesson a 2,000-order collection becomes 15 report rows before anything leaves the server.
 
-Two things decide whether a pipeline is fast or slow, and both are visible only if you read `explain()`:
+Two things decide speed, and both show up in `explain()`. Stage order: a `$match` at the start can use an index, and a `$match` on a value `$group` just computed cannot, so the server reads every document. Memory: blocking stages hold their working set, with a 100 MB limit per stage. Past that, the stage writes temporary files or the command fails, depending on `allowDiskUse`.
 
-- **Stage order.** A `$match` that reaches the start of the pipeline can use an index. A `$match` on a value that `$group` computed cannot, so the server reads every document.
-- **Memory.** Blocking stages such as `$group` and `$sort` hold their working set in memory, with a limit of 100 MB per stage. Past that, the stage either writes temporary files to disk or the command fails, depending on `allowDiskUse`.
-
-Lesson [43](67-mongodb-amp-mongoose.md) covers basic queries and Mongoose. Lesson [44](68-schema-design-amp-data-modeling.md) explains when to embed and when to reference, which decides how much `$lookup` and `$unwind` you need. This lesson builds three reports on a generated shop dataset and reads the real `explain()` output for each important case.
+Lesson 67 covers basic queries. Lesson 68 covers embed versus reference, which decides how much `$lookup` and `$unwind` you need.
 
 ## The concept, simply
 
-A pipeline is an ordered list of stages. Each stage takes a stream of documents, does one job, and passes a new stream to the next stage. Documents flow through it like water through pipes and filters:
+A pipeline is an ordered list of stages. Each stage does one job and passes a new stream on.
 
 text
 
@@ -47,48 +48,36 @@ orders collection (2,000 documents)
  cursor → driver → your code (15 report rows)
 ```
 
-The stages used in this lesson:
-
 | Stage | What it does |
 |---|---|
-| `$match` | Keeps documents that match a query filter (same syntax as `find`). |
-| `$project` | Keeps, removes, renames or computes fields. |
-| `$addFields` / `$set` | Adds computed fields and keeps all the others. |
-| `$unwind` | Turns one document with an array into one document per element. |
-| `$group` | Groups by an `_id` expression and computes accumulators (`$sum`, `$avg`, `$addToSet`, `$first`, …). |
-| `$sort`, `$skip`, `$limit` | Order the stream, skip the first N, keep the first N. |
-| `$lookup` | Joins documents from another collection into an array field. |
-| `$facet` | Runs several sub-pipelines on the same input and returns one document with one array per sub-pipeline. |
-| `$bucket` | Groups by ranges of a value (price bands, age bands). |
-| `$merge` / `$out` | Write the result into a collection instead of returning it. |
+| `$match` | Keeps documents that match a filter, with the same syntax as `find` |
+| `$project` | Keeps, drops, renames, or computes fields |
+| `$addFields` or `$set` | Adds computed fields and keeps the rest |
+| `$unwind` | Turns one document with an array into one document per element |
+| `$group` | Groups by an `_id` expression and runs accumulators such as `$sum`, `$avg`, `$addToSet`, and `$first` |
+| `$sort`, `$skip`, `$limit` | Order the stream, drop the first N, keep the first N |
+| `$lookup` | Joins another collection into an array field |
+| `$facet` | Runs several sub-pipelines on the same input and returns one document |
+| `$bucket` | Groups by ranges of a value, such as price bands |
+| `$merge` or `$out` | Writes the result into a collection instead of returning it |
 
 ## How it works
 
-What happens when Node calls `collection.aggregate(pipeline)`:
+When Node calls `collection.aggregate(pipeline)`:
 
-1. The driver sends one `aggregate` command with the stage array. Nothing runs until you read the cursor (`toArray()`, `for await`, `next()`).
-2. The server **parses** the stages and runs the **optimizer**, which reorders and merges stages when the result cannot change. For example, it moves a `$match` ahead of a `$sort` or `$addFields` it does not depend on, and folds a `$limit` into the `$sort` before it.
-3. The server finds the longest **prefix** of the pipeline that the query layer can run. Usually that is a `$match`, `$sort` and simple `$project`, and often also `$group` and some `$lookup`s. That prefix is planned like a `find`: the planner picks an index (IXSCAN) or a collection scan (COLLSCAN).
-4. In MongoDB 8.2 that prefix is usually run by the **slot-based execution engine (SBE)**. Any stages left over run one after another in the classic pipeline engine.
-5. **Streaming stages** (`$match`, `$project`, `$unwind`) pass each document on immediately. **Blocking stages** (`$group`, `$sort` without an index, `$bucket`, `$facet`) must read all their input before they emit anything, and that is where memory goes.
-6. The server returns the first batch of results, and the driver fetches the next batches as you iterate.
+1. The driver sends one `aggregate` command. Nothing runs until you read the cursor, with `toArray()`, `for await`, or `next()`.
+2. The server parses the stages and runs an optimizer that reorders and merges stages when the result cannot change. It can move a `$match` ahead of a `$sort` or `$addFields` that the filter does not depend on, and it can fold a `$limit` into the `$sort` before it.
+3. The longest prefix the query layer can run, often a `$match`, a `$sort`, and a simple `$project`, is planned like a `find`: an index scan (`IXSCAN`) or a collection scan (`COLLSCAN`).
+4. Streaming stages such as `$match`, `$project`, and `$unwind` pass each document on immediately. Blocking stages such as `$group`, an unindexed `$sort`, `$bucket`, and `$facet` must read all of their input before they emit anything. That is where the memory goes.
+5. The server returns the first batch. The driver fetches the next batches as you iterate.
 
-**Where explain puts the plan.** If the whole pipeline was pushed into the query layer, `explain()` has a top-level `queryPlanner` (often with `optimizedPipeline: true`). If some stages are left over, the result has a `stages` array: `stages[0].$cursor.queryPlanner` holds the index choice, and the remaining entries are the classic stages, one object each, in their optimized order. Under SBE the plan tree is at `winningPlan.queryPlan`; for a classic plan the tree is `winningPlan` itself. Example 5 handles both locations.
+**Where `explain` puts the plan.** If the whole pipeline was pushed into the query layer, `explain()` has a top-level `queryPlanner`, often with `optimizedPipeline: true`. If stages remain, the result has a `stages` array: the index choice is under `stages[0].$cursor.queryPlanner`, and the later entries are the classic stages in optimized order. Read the plan tree from the deepest `inputStage` upward. `IXSCAN` reads keys. `FETCH` loads documents. `COLLSCAN` reads every document. `PROJECTION_COVERED` means the index supplied every field. `executionStats` adds `totalKeysExamined`, `totalDocsExamined`, `nReturned`, and for blocking stages `usedDisk`, `spills`, and `spilledBytes`.
 
-**Reading the plan tree.** Read it from the leaf (deepest `inputStage`) upward:
+**A `$match` after `$group` usually cannot use an index.** An index is built on stored fields. After `$group`, the documents are new: `_id` is the group key and the other fields are accumulators such as `n` or `revenue`. A filter on `n` has to run after the group, and the group reads every input document. The exception seen on 8.2.6 (Example 5, case E) is a filter on the group key itself. `{ $match: { _id: 'paid' } }` after grouping by `$status` is the same as filtering `status` first, and the optimizer rewrote it that way. That rewrite is not on the optimization docs page, so check `explain()` before you rely on it.
 
-- `IXSCAN` reads index keys. `indexBounds` shows which key ranges it reads.
-- `FETCH` loads the documents those keys point to.
-- `COLLSCAN` reads every document in the collection.
-- `PROJECTION_COVERED` means the index alone supplied every field needed.
+**Memory.** Each blocking stage has a 100 MB budget. On this 8.2.6 server, stages spill to temporary files unless the command passes `allowDiskUse: false`, in which case the command fails with code 292, `QueryExceededMemoryLimitNoDiskUseAllowed`. `$facet` cannot spill. Each of its outputs is capped at 100 MB, and the single document it returns is capped at 16 MB.
 
-With `explain('executionStats')` you also get `totalKeysExamined`, `totalDocsExamined` and `nReturned`. For blocking stages you get `usedDisk`, `spills` and `spilledBytes`.
-
-**Why a `$match` after `$group` usually cannot use an index.** An index is built on stored fields. After `$group`, the documents are new: their `_id` is the group key and their other fields are accumulator results such as `n` or `revenue`, which exist nowhere on disk. A filter on `n` must therefore run after the group is computed, and the group must read every document of the input. The one exception seen on 8.2.6 (Example 5, case E) is a filter on the group key itself. `{ $match: { _id: 'paid' } }` after `{ $group: { _id: '$status' } }` is the same as filtering `status` before the group, and the optimizer rewrote it that way. That rewrite is not listed on the optimization docs page, so check `explain()` before relying on it.
-
-**Memory limits.** Each blocking stage has a 100 MB memory budget (`internalDocumentSourceGroupMaxMemoryBytes` and `internalQueryMaxBlockingSortMemoryUsageBytes` both read `104857600` on 8.2.6). Since MongoDB 6.0 the server parameter `allowDiskUseByDefault` decides what happens when a stage passes the budget (changed in v6.0; before that, every command had to pass `allowDiskUse: true`). It is `true` on 8.2.6, so stages spill to temporary files unless the command passes `allowDiskUse: false`, in which case the command fails with code 292 `QueryExceededMemoryLimitNoDiskUseAllowed`. `$facet` cannot spill at all: each of its outputs is capped at 100 MB, and the single document it returns is capped at 16 MiB.
-
-**`$lookup` in two forms.** The equality form `{ from, localField, foreignField, as }` looks up the foreign documents whose `foreignField` equals this document's `localField`. The pipeline form `{ from, let, pipeline, as }` runs a whole sub-pipeline per input document. `let` binds fields of the current document to variables (`$$cid`), and the sub-pipeline uses them inside `$expr`. Since MongoDB 5.0 you can combine `localField`/`foreignField` with a `pipeline` (added in v5.0). On 8.2.6 explain shows the two forms run differently (Example 5): the equality form runs inside SBE as an `EQ_LOOKUP` node, using an indexed loop join when the foreign field has an index and a hash join when it does not. The `let` form stays a separate `$lookup` stage that reports `indexesUsed`.
+**`$lookup` has two forms.** The equality form `{ from, localField, foreignField, as }` finds foreign documents whose field equals this document's field. The pipeline form `{ from, let, pipeline, as }` runs a sub-pipeline per input document. `let` binds fields of the current document to variables such as `$$cid`, and the sub-pipeline uses them inside `$expr`. On 8.2.6, explain shows the equality form running as an indexed loop join when the foreign field is indexed, and a hash join when it is not. The `let` form stays a separate `$lookup` stage that reports `indexesUsed`.
 
 ## Code examples
 
@@ -799,55 +788,62 @@ await client.close();
 
 ## Common mistakes & gotchas
 
-- **Filtering after `$group` on an accumulator and expecting an index.** `{ $match: { n: { $gt: 25 } } }` after a group always reads the whole input (Example 5, case B). Put every filter on stored fields before the `$group`, and leave only filters on computed values after it.
-- **Assuming `$unwind` keeps every parent.** Empty arrays, missing fields and `null` produce no output (Example 8). After a `$lookup` with no match, `$unwind` drops the parent too.
-- **Joining before limiting.** A `$lookup` runs once per input document. Put `$sort` + `$limit` (or the `$match`) before the `$lookup` when the join is only needed for the final rows (Example 3).
-- **A `$lookup` on an unindexed foreign field.** On 8.2.6 the equality form fell back to a `HashJoin` over the foreign collection, and the `let` form scanned the whole foreign collection once per input document (Example 5, case 4). Index the foreign field and confirm with `explain()`.
-- **Grouping money stored as floating-point numbers.** Sums of doubles carry binary rounding error, which is why the reports use `$round` for display. For real money, store integer cents or `Decimal128`.
-- **Turning off disk use and forgetting it.** `allowDiskUse: false` (or `allowDiskUseByDefault: false` on the server) turns a big `$group` or `$sort` into error 292 instead of a slower success.
-- **Large `$facet` outputs.** `$facet` cannot spill. Each output is limited to 100 MB, and the whole result is one document limited to 16 MiB. Put `$limit` inside the result facet.
-- **`$out` replaces the target.** Anything already in the target collection is gone after the run. Use `$merge` to upsert into a collection that other code also writes to.
-- **Trusting stage order in the source code.** The optimizer reorders and merges stages. Read the order in `explain()`, not in your code.
-- **Timezones.** Date operators (`$dateToString`, `$month`, `$dateTrunc`) default to UTC. Pass `timezone: 'Europe/Berlin'` (or similar) when "month" means the business's local month.
+- **Filtering an accumulator after `$group` and expecting an index.** `{ $match: { n: { $gt: 25 } } }` after a group reads the whole input (Example 5, case B). Filter stored fields before the group. Leave only filters on computed values after it.
+- **Assuming `$unwind` keeps every parent.** An empty array, a missing field, or `null` produces no output (Example 8). After a `$lookup` with no match, `$unwind` drops the parent too.
+- **Joining before you limit.** `$lookup` runs once per input document. Put `$sort` and `$limit`, or the `$match`, before the join when only the final rows need it (Example 3).
+- **`$lookup` on a foreign field with no index.** On 8.2.6 the equality form fell back to a hash join over the foreign collection, and the `let` form scanned the foreign collection once per input document (Example 5). Index the foreign field and read `explain()`.
+- **Summing money stored as doubles.** Binary rounding shows up. The reports use `$round` for display. For real money, store integer cents or `Decimal128`.
+- **`allowDiskUse: false` on a large group or sort.** The command fails with error 292 instead of spilling.
+- **A large `$facet`.** It cannot spill. Each output is limited to 100 MB, and the whole result is one document limited to 16 MB. Put `$limit` inside the result branch.
+- **`$out` replacing the target.** Anything already in that collection is gone. Use `$merge` when other code also writes there.
+- **Trusting the stage order in your source.** The optimizer reorders stages. Read `explain()`.
+- **Dates in UTC by default.** `$dateToString`, `$month`, and `$dateTrunc` use UTC unless you pass a `timezone`.
 
 ## Best practices
 
-- **Start every pipeline with the most selective `$match`,** on indexed fields, then `$sort` on an index if you can, and only then `$unwind`, `$group` and `$lookup`.
-- **Read `explain()` for every report query** before it ships. Look for IXSCAN vs COLLSCAN in the query-layer plan, `totalDocsExamined` vs `nReturned`, and `usedDisk` on blocking stages.
-- **Limit before you join,** and use the `let` + `pipeline` form when you need only part of the foreign documents (`$sort` + `$limit: 1` for "latest").
-- **Give `$sort` a unique tiebreaker** (`_id`) when the order is part of the output or of pagination. Equal sort keys come back in no guaranteed order.
-- **Precompute heavy reports** with `$merge` into a report collection on a schedule, and serve reads from it.
-- **Treat spills as a warning, not a fix.** If `usedDisk` is true, filter or project earlier, or add an index.
-- **Keep pipelines as data.** A pipeline is a plain array, so build it from small functions (Example 6's `monthlyByCategory(from, to)`) and unit-test the arrays.
+- Start with the most selective `$match` on indexed fields, then `$sort` on an index if you can, and only then `$unwind`, `$group`, and `$lookup`.
+- Read `explain()` before a report ships. Look for `IXSCAN` versus `COLLSCAN`, documents examined versus returned, and `usedDisk` on blocking stages.
+- Limit before you join. Use `let` plus a pipeline when you need only part of the foreign documents, such as `$sort` and `$limit: 1` for the latest.
+- Give `$sort` a unique tiebreaker such as `_id` when the order feeds pagination. Equal keys have no guaranteed order.
+- Precompute a heavy report with `$merge` on a schedule, and serve reads from that collection.
+- Treat a spill as a warning. If `usedDisk` is true, filter or project earlier, or add an index.
+- A pipeline is a plain array. Build it from small functions and unit-test the arrays.
 
 ## ⭐ Interview lens
 
-> **Q: “Why should `$match` come first in an aggregation pipeline?”**
-> A: Only the part of the pipeline that the query layer runs can use an index, and that part starts at the first stage. A `$match` on stored fields at the start becomes an IXSCAN, so later stages see fewer documents. A `$match` on a value computed by `$group` can only run after the group, and the group has to read the whole collection. The optimizer moves some filters forward for you (past `$sort`, `$addFields`, `$project`), but not a filter on an accumulator. *Trap:* saying "the optimizer always fixes the order". Verify with `explain()`.
+> **Q: “Why should `$match` come first in an aggregation pipeline?”**  
+> Only the leading part of the pipeline that the query layer runs can use an index. A `$match` on stored fields at the start becomes an `IXSCAN`, so later stages see fewer documents. A `$match` on a value computed by `$group`, such as a count named `n`, can run only after the group, and the group has to read the whole input. The optimizer will move some filters forward for you, past a `$sort`, `$addFields`, or `$project` that the filter does not depend on. It will not move a filter on an accumulator. For example, "paid orders in this quarter, then revenue by category" matches status and date first, on `{ status: 1, createdAt: 1 }`, and only then unwinds line items and groups. The limit is a filter on the group key. On 8.2.6 the optimizer rewrote `$match` on the grouped `_id` back into a filter before the group. That rewrite is not on the optimization docs page, so confirm it with `explain()` rather than assuming it.
 
-> **Q: “What happens when a `$group` needs more than 100 MB?”**
-> A: Each blocking stage has a 100 MB memory budget. Since 6.0 the server parameter `allowDiskUseByDefault` (default `true`) lets the stage spill to temporary files, and `executionStats` shows `usedDisk: true` and the spill counts. With `allowDiskUse: false` the command fails with `QueryExceededMemoryLimitNoDiskUseAllowed` (292). `$facet` cannot spill. The 16 MiB document limit still applies to each output document.
+> **Q: “What happens when a `$group` needs more than 100 MB?”**  
+> `$group` is a blocking stage. It must see every input document before it can emit a group, and each blocking stage has a 100 MB memory budget. Past that budget the stage spills its working set to temporary files, and `executionStats` shows `usedDisk: true` plus spill counts. If the command passes `allowDiskUse: false`, it does not spill. It fails with `QueryExceededMemoryLimitNoDiskUseAllowed`, code 292. For example, grouping 200,000 distinct keys with a large payload crosses the budget. The limit of spilling is that it is a slower success, not a fix: filter or project earlier so the stage never needs the disk. `$facet` cannot spill at all. Each of its outputs is capped at 100 MB, and the one document it returns is capped at 16 MB.
 
-> **Q: “When do you use `localField`/`foreignField` and when `let` + `pipeline` in `$lookup`?”**
-> A: Use the equality form for a plain key join; it runs as an indexed or hash join. Use `let` + `pipeline` when the join needs extra conditions or reshaping: a non-equality condition, "only the latest one" (`$sort` + `$limit` inside), or projecting a few fields. Either way, index the foreign field and run the `$lookup` after you have reduced the input.
+> **Q: “When do you use `localField`/`foreignField` and when `let` + `pipeline` in `$lookup`?”**  
+> The equality form, `localField` and `foreignField`, is a plain key join. The server finds foreign documents whose field equals this document's field. Use `let` plus a `pipeline` when the join needs more than equality: an extra condition, "only the latest row" via `$sort` and `$limit` inside the sub-pipeline, or a projection of a few fields. `let` binds fields of the current document to variables the sub-pipeline reads with `$expr`. For example, "each customer and their newest non-draft order" is a `let` pipeline that sorts and limits to one order inside the join, so you do not copy every order into the result. The limit is cost. `$lookup` runs per input document, so sort and limit first, and index the foreign field. Without that index the equality form falls back to a hash join, and the `let` form can scan the foreign collection once per input.
 
-> **Q: “`$merge` or `$out`?”**
-> A: `$out` builds a new collection and swaps it in place of the target, which suits a full snapshot. `$merge` upserts each result into an existing collection, matching on `_id` or on fields with a unique index, with configurable `whenMatched`/`whenNotMatched`. That suits incremental refreshes, such as recomputing only the last month.
+> **Q: “`$merge` or `$out`?”**  
+> Both write a pipeline's result into a collection so a dashboard does not recompute six months of revenue on every page view. `$out` builds a new collection and swaps it into the target name when the pipeline finishes, which suits a full snapshot and deletes whatever was there. `$merge` upserts each result into a collection that can already exist, matching on `_id` or on fields that have a unique index, with `whenMatched` and `whenNotMatched` to say what happens. That suits recomputing only the last month. For example, a nightly job `$merge`s this month's rows and leaves older months alone. The limit of `$out` is that readers can see the collection disappear and reappear at the swap, and any other writer to that collection loses its rows. Use `$merge` when the collection is not exclusively yours.
 
 ## Cheat-card
 
-- **Order:** `$match` (indexed) → `$sort` (indexed) → `$unwind` → `$group` → `$lookup` after `$limit` → `$project` last.
-- **Index use:** only the leading part pushed to the query layer. Look for IXSCAN vs COLLSCAN in `queryPlanner` or `stages[0].$cursor.queryPlanner`.
-- **Optimizer:** moves `$match` before `$sort`/`$addFields`/`$project` when it does not use computed fields; folds `$limit` into `$sort`. On 8.2.6 it also pushed a `$match` on the `$group` key before the group.
-- **`$match` on an accumulator after `$group`:** COLLSCAN of the input (858 vs 2,000 docs examined here).
-- **Explain:** `explain('executionStats')` → `totalKeysExamined`, `totalDocsExamined`, `nReturned`, `usedDisk`, `spills`.
-- **Memory:** 100 MB per blocking stage; `allowDiskUseByDefault: true` on 8.2.6 (since 6.0); `allowDiskUse: false` → error 292.
-- **`$lookup`:** `localField`/`foreignField` → `EQ_LOOKUP` (`IndexedLoopJoin` or `HashJoin`); `let` + `pipeline` + `$expr` for conditions and "latest one".
-- **`$unwind`:** drops empty/missing arrays unless `preserveNullAndEmptyArrays: true`.
-- **`$facet`:** one round trip, many sub-pipelines; no spilling; result ≤ 16 MiB.
-- **`$bucket`:** `[lower, upper)` ranges, `_id` = lower bound, `default` for the rest.
-- **`$merge`** upserts (unique index for `on`); **`$out`** replaces the whole collection.
-- **Versions used:** Node v24.19.0, `mongodb` driver 7.7.0, MongoDB 8.2.6.
+- Order: indexed `$match`, indexed `$sort`, `$unwind`, `$group`, `$lookup` after `$limit`, `$project` last.
+- Only the leading part pushed to the query layer can use an index. Look for `IXSCAN` versus `COLLSCAN`.
+- The optimizer moves `$match` before `$sort`, `$addFields`, and `$project` when the filter does not use computed fields, and it folds `$limit` into `$sort`.
+- A `$match` on an accumulator after `$group` scans the input. Here that was 2,000 documents examined against 858 when the filter could use the index.
+- `explain('executionStats')` reports keys, documents, `nReturned`, `usedDisk`, and spills.
+- 100 MB per blocking stage. `allowDiskUse: false` fails with error 292. `$facet` cannot spill, and its result document is at most 16 MB.
+- `$lookup`: equality form for a key join. `let` plus a pipeline for extra conditions and "the latest one."
+- `$unwind` drops empty or missing arrays unless `preserveNullAndEmptyArrays: true`.
+- `$bucket` uses `[lower, upper)` ranges, `_id` is the lower bound, and `default` catches the rest.
+- `$merge` upserts. `$out` replaces the collection.
+
+## Good to know
+
+- On MongoDB 8.2 the prefix the query layer runs is usually the slot-based execution engine, SBE. Leftover stages run in the classic pipeline engine. Under SBE the plan tree is at `winningPlan.queryPlan`. For a classic plan the tree is `winningPlan` itself.
+- The 100 MB budgets are `internalDocumentSourceGroupMaxMemoryBytes` and `internalQueryMaxBlockingSortMemoryUsageBytes`. Both read `104857600` on 8.2.6.
+- Since MongoDB 6.0, `allowDiskUseByDefault` decides what happens past the budget. It is `true` on 8.2.6. Before 6.0 every command had to pass `allowDiskUse: true`.
+- Since MongoDB 5.0 you can combine `localField` and `foreignField` with a `pipeline` on `$lookup`.
+- On 8.2.6 explain, the equality `$lookup` shows up as `EQ_LOOKUP`: `IndexedLoopJoin` with an index, `HashJoin` without one.
+- Versions used for the examples: Node v24.19.0, `mongodb` driver 7.7.0, MongoDB 8.2.6.
 
 ---
 

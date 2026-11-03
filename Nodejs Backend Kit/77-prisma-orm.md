@@ -13,23 +13,23 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Prisma is an object-relational mapper: you describe each table once in a schema file, it generates a typed client, and calling a method such as findMany builds SQL and sends it through the database driver. It exists so column names and result shapes are checked before you run, and so migrations can be generated from that same schema. The trade-off is that loading related rows often sends several queries, and you have to learn Prisma's own transaction and raw-SQL rules.
+
 ## Why it matters
 
-Lesson 73 wrote SQL by hand with `pg`. That works, but every query returns rows typed as `any`, every rename of a column means a search through string literals, and joining three tables into nested JSON is code you write and test yourself. Prisma takes a different approach. You describe your tables once in a schema file, and Prisma does three jobs from it:
+Hand-written SQL with the pg driver returns rows typed as any, a renamed column is a search through string literals, and turning three tables into nested objects is code you write yourself. Prisma does three jobs from one schema file. Migrate turns the schema into SQL files and applies them. Generate writes a TypeScript client whose methods match your tables. The client turns calls such as `prisma.post.findMany({ include: { author: true } })` into SQL at runtime.
 
-- **Migrate** turns the schema into SQL migration files and applies them.
-- **Generate** writes a TypeScript client whose methods and result types match your tables.
-- **The client** turns calls like `prisma.post.findMany({ include: { author: true } })` into SQL at runtime and sends it to the database.
-
-Prisma is one of the most used Node ORMs, so you will meet it in existing code bases and in interviews. You also need to know where it hurts. It can send more queries than you expect. It has its own transaction API with a timeout. Its raw-SQL escape hatch has one safe and one unsafe form. And version 7 changed how a project is set up. This lesson builds the kit's shared blog database (users, posts, comments, tags) with Prisma 7.10.0 and measures each of these points against a real PostgreSQL 18.4 server.
+You will meet Prisma in existing code and in interviews. The sharp edges are extra queries, a transaction API with a timeout, a raw-SQL escape hatch with one safe form and one unsafe form, and a setup that changed in version 7.
 
 ## The concept, simply
 
-An ORM (object-relational mapper) sits between your code and the SQL database. You work with objects and method calls, and the ORM writes the SQL. Prisma's version of this has three parts that you run at different times:
+An object-relational mapper sits between your code and the SQL database. You call methods. It writes the SQL. Prisma splits that into three parts you run at different times.
 
-1. **The schema** (`prisma/schema.prisma`). One `model` per table, with fields, types, keys and relations. It is the source of truth.
-2. **The CLI** (`npx prisma …`), used at development and deploy time. `migrate dev` compares the schema with the migration history and writes a new `migration.sql`. `migrate deploy` applies pending migrations. `generate` writes the client code.
-3. **Prisma Client**, used at runtime. It is generated code plus a runtime library. In Prisma 7 the runtime builds SQL in-process with a WebAssembly query compiler and sends it through a *driver adapter*: for PostgreSQL that is `@prisma/adapter-pg`, which uses the ordinary `pg` driver.
+1. **The schema,** `prisma/schema.prisma`. One model per table, with fields, types, keys, and relations. It is the source of truth.
+2. **The CLI,** used while you develop and deploy. `migrate dev` compares the schema with the migration history and writes a new migration.sql. `migrate deploy` applies pending migrations. `generate` writes the client.
+3. **Prisma Client,** used at runtime. In Prisma 7 the client builds SQL in-process and sends it through a driver adapter. For PostgreSQL that is `@prisma/adapter-pg`, which uses the ordinary pg driver.
 
 text
 
@@ -47,41 +47,34 @@ text
                                            → @prisma/adapter-pg → pg.Pool ───────────────┘
 ```
 
+
 ## How it works
 
-What happens from an empty folder to a running query, in the project this lesson builds:
+From an empty folder to a running query:
 
-1. `npx prisma init` writes `prisma/schema.prisma`, a config file and `.env`. You write the models.
-2. `npx prisma migrate dev --name init` loads `prisma.config.ts`, which gives it the database URL. It compares the schema with the existing migrations and writes `prisma/migrations/<timestamp>_init/migration.sql`. It applies that file and records it in the `_prisma_migrations` table. In Prisma 7 it does **not** run `generate` or the seed script any more (changed in v7.0).
-3. `npx prisma generate` writes the client into the `output` folder from the generator block, here `src/generated/prisma`. It is plain TypeScript with `.ts` import specifiers.
-4. Your code creates `new PrismaClient({ adapter: new PrismaPg({ connectionString }) })`. In v7 the adapter is required (changed in v7.0).
-5. A call such as `prisma.post.findMany({ where, include })` is validated against the generated types. At runtime the query compiler turns it into one or more SQL statements with `$1, $2…` parameters. The adapter sends them over a `pg` pool connection and Prisma assembles the nested result objects.
+1. `npx prisma init` writes the schema, a config file, and `.env`. You write the models.
+2. `npx prisma migrate dev --name init` reads `prisma.config.ts` for the database URL, writes `prisma/migrations/<timestamp>_init/migration.sql`, applies it, and records it in `_prisma_migrations`. In Prisma 7 this does not run generate, and it does not run the seed.
+3. `npx prisma generate` writes the client into the output folder from the generator block, here `src/generated/prisma`.
+4. Your code does `new PrismaClient({ adapter: new PrismaPg({ connectionString }) })`. In version 7 the adapter is required.
+5. `findMany` is checked against the generated types. At runtime the query compiler builds one or more SQL statements with `$1`, `$2` parameters. The adapter sends them on a pg pool connection, and Prisma assembles the nested objects.
 
-**What changed in Prisma 7.** If you read a Prisma 5 or 6 tutorial, five things now work differently. Each one was checked in this project:
+**What changed in version 7,** each one checked in this project:
 
-- **The generator.** It is now `provider = "prisma-client"` with a required `output` path. The client is generated into your source tree instead of `node_modules/.prisma`, and you import it from that path rather than from `@prisma/client`. The old `prisma-client-js` provider still exists but is scheduled for removal.
-- **Driver adapters.** They are mandatory. The Rust query engine binary is gone from the client, and `@prisma/adapter-pg` plus `pg` do the networking. Pool settings are now `pg`'s settings: the upgrade guide notes that `pg` has no connection timeout by default, where Prisma 6 used 5 seconds.
-- **`prisma.config.ts`.** The CLI reads the database URL, schema path, migrations path and seed command from it. The `url` field in the `datasource` block is deprecated. The CLI does not load `.env` by itself, so the config file starts with `import 'dotenv/config'`.
-- **ESM.** Prisma now ships as an ES module. The upgrade guide asks for `"type": "module"` and lists Node 20.19.0 and TypeScript 5.4.0 as minimum versions.
-- **No automatic seeding.** `migrate dev` and `migrate reset` no longer run the seed script; you run `prisma db seed` yourself.
+- The generator is `provider = "prisma-client"` with a required output path. You import from that path, not from `@prisma/client`. The old `prisma-client-js` provider still exists and is scheduled for removal.
+- Driver adapters are mandatory. The Rust query engine binary is gone from the client. Pool settings are pg's settings. The upgrade guide notes that pg has no connection timeout by default, where Prisma 6 used 5 seconds.
+- The CLI reads the URL, schema path, migrations path, and seed command from `prisma.config.ts`. The url field on the datasource block is deprecated. The CLI does not load `.env` by itself, so the config starts with `import 'dotenv/config'`.
+- Prisma ships as an ES module. The upgrade guide asks for `"type": "module"`, and lists Node 20.19.0 and TypeScript 5.4.0 as minimums.
+- `migrate dev` and `migrate reset` no longer run the seed. You run `prisma db seed` yourself.
 
-> ⚠️ Unverified: that `migrate reset` no longer seeds is taken from the v7 upgrade guide and was not run here. Prisma 7.10.0 refuses `migrate reset` when it detects an AI agent without the user's explicit consent, and none was given. `migrate dev` on an empty database was run, and it did not seed (Example 4).
+**Names.** TypeScript sees `Post`, `authorId`, `createdAt`. `@@map("posts")` and `@map("author_id")` keep the database's snake_case names. The many-to-many link in this kit is an explicit join model, `PostTag` mapped to `post_tags`, with a composite id. An implicit many-to-many lets Prisma name the join table itself, `_PostToTag`, with columns A and B. A relation name only renames it to `_post_tags`. The columns stay A and B. The shared `post_tags (post_id, tag_id)` therefore needs the explicit model. You then read `post.tags[].tag.name` instead of `post.tags[].name`.
 
-**Which version, and why 7.10.0.** On 12 Oct 2026 npm's `latest` tag for the `prisma` CLI package points at `8.0.0-rc.22`, a release candidate published 8 Oct 2026. The `latest` tag of `@prisma/client`, however, still points at `7.10.0`. So a bare `npm install prisma @prisma/client` gives you a CLI and a client from two different major versions. The newest stable release of both is 7.10.0 (25 Aug 2026), so this lesson pins it with `-E`. The docs site has also moved to v8 by default; the v7 pages live under `/docs/orm/v7/`, and the Learn More links point there. 7.10.0 also renamed the config file: `prisma init` now writes `prisma7.config.ts` so that a Prisma 7 config can sit next to a Prisma 8 `prisma.config.ts` (changed in v7.10.0). The 7.10.0 loader looks for `prisma7.config.*` first and falls back to `prisma.config.*`. This lesson uses `prisma.config.ts`, the name every 7.x release understands, and the CLI confirms it with `Loaded Prisma config from prisma.config.ts.`
+**Relation loading.** By default, include uses one SELECT per relation level. Children are fetched with `WHERE parent_id IN (...)` and stitched in JavaScript. A three-level include is three or four queries, not one. The `relationJoins` preview adds `relationLoadStrategy: "join"`, which uses a PostgreSQL lateral join and JSON aggregation to load everything in one statement. It is still marked preview, so the generator block has to enable it.
 
-**Mapping to the shared tables.** Prisma's model and field names are what your TypeScript sees: `Post`, `authorId`, `createdAt`. `@@map("posts")` sets the table name and `@map("author_id")` sets the column name, so the database keeps the kit's snake_case names. The many-to-many link is an *explicit* join model, `PostTag` mapped to `post_tags`, with a composite `@@id([postId, tagId])`. Prisma also supports *implicit* many-to-many (`tags Tag[]` on `Post` and `posts Post[]` on `Tag`, with no join model). In that case Prisma creates and names the join table itself: `_PostToTag`, with columns `A` and `B`. `@relation("post_tags")` on both sides only renames it to `_post_tags`, and the columns stay `A` and `B` (Example 3 shows the generated SQL). The shared domain's `post_tags (post_id, tag_id)` therefore needs the explicit form. The price is one more level when you query: `post.tags[].tag.name` instead of `post.tags[].name`.
+**Transactions, three forms.** A nested write, a create that also creates tag rows, is wrapped in a transaction for you. `$transaction([q1, q2])` runs independent queries in one transaction: all commit, or none do. No query can use another's result. `$transaction(async (tx) => { ... })` is interactive. It holds one connection for the callback, so you can read, decide in JavaScript, then write. A throw rolls back. Every query inside must use `tx`. The default timeout is 5 seconds, and maxWait to get a connection is 2 seconds.
 
-**How relation loading turns into SQL.** By default, `include` and nested `select` use the `query` strategy: one SELECT per relation level, with the child rows fetched by `WHERE parent_id IN (…)` and stitched together in JavaScript. A 3-level include is therefore 3 or 4 queries, not 1, and Examples 8 and 14 count them. The `relationJoins` preview feature adds `relationLoadStrategy: "join"`, which uses PostgreSQL `LEFT JOIN LATERAL` with JSON aggregation to load everything in one statement. It is still marked Preview in the v7 docs, so it has to be enabled in the generator block.
+**Raw SQL.** `$queryRaw` is a tagged template, so each interpolated value becomes a bind parameter. `$queryRawUnsafe` takes a plain string. If you build that string by concatenation, user input becomes SQL. `$executeRaw` returns an affected-row count. Raw results are not mapped through models, so a PostgreSQL bigint such as `count(*)` comes back as a JavaScript BigInt, and `JSON.stringify` throws on it.
 
-**Transactions come in three forms.**
-
-- **Nested writes.** A `create` that also creates `tags` rows is wrapped in a transaction automatically.
-- **`$transaction([q1, q2])`.** It runs a list of independent queries inside one transaction, and all of them commit or none do.
-- **`$transaction(async (tx) => { … })`.** An *interactive* transaction holds one connection for the whole callback, so you can read, decide in JavaScript, then write. A throw rolls everything back. Every query inside must go through `tx`, and the callback has a 5-second default `timeout` (with `maxWait` 2 seconds to get a connection).
-
-**Raw SQL.** `$queryRaw` is a tagged template, so each `${value}` becomes a bind parameter. `$queryRawUnsafe(string, ...values)` takes a plain string, and if you build that string by concatenation, user input becomes SQL. `$executeRaw` returns an affected-row count. Raw results are not mapped through the models, so PostgreSQL `bigint` (for example `count(*)`) comes back as a JavaScript `BigInt`.
-
-**Migrations and the history table.** Each migration is a folder with one `migration.sql`. `_prisma_migrations` stores a row per applied migration, including a SHA-256 `checksum` of the file. `migrate dev` (development) compares those checksums with the files, generates new migrations and can ask to reset the database. `migrate deploy` (CI or production) only applies migrations that are not yet in the table and never generates or resets anything. `migrate status` reports pending ones and exits with code 1 while any are pending.
+**Migration history.** Each migration is a folder with one `migration.sql`. `_prisma_migrations` stores a row per applied file, including a SHA-256 checksum. `migrate dev` is for development: it can generate and can ask to reset. `migrate deploy` is for CI or production: it only applies files that are not in the table. `migrate status` reports pending migrations and exits with code 1 while any are pending.
 
 ## Code examples
 
@@ -1118,59 +1111,65 @@ This is what makes GraphQL resolvers that call `findUnique` per parent workable.
 
 ## Common mistakes & gotchas
 
-- **Installing `latest` without pinning.** On 12 Oct 2026 `npm i prisma @prisma/client` gives CLI 8.0.0-rc.22 with client 7.10.0. Pin both with `-E` to the same stable version.
-- **Following a Prisma 6 tutorial on v7.** `import { PrismaClient } from '@prisma/client'`, `new PrismaClient()` without an adapter, `url = env("DATABASE_URL")` in the datasource block, and expecting `migrate dev` to generate and seed all belong to v6. In v7 you import from your `output` path, pass an adapter, put the URL in `prisma.config.ts`, and run `generate` and `db seed` yourself.
-- **Expecting the CLI to read `.env`.** Prisma 7 does not load it; `prisma.config.ts` must `import 'dotenv/config'`. A variable already set in the shell wins over `.env`.
-- **Using `prisma` instead of `tx` inside an interactive transaction.** The query runs on another connection, commits at once, and survives the rollback (Example 10). TypeScript cannot catch it, because both have the same type.
-- **Slow work inside `$transaction(async tx => …)`.** The callback holds a connection and row locks. After 5 s by default, Prisma rolls back with `P2028`. Fetch from other services before the transaction starts.
-- **Concatenating input into `$queryRawUnsafe` / `$executeRawUnsafe`.** That is SQL injection (Example 11). Use the tagged template, or pass values as `$1…` arguments.
-- **Sending raw `count(*)` results to `res.json()`.** They are `BigInt`s and `JSON.stringify` throws. Cast to `::int` in SQL or use `_count`.
-- **Assuming `include` is one JOIN.** By default it is one query per relation level. Look at the `query` log before you guess about performance.
-- **Implicit many-to-many when the table name matters.** Prisma names the join table `_PostToTag` (or `_<relation name>`) with columns `A`/`B`. Use an explicit join model with `@@map` for a named table such as `post_tags`.
-- **Editing a migration that has already been applied.** In 7.10.0, `deploy` and `status` reported nothing (Example 13), so the edit silently never runs on databases that already applied the original. `migrate dev` then wants to reset your dev database. Write a new migration instead.
-- **Counting queries from the log and trusting the total.** In 7.10.0 the `BEGIN` of an implicit transaction is not emitted as a `query` event, but `COMMIT`/`ROLLBACK` are.
+- **Installing latest without pinning.** The CLI and the client can land on different majors. Pin both to the same stable version.
+- **Following a Prisma 6 tutorial on version 7.** Import from your output path, pass an adapter, put the URL in `prisma.config.ts`, and run generate and db seed yourself.
+- **Expecting the CLI to read `.env`.** Import `dotenv/config` in the config file. A variable already set in the shell wins.
+- **Using `prisma` instead of `tx` inside an interactive transaction.** That query runs on another connection, commits immediately, and survives the rollback. TypeScript cannot tell them apart.
+- **Slow work inside the interactive callback.** It holds a connection and row locks. After the default 5 seconds, Prisma rolls back with P2028.
+- **Concatenating into `$queryRawUnsafe`.** That is SQL injection. Use the tagged template, or pass values as extra arguments.
+- **Sending a raw `count(*)` to `res.json()`.** It is a BigInt, and JSON.stringify throws. Cast to int in SQL, or use `_count`.
+- **Assuming include is one JOIN.** By default it is one query per relation level. Read the query log.
+- **Implicit many-to-many when the table name matters.** Prisma names it `_PostToTag` with columns A and B. Use an explicit join model and `@@map` for `post_tags`.
+- **Editing a migration that already ran.** In 7.10.0, deploy and status did not report the edit, so databases that already applied the original never run it. Write a new migration.
+- **Counting queries from the log and trusting the total.** In 7.10.0 the BEGIN of an implicit transaction is not emitted as a query event. COMMIT and ROLLBACK are.
 
 ## Best practices
 
-- **Pin `prisma`, `@prisma/client` and `@prisma/adapter-pg` to one exact stable version,** and upgrade them together.
-- **Create one `PrismaClient` per process** in a module (`src/db.ts`) and import it everywhere. Each client owns a `pg` pool; see lesson 74 for pool sizing.
-- **Commit `prisma/migrations/` and `migration_lock.toml`.** Run `migrate dev` only in development and `migrate deploy` in CI or at release, and gate on `migrate status`'s exit code.
-- **Review every generated `migration.sql` before you commit it,** especially for renames. Renaming `title` to `heading` in the schema produced `ALTER TABLE "posts" DROP COLUMN "title", ADD COLUMN "heading" TEXT NOT NULL;` (checked with `prisma migrate diff`). That loses the data, and on a table with rows the `NOT NULL` column cannot even be added. Generate with `migrate dev --create-only`, change it to `RENAME COLUMN`, then apply.
-- **Use `select` to fetch only the columns you need,** and `_count` for counts, instead of loading whole relations to call `.length`.
-- **Turn on `log: [{ emit: 'event', level: 'query' }]` in tests** and assert query counts for hot endpoints, so an N+1 regression fails a test.
-- **Keep interactive transactions short and pure-database.** Pass `tx` into helper functions explicitly so nothing inside can reach for the global client.
-- **Use `$queryRaw` tagged templates for SQL the client cannot express** (window functions, CTEs), and cast aggregates to the type you want to send.
-- **Make the seed idempotent** (truncate or upsert), so `prisma db seed` can run any number of times.
+- Pin `prisma`, `@prisma/client`, and `@prisma/adapter-pg` to one exact stable version, and upgrade them together.
+- One PrismaClient per process, imported everywhere. Each client owns a pg pool.
+- Commit `prisma/migrations` and `migration_lock.toml`. `migrate dev` only in development. `migrate deploy` in CI or at release. Gate on `migrate status`, which exits 1 when migrations are pending.
+- Read every generated `migration.sql` before you commit it. A rename in the schema can become DROP COLUMN plus ADD COLUMN, which loses data. Generate with `--create-only`, change it to RENAME COLUMN, then apply.
+- Use `select` for the columns you need, and `_count` instead of loading a relation to call length.
+- Log queries in tests and assert counts on hot endpoints, so an N+1 fails the test.
+- Keep interactive transactions short and database-only. Pass `tx` into helpers so nothing reaches for the global client.
+- Use `$queryRaw` tagged templates for SQL the client cannot express, and cast aggregates to the type you will send.
+- Make the seed safe to run twice, with truncate or upsert.
 
 ## ⭐ Interview lens
 
 > **Q: “What does Prisma generate, and what happens at runtime when you call `findMany` with `include`?”**  
-> A: `prisma generate` writes a typed client from `schema.prisma`, in v7 into the `output` folder you choose. At runtime the client validates the arguments, an in-process WebAssembly query compiler builds SQL with bind parameters, and the driver adapter (`@prisma/adapter-pg` over `pg`) sends it. With the default `query` strategy, `include` becomes one SELECT for the parents plus one `WHERE fk IN (…)` SELECT per relation, and Prisma joins the results in JavaScript. *Trap:* saying "it does a JOIN". That is only true with the `relationJoins` preview and `relationLoadStrategy: "join"`.
+> A: `prisma generate` reads `schema.prisma` and writes a typed client. In version 7 that client lands in the output folder you set, and you construct it with a driver adapter, here `@prisma/adapter-pg` over pg. A call such as `findMany` with `include` is checked against those generated types, then an in-process compiler builds SQL with bind parameters and the adapter sends it. With the default strategy, include is not one join. It is one SELECT for the parent rows plus one `WHERE foreign key IN (...)` SELECT per relation, and Prisma stitches the objects in JavaScript. For example, a post with author, comments, and tags was four SELECTs, a fixed number that does not grow with the row count. The limit is the word "join". A single statement happens only if you turn on the relationJoins preview and set `relationLoadStrategy` to join. Until you log the queries, you do not know which one you got.
 
 > **Q: “`$transaction([…])` vs `$transaction(async tx => …)` — when do you use which?”**  
-> A: The array form runs independent queries in one transaction, so all commit or none do, but no query can use another's result. The interactive form holds one connection for a callback, so you can read, branch in JS and write, and a throw rolls back. It has a 5 s default timeout, and every query must use `tx`. A query on the global client escapes the transaction. For "create a parent and its children", a nested write is simpler than either.
+> A: `$transaction` has two shapes, and they are not interchangeable. The array form runs a list of queries in one transaction, so they all commit or none do, but no query can see another's result. The interactive form passes you a `tx` and holds one connection for the whole callback, so you can read, branch in JavaScript, and write, and a throw rolls back. For example, "create this post only if the author still exists" needs the interactive form or a nested write. A pair of unrelated updates can use the array. The limit is the connection and the clock. The default timeout is 5 seconds and maxWait is 2 seconds. A query on the global `prisma` client inside the callback is not on that connection: it commits on its own and survives the rollback. Nested create of a parent and its children is often simpler than either form, because Prisma wraps that write for you.
 
 > **Q: “How do you prevent SQL injection with Prisma raw queries?”**  
-> A: Use `$queryRaw` / `$executeRaw` as tagged templates: each `${}` becomes a bind parameter. Use `Prisma.sql`, `Prisma.join` and `Prisma.empty` to build dynamic parts. With `$queryRawUnsafe`, pass values as extra arguments for `$1, $2`, never by string concatenation. Identifiers cannot be parameters, so pick them from an allow-list.
+> A: Prisma's safe raw path is a tagged template. `$queryRaw` and `$executeRaw` turn each interpolated value into a bind parameter, so a quote in the value cannot change the statement. `Prisma.sql`, `Prisma.join`, and `Prisma.empty` build the dynamic parts the same way. `$queryRawUnsafe` is the other path: you pass a string, and values belong in extra arguments that fill `$1` and `$2`, not in the string. For example, concatenating an email into `OR '1'='1'` returned every user, while the tagged template sent the whole string as `$1`. The limit is identifiers. Table and column names cannot be parameters. If one must vary, choose it from a fixed allow-list and only then pass that constant through `Prisma.raw`. Also, a raw `count(*)` comes back as a BigInt, and `res.json` throws on it. The model's `_count` returns a plain number.
 
 > **Q: “How do you find and fix an N+1 problem in a Prisma app?”**  
-> A: Log queries with `log: [{ emit: 'event', level: 'query' }]` and count them per request. A loop of `findMany`/`findUnique` per row shows up as 1 + N × k statements. Fix it with `include`/`select` (a constant number of queries), an `IN` query you join yourself, or `relationLoadStrategy: "join"` where the preview is enabled. Note that `findUnique` calls started together in `Promise.all` are batched by Prisma's dataloader, but sequential awaits are not.
-
-> **Q: “What changed in Prisma 7 that breaks old setups?”**  
-> A: There is a new `prisma-client` generator with a required `output`, so you import from your own path. Driver adapters are mandatory. CLI settings, including the database URL, move to `prisma.config.ts`, and `.env` is no longer auto-loaded. The package is ESM. `migrate dev` no longer runs `generate` or the seed. Pool behaviour now comes from `pg`, including no default connection timeout.
+> A: You find an N+1 by logging queries, `log: [{ emit: 'event', level: 'query' }]`, and counting them per request. The shape is one query for the list, then one or more per row. In this lesson a loop over 4 posts that loaded author and comments sent 9 statements, and the same page with include sent 3, however many posts you would add. The fix is include or select, which is a constant number of queries, or an IN list you stitch yourself, or `relationLoadStrategy: "join"` when that preview is on, which was 1 statement here. Prisma also has a dataloader: `findUnique` calls started together, for example inside `Promise.all` in the same tick, are merged into one IN query. Sequential awaits are not. The limit is that fewer round trips is not automatically faster. The join form builds JSON inside PostgreSQL, and this lesson did not time the two. Measure your own data before you pick.
 
 ## Cheat-card
 
-- **Versions used:** Prisma 7.10.0 (stable; npm `latest` for `prisma` is 8.0.0-rc.22), pg 8.23.1, Node v24.19.0, TypeScript 7.0.2, PostgreSQL 18.4.
-- **v7 setup:** `generator client { provider = "prisma-client"  output = "../src/generated/prisma" }`; `new PrismaClient({ adapter: new PrismaPg({ connectionString }) })`; URL and seed in `prisma.config.ts` with `import 'dotenv/config'`.
-- **Config file name:** 7.10.0 `init` writes `prisma7.config.ts`; `prisma.config.ts` still loads as a fallback.
-- **Mapping:** `@@map("posts")` for the table, `@map("author_id")` for the column, `@db.Timestamptz` for `timestamptz`; explicit join model for `post_tags`.
-- **Workflow:** `migrate dev --name x` → `generate` → `db seed`; prod: `migrate deploy`; CI gate: `migrate status` (exit 1 when pending).
-- **Reads:** `include` = whole relation, `select` = named fields, `_count` = SQL aggregate; default strategy is one query per relation level.
-- **Transactions:** `$transaction([a, b])` all-or-nothing; `$transaction(async tx => …)` interactive, use `tx` only, `timeout` 5000 / `maxWait` 2000 by default; timeout → `P2028`.
-- **Errors:** `P2002` unique violation, `P2025` record not found; check `instanceof Prisma.PrismaClientKnownRequestError`.
-- **Raw:** `` $queryRaw`… ${v}` `` = bound; `$queryRawUnsafe(str)` with concatenation = injectable; `count()` → `BigInt`.
-- **N+1 measured:** loop 9 queries vs `include` 3 vs `relationLoadStrategy: "join"` 1 (4 posts, `author` + `comments`).
+- **Version 7 setup:** generator `prisma-client` with an output path. `new PrismaClient({ adapter })`. URL and seed live in `prisma.config.ts`, which imports dotenv.
+- **Mapping:** `@@map` for the table, `@map` for the column. Explicit join model for `post_tags`.
+- **Workflow:** `migrate dev`, then `generate`, then `db seed`. Production uses `migrate deploy`. `migrate status` exits 1 while migrations are pending.
+- **Reads:** include is the whole relation, select is named fields, `_count` is a SQL aggregate. Default strategy is one query per relation level.
+- **Transactions:** array form is all or nothing. Interactive form uses `tx` only. Default timeout 5000 ms, maxWait 2000 ms. Timeout is error P2028.
+- **Errors:** P2002 is a unique violation. P2025 means the record was not found. Check `instanceof Prisma.PrismaClientKnownRequestError`.
+- **Raw:** a tagged template is bound. Unsafe plus concatenation is injectable. `count()` comes back as a BigInt.
+- **N+1 measured here:** loop 9 queries, include 3, join strategy 1, for 4 posts with author and comments.
+
+## Good to know
+
+- On 12 Oct 2026, npm latest for the `prisma` CLI was 8.0.0-rc.22, while `@prisma/client` latest was still 7.10.0. A bare install mixes majors. This lesson pins 7.10.0, the newest stable of both, published 25 Aug 2026.
+- 7.10.0 `prisma init` writes `prisma7.config.ts` so it can sit next to a Prisma 8 `prisma.config.ts`. The loader checks `prisma7.config.*` first and falls back to `prisma.config.*`. This lesson uses `prisma.config.ts`.
+> ⚠️ Unverified: that `migrate reset` no longer seeds is taken from the v7 upgrade guide and was not run here. Prisma 7.10.0 refuses `migrate reset` when it detects an AI agent without the user's explicit consent, and none was given. `migrate dev` on an empty database was run, and it did not seed (Example 4).
+- **What changed in Prisma 7 that breaks old setups?** New generator with a required output path, mandatory driver adapters, CLI settings in `prisma.config.ts`, no automatic `.env` load, ESM, and `migrate dev` no longer runs generate or the seed. Pool behavior comes from pg, including no default connection timeout.
+- npm 11.17 did not run install scripts until they were approved. The first CLI command still downloaded the schema engine into `node_modules/@prisma/engines` and into `$HOME/.cache/prisma`.
+- In the timeout example the elapsed time was just over 300 ms in each run, and Prisma still rolled the first insert back. Keep network calls outside the callback.
+- A renamed `title` checked with `prisma migrate diff` became DROP COLUMN plus ADD COLUMN, which drops the data.
+- Fewer round trips with the join strategy was not timed here. Measure before you choose.
 
 ---
 

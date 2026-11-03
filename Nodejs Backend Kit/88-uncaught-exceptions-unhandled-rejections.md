@@ -13,37 +13,39 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+An uncaught exception or an unhandled rejection is an error that got past every handler you wrote, and Node emits a last-resort event so you can log it and exit. The process may be holding a lock or sitting in the middle of an update, so you cannot trust it to keep serving. The safe pattern is to crash and let a supervisor start a fresh process, not to catch the event and continue.
+
 ## Why it matters
 
-No matter how disciplined your error handling is, some error will eventually escape every boundary. A library throws asynchronously in a code path you never tested; a promise rejects and nobody awaited it; a timer callback blows up. Node has to do *something* when that happens, and the something it does — plus the something *you* configure it to do — decides whether your service degrades gracefully or corrupts data, hangs sockets, and slowly rots until it needs a manual kick.
-
-This is one of the highest-signal interview topics for backend Node roles because it exposes a philosophy, not just an API. The naive instinct — "catch the uncaught exception and keep running so we never go down" — is exactly backwards and is the single most common production anti-pattern in the Node ecosystem. Understanding *why* the correct answer is usually "let it crash" tells an interviewer you've operated real services and internalised how process state, the event loop, and supervisors interact.
+Some error will eventually escape: a library throws on a path you never tested, a promise rejects with nobody awaiting it, a timer callback blows up. What Node does then, and what you configure, decides whether you corrupt data or restart clean. "Catch it and keep running so we never go down" is the common production mistake. Resilience comes from restarting, not from resuming a process whose state you no longer understand.
 
 ## The concept, simply
 
-There are two global "last resort" events. **`uncaughtException`** fires when a synchronous throw (or an async throw with no surrounding async handler) propagates all the way up with nothing to catch it. **`unhandledRejection`** fires when a promise rejects and no `.catch()` or `try/catch await` is ever attached to it. Both are signals that an error slipped past all your intended handling.
+Two global events are the last resort. **`uncaughtException`** fires when a throw reaches the top with nothing to catch it. **`unhandledRejection`** fires when a promise rejects and nothing ever attaches a catch or an await. Both mean an error slipped past the handling you intended.
 
-The **crash-only** philosophy says: when an *unknown* error has escaped, the process is in an undefined state and you cannot trust it to keep serving correctly. So the honourable thing is to log the error, run a short, bounded cleanup, and exit — then let an external supervisor start a fresh process with clean memory. A restart takes milliseconds; a subtly corrupted long-lived process can take down data integrity for hours.
+The crash-only idea: after an unknown error, the process is in an undefined state. Log it, do a short bounded cleanup, and exit. An external supervisor starts a new process with clean memory. A restart is quick. A subtly corrupt process can damage data for hours.
 
 ![A cycle where an uncaught error triggers a handler that logs and exits, then a supervisor restarts a fresh process](assets/i51_01_9a6c4bfc.svg)
 
-Crash-only design: the global handler is for logging and graceful shutdown, not recovery. A supervisor provides resilience by replacing the dead process.
+The global handler is for logging and shutdown, not for recovery. The supervisor provides resilience by replacing the dead process.
 
 ## How it works
 
-When an exception reaches the top of the stack with no handler, Node emits `'uncaughtException'` on the `process` object. If *you* have registered a listener, Node calls it and then — critically — **does not exit on its own**. It assumes you took responsibility, and it keeps the event loop running. This is the source of the danger: if your listener just logs and returns, the process limps on in whatever broken state caused the crash. If you register *no* listener, Node prints the stack to stderr and exits with code 1, which is actually the safer default.
+When an exception reaches the top with no handler, Node emits `uncaughtException` on `process`. If you registered a listener, Node calls it and then **does not exit on its own**. It assumes you took responsibility. If that listener only logs and returns, the process keeps running in the broken state. If you register no listener, Node prints the stack to stderr and exits with code 1, which is the safer default.
 
-Since Node 15, an **unhandled promise rejection terminates the process by default** (exit code 1), just like an uncaught exception — a deliberate change from older versions that merely warned. You can still register a `'unhandledRejection'` listener to log detail before exiting. A subtle companion event, `'rejectionHandled'`, fires if a rejection that was reported as "unhandled" later gets a handler attached — useful for reasoning about promises that are awaited far from where they're created, but rarely used directly.
+Since Node 15, an unhandled promise rejection also terminates the process by default, exit code 1, same as an uncaught exception. Older Node only printed a warning. You can still listen for `unhandledRejection` to log before you exit. A companion event, `rejectionHandled`, fires if a rejection that was already reported as unhandled later gets a handler. It is rarely used directly. It matters when a promise is awaited far from where it was created.
 
-Why can't you safely resume? Because the throw unwound the stack at an arbitrary point. A function might have acquired a lock, opened a transaction, or half-mutated a shared data structure and then thrown before restoring the invariant. There is no general way to know what was left in a broken state. V8's own guidance and the Node docs are explicit: after an `uncaughtException`, the correct action is to shut down. Treat the handler as a place to *flush logs and close resources*, on a timeout, then `process.exit(1)`.
+You cannot safely resume, because the throw unwound the stack at an arbitrary point. A function may have taken a lock, opened a transaction, or half-updated a shared structure. There is no general way to know what was left broken. After `uncaughtException`, shut down. The handler flushes logs and closes resources, on a timeout, then `process.exit(1)`.
 
-Resilience therefore comes from **outside** the process. A supervisor — `systemd`, PM2, Docker's restart policy, or a Kubernetes liveness probe replacing a pod — restarts the service. Combined with running multiple instances behind a load balancer (or the `cluster` module / a process manager), one crash drops at most a few in-flight requests while healthy instances keep serving. This is the same "let it crash" model Erlang/OTP made famous.
+Resilience comes from **outside** the process. systemd, PM2, a Docker restart policy, or Kubernetes replacing a pod starts the service again. Several instances behind a load balancer, or the cluster module, mean one crash drops only the requests that instance was handling. This is the same "let it crash" idea Erlang made famous.
 
-One more piece ties it together: **graceful shutdown**. Beyond crashes, a healthy deploy sends `SIGTERM` to ask the process to stop. A well-behaved server listens for `SIGTERM`/`SIGINT`, stops accepting new connections, lets in-flight requests finish within a timeout, closes the DB pool, and exits 0. The same cleanup routine your signal handler runs is often the one your last-resort exception handler should run too.
+**Graceful shutdown** is the planned version. A deploy sends SIGTERM. The process stops accepting new connections, finishes in-flight requests within a timeout, closes the database pool, and exits 0. The crash handler often calls the same cleanup, then exits 1 instead of 0.
 
 ## Code examples
 
-The correct last-resort handlers: log, attempt a bounded cleanup, then exit. Note the safety timer so a hung cleanup can't wedge the process forever:
+Last-resort handlers: log, try a bounded cleanup, then exit. The timer exists so a hung cleanup cannot wedge the process.
 
 javascript
 
@@ -71,7 +73,8 @@ process.on('uncaughtException', (err) => crash('uncaughtException', err));
 process.on('unhandledRejection', (reason) => crash('unhandledRejection', reason));
 ```
 
-The anti-pattern to recognise and reject in review — swallowing the exception to "stay up":
+
+The pattern to reject in review: swallow the exception to "stay up".
 
 javascript
 
@@ -87,7 +90,8 @@ process.on('uncaughtException', (err) => {
 // exhausted and EVERY request hangs — with no obvious crash to point at.
 ```
 
-Graceful shutdown on `SIGTERM` — the planned counterpart to a crash. Stop taking work, drain, close, exit clean:
+
+Graceful shutdown on SIGTERM. Stop taking work, drain, close, exit clean. This is the planned counterpart of a crash.
 
 javascript
 
@@ -114,7 +118,8 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 ```
 
-Demonstrating that an un-awaited rejection is fatal by default in modern Node, and how a single missing `await` causes it:
+
+An un-awaited rejection is fatal by default on modern Node. One missing await is enough.
 
 javascript
 
@@ -137,57 +142,57 @@ async function handlePaymentFixed() {
 }
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Registering an `uncaughtException` handler that doesn't exit.** This is the cardinal sin — it disables Node's safe default crash and lets a corrupt process keep serving.
-- **Assuming unhandled rejections only warn.** Since Node 15 they terminate the process by default. Code that "worked" on Node 12 by ignoring rejections now crashes.
-- **Fire-and-forget async calls.** Calling an `async` function without `await` or `.catch()` creates a floating promise; any rejection becomes unhandled. Common with logging, metrics, and "background" work.
-- **Doing heavy async work in the last-resort handler.** The event loop and libraries may be in a bad state; keep cleanup minimal and always guard it with a force-exit timer.
-- **No supervisor.** Crash-only design only works if something restarts you. A bare `node server.js` with no PM2/systemd/orchestrator just stays down after the first crash.
-- **Confusing graceful shutdown with crash handling.** `SIGTERM` is a planned, clean stop (exit 0); an uncaught exception is an emergency (exit 1). They share cleanup code but mean different things.
-- **Forgetting `.unref()` on the safety timer,** so the timer itself keeps the process alive past the point you wanted it dead.
-- **Logging asynchronously and exiting immediately,** so the final fatal log never flushes before the process is gone.
+- **An `uncaughtException` handler that does not exit.** That disables the safe default crash and lets a corrupt process keep serving.
+- **Assuming unhandled rejections only warn.** Since Node 15 they exit with code 1. Code that ignored them on Node 12 now crashes.
+- **Calling an async function with no await and no catch.** Any rejection becomes unhandled. Common with "background" logging and metrics.
+- **Heavy work in the last-resort handler.** The loop and your libraries may already be broken. Keep cleanup small, and guard it with a force-exit timer.
+- **No supervisor.** Crash-only design needs something to restart you. A bare `node server.js` stays down.
+- **Mixing up SIGTERM and a crash.** SIGTERM is a planned stop, exit 0. An uncaught exception is an emergency, exit 1. They can share cleanup code.
+- **Forgetting `unref()` on the safety timer.** The timer itself keeps the process alive.
+- **Logging asynchronously and exiting immediately.** The last fatal line never flushes.
 
 ## Best practices
 
-- **Let it crash.** Treat `uncaughtException`/`unhandledRejection` as signals to log, flush, and exit 1 — never to resume normal operation.
-- **Run under a supervisor** (systemd, PM2, Kubernetes, Docker restart policy) and run multiple instances so a single crash is invisible to users.
-- **Bound your cleanup with a force-exit timer** using `setTimeout(...).unref()` so a hung shutdown can't strand the process.
-- **Implement graceful shutdown on `SIGTERM`/`SIGINT`:** stop accepting connections, drain in-flight work, close pools, exit 0.
-- **Never leave floating promises.** Always `await` or `.catch()`. Enable the ESLint `no-floating-promises` rule to catch them at build time.
-- **Keep the fatal logger simple and prefer a sync write** (or a logger with a flush hook) so the last message actually reaches disk/stdout.
-- **Expose a health/liveness endpoint** so orchestrators can detect a wedged (but not crashed) process and restart it.
-- **Test the restart path,** not just the happy path — verify the supervisor actually brings the service back.
+- **Let it crash.** `uncaughtException` and `unhandledRejection` mean log, flush, and exit 1. Do not resume normal work.
+- **Run under a supervisor** (systemd, PM2, Kubernetes, a Docker restart policy) and run more than one instance.
+- **Bound cleanup with `setTimeout(...).unref()`** so a hung shutdown cannot strand the process.
+- **On SIGTERM and SIGINT:** stop accepting, drain in-flight work, close pools, exit 0.
+- **No floating promises.** Always await or catch. The ESLint rule `no-floating-promises` catches them early.
+- **A simple fatal log, preferably a sync write or a logger that flushes,** so the last line reaches stdout.
+- **A health endpoint** so an orchestrator can restart a process that is wedged but not crashed.
+- **Test the restart,** not only the happy path.
 
 ## ⭐ Interview lens
 
 > **Q: "You have an `uncaughtException` handler so your server never goes down. Is that good?"**  
-> A: No — it's the classic anti-pattern. Registering a handler disables Node's safe default of crashing, and if the handler just logs and returns, the process keeps running in an undefined state: locks may be held, transactions half-open, connections leaked. The correct use of the handler is to log the error, run a bounded cleanup, and `process.exit(1)`, then rely on a supervisor to restart a clean process. Resilience comes from restarting, not from resuming.
+> A: No. Registering `uncaughtException` turns off Node's default, which is to print the stack and exit with code 1. If the handler logs and returns, the process keeps accepting requests in an unknown state: a lock may be held, a transaction half open, a connection leaked. The throw already unwound the stack at some arbitrary line, and there is no general way to repair that. The correct handler logs, runs a short cleanup guarded by a timeout, and calls `process.exit(1)`. A supervisor then starts a clean process. For example, a timeout you expected is handled in the route. A TypeError that reached this hook is not something you resume from. The limit is that this only works if something restarts you. Without systemd, PM2, Docker, or Kubernetes, the exit is just downtime.
 
 > **Q: "What happens to an unhandled promise rejection in modern Node?"**  
-> A: Since Node 15 the default is to terminate the process with exit code 1, the same as an uncaught exception. Older versions only printed a warning. So a floating promise — an `async` call made without `await` or `.catch()` — that rejects will now crash the service. You can register a `process.on('unhandledRejection')` listener to log detail first, but you should still exit.
+> A: Since Node 15, a promise that rejects with no catch and no await terminates the process with exit code 1, the same outcome as an uncaught exception. Before that, Node printed a warning and kept going, which is why old code seemed fine while it dropped errors on the floor. The usual cause is a floating promise: an async function called without await or `.catch()`, often "fire and forget" logging or metrics. You can listen for `unhandledRejection` to log the reason, and you should still exit. For example, `chargeCard()` with no await, inside a request that already sent its response, crashes the process when the charge rejects. The limit of "we are on Node 15 so we are safe" is the handler you add later. A listener that swallows the rejection puts you back on the old, dangerous behavior.
 
 > **Q (trap): "Why not just catch the error and keep the request alive?"**  
-> A: For a *known, operational* error you should — that belongs in normal try/catch. But if it reached `uncaughtException`, it's an *unknown* error that escaped every intended boundary, which means you don't know what state it left behind. The stack unwound at an arbitrary point; a shared structure may be half-mutated. Continuing risks silent data corruption that's far worse than a fast restart.
+> A: For a known operational error, yes. A timeout, a missing row, bad input: that belongs in try catch or an error middleware, and you return a status and keep serving. If the error reached `uncaughtException`, it is unknown. It escaped every boundary, so you do not know which invariant it broke on the way out. Continuing can write corrupt data, which is worse than dropping the few requests that process was handling. For example, a 404 for an unknown order id is handled in the route. A throw after you have updated one account and not the other, with no transaction around it, is not something to catch at the process edge and ignore. The limit of "always crash" is the opposite mistake: crashing on errors you could have handled. Classify them. Handle the expected ones. Exit on the rest.
 
 > **Q: "What's the difference between `SIGTERM` handling and an uncaught-exception handler?"**  
-> A: `SIGTERM` is a planned, graceful shutdown — the orchestrator asks the process to stop, so you drain in-flight requests, close resources, and exit 0. An uncaught exception is an emergency — an error escaped everything, so you do a minimal cleanup and exit 1. They often share a cleanup routine, but one is a clean intentional stop and the other is a controlled crash.
-
-> **Q: "Why is `.unref()` used on the force-exit timer?"**  
-> A: A pending `setTimeout` normally keeps the event loop — and thus the process — alive until it fires. `unref()` tells Node "don't stay alive just for this timer." That way, if cleanup finishes quickly the process can exit immediately, but if cleanup hangs the timer still fires as a backstop to force the exit. It's a safety net that never delays a clean shutdown.
-
-> **Q: "How do you make crash-only design actually resilient to users?"**  
-> A: Run more than one instance behind a load balancer (via the cluster module, a process manager, or multiple pods) and put every instance under a supervisor that restarts on exit. When one process crashes, it drops at most its in-flight requests; the load balancer routes new traffic to healthy instances while the supervisor replaces the dead one in milliseconds. The user never notices.
+> A: SIGTERM is a planned stop. The orchestrator is asking the process to leave, so you stop accepting new connections, let in-flight requests finish within a timeout, close the database pool, and exit 0. An uncaught exception is an emergency. Something escaped every handler, so you do a minimal flush and exit 1. They often call the same cleanup function, and the exit code is how you tell a planned deploy from a crash. For example, a rolling deploy sends SIGTERM and expects exit 0 after drain. A bug in a timer sends you through the exception handler and exit 1, and the supervisor restarts you. The limit is time. Both paths need a force-exit timer, because a hung close of the pool would otherwise leave the process up forever. `unref()` on that timer means a fast cleanup can still exit immediately.
 
 ## Cheat-card
 
-- **`uncaughtException`** = sync/async throw reached the top with no catch.
-- **`unhandledRejection`** = promise rejected, no handler. **Node ≥15 exits by default.**
-- **Golden rule:** handlers are for log + flush + `exit(1)`, never to resume.
-- **Resilience is external:** supervisor (systemd/PM2/K8s) + multiple instances.
-- **Graceful shutdown:** on `SIGTERM` stop accepting → drain → close pools → exit 0.
-- **Bound cleanup** with `setTimeout(...).unref()` force-exit.
-- **No floating promises** — always `await`/`.catch`; lint with `no-floating-promises`.
+- **`uncaughtException`:** a throw reached the top with no catch.
+- **`unhandledRejection`:** a promise rejected with no handler. Node 15 and later exit by default.
+- **Rule:** the handler logs, flushes, and exits 1. It does not resume.
+- **Resilience is outside the process:** a supervisor plus more than one instance.
+- **Graceful shutdown:** on SIGTERM, stop accepting, drain, close pools, exit 0.
+- **Bound cleanup** with `setTimeout(...).unref()`.
+- **No floating promises.** await or `.catch()`. Lint with `no-floating-promises`.
+
+## Good to know
+
+- **Why `unref()` on the force-exit timer?** A pending timer keeps the process alive. `unref()` means Node will not stay up only for that timer, so a fast cleanup can exit now, and a hung cleanup still hits the timer.
+- **How is crash-only design invisible to users?** Run more than one instance behind a load balancer, and restart each one with a supervisor. One crash drops only its in-flight requests. New traffic goes to the healthy instances.
 
 ---
 

@@ -13,61 +13,62 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Module resolution is the lookup Node runs on every `require` and every `import`. It turns a short string, the specifier, into one file on disk. A path that starts with `./` is a file next to the importer. A bare name like `express` is a walk up the folders named `node_modules`. A name like `node:fs` is a builtin that ships with Node, so there is no disk lookup.
+
+The lookup exists so a program can name a dependency without writing its absolute path. The trade-off is that the same string can mean different files. CommonJS guesses extensions. ES modules do not. And a package's `exports` map can hide files that are sitting on disk.
+
+A specifier is the string you pass to `require` or `import`.
+
 ## Why it matters
 
-Module resolution is the algorithm that turns a short string like `'express'` or `'./utils'` into one exact file on disk. It runs on every `require` and every `import`, and when it goes wrong you get the two most common Node errors in existence: `MODULE_NOT_FOUND` and `ERR_MODULE_NOT_FOUND`. Understanding resolution is what lets you answer questions that otherwise feel like black magic: "Why did it find version 2 of this package and not version 3?", "Why does `import 'pkg/internal'` suddenly fail after an upgrade?", "Why does my monorepo pick the wrong copy of a dependency?" These are all resolution questions.
+When the lookup fails you get `MODULE_NOT_FOUND` or `ERR_MODULE_NOT_FOUND`, the two errors you will see most often. The same algorithm answers the questions that otherwise feel like luck. Why did it load version 2 of a package and not version 3? Why did `import 'pkg/internal'` start failing after an upgrade? Why does a monorepo pick the wrong copy? Those are resolution questions.
 
-Resolution is also central to modern package design. The `exports` field and conditional exports let a package author decide precisely which files consumers can reach and whether they get the ESM or CommonJS build. If you publish libraries — or debug why a dependency behaves differently under `import` than `require` — resolution is the topic that explains it.
+If you publish a library, the `exports` field is how you decide which files a consumer can reach, and whether `import` and `require` get different builds.
 
 ## The concept, simply
 
-Every specifier you pass falls into one of three buckets, and each is resolved differently:
+Every specifier is one of three kinds, and each is resolved differently.
 
-- **Relative or absolute** — starts with `./`, `../`, or `/`. Node treats it as a path from the current file (or filesystem root) and looks for a matching file or directory.
-- **Bare specifier (a package name)** — `'express'`, `'lodash/fp'`, `'@scope/pkg'`. Node searches `node_modules` folders, walking up the directory tree.
-- **Builtin** — `'fs'`, `'path'`, or the explicit `'node:fs'` form. Resolved instantly from Node itself, no disk lookup.
+- **Relative or absolute.** It starts with `./`, `../`, or `/`. Node treats it as a path from the current file, or from the filesystem root, and looks for a matching file or directory.
+- **Bare specifier.** `'express'`, `'lodash/fp'`, `'@scope/pkg'`. Node searches `node_modules` folders, walking up the directory tree.
+- **Builtin.** `'fs'`, `'path'`, or the explicit `'node:fs'`. Resolved from Node itself. No disk lookup.
 
 ![Diagram of the three specifier types and a node_modules lookup walking up the directory tree from a source file to the filesystem root](assets/i10_01_27074a5e.svg)
 
-A specifier is relative/absolute, a bare package name, or a builtin. Package names trigger a walk up successive node\_modules folders until the package is found or the filesystem root is reached.
+A package name starts a walk from the file that imported it, through each parent `node_modules`, until the package is found or the filesystem root is reached.
 
 ## How it works
 
-**Relative/absolute resolution (CommonJS).** Given `require('./util')`, Node tries, in order: (1) the exact path as a file — `./util`; (2) the path plus extensions — `./util.js`, then `./util.json`, then `./util.node`; (3) the path as a directory — it reads `./util/package.json` and uses its `main` field, or falls back to `./util/index.js`. The first hit wins. This "try several extensions and an index file" behaviour is the convenient extension guessing that CommonJS is known for.
+**CommonJS relative paths.** `require('./util')` tries, in order, the exact file `./util`, then `./util.js`, `./util.json`, and `./util.node`, then the directory `./util`. For a directory it reads `package.json` and uses `main`, or falls back to `./util/index.js`. The first hit wins. That guessing is what CommonJS is known for.
 
-**Relative resolution (ESM) is stricter.** ES Modules do *not* guess extensions and do *not* auto-resolve `index.js` for a bare directory. `import './util'` fails; you must write `import './util.js'` or `import './util/index.js'` explicitly. This strictness is intentional — it makes resolution unambiguous and matches browser behaviour.
+**ESM relative paths are stricter.** ES modules do not guess extensions and do not look for `index.js` in a directory. `import './util'` fails. You write `import './util.js'` or `import './util/index.js'`. The strictness matches the browser, where a specifier is a URL.
 
-**Bare specifier resolution — the `node_modules` walk.** For `require('express')` from `/app/src/server.js`, Node looks for `express` in a series of `node_modules` directories, starting next to the file and climbing toward the root: `/app/src/node_modules/express`, then `/app/node_modules/express`, then `/node_modules/express`. The first one found wins. This upward walk is exactly why a nested dependency can have its own private copy of a package (in its local `node_modules`) while the top-level app uses a different version — the resolution starts from wherever the requiring file lives.
+**The `node_modules` walk.** `require('express')` from `/app/src/server.js` looks at `/app/src/node_modules/express`, then `/app/node_modules/express`, then `/node_modules/express`. The first hit wins. The walk starts from the file that called `require`, so a nested dependency can keep its own copy of a package while the app at the top uses another version.
 
-**Inside a found package.** Once Node locates `node_modules/express`, it reads that package's `package.json` to decide the entry file. Modern resolution consults the `exports` field first (if present); otherwise it uses `main` (and, for some tools, `module` or `browser`); with neither, it falls back to `index.js`. A subpath like `'lodash/fp'` means "the `fp` entry inside the `lodash` package," resolved either through the package's `exports` subpaths or as a literal file path when no `exports` map exists.
+**Inside the package.** Node reads that package's `package.json`. If `exports` is present, it is the only gateway. Otherwise Node uses `main`, and some tools also look at `module` or `browser`. With none of those, it falls back to `index.js`. A subpath like `'lodash/fp'` is the `fp` entry inside `lodash`, either an `exports` key or a literal file when there is no `exports` map.
 
-**The `exports` field — encapsulation.** When a package declares `"exports"`, it becomes the *only* gateway into the package. Any file not listed is unreachable, even if it physically exists — `import 'pkg/lib/internal.js'` throws `ERR_PACKAGE_PATH_NOT_EXPORTED`. This lets authors ship internal files without them becoming part of the public API. The map keys are subpaths (`"."` is the package root, `"./utils"` a named subpath) and the values are the real files.
+**`exports` encapsulates.** Any file not listed is unreachable, even if it exists. `import 'pkg/lib/internal.js'` throws `ERR_PACKAGE_PATH_NOT_EXPORTED`. The key `"."` is the package root. `"./utils"` is a named subpath. The value is the real file.
 
 ![Diagram showing a package.json exports map with import, require and types conditions, and which import specifiers resolve or are blocked](assets/i10_02_e60cb885.svg)
 
-The exports field maps public subpaths to real files and can branch on conditions like import vs require; anything not listed becomes private and un-importable.
+An entry can be an object of conditions, matched top to bottom. Node takes the first key that applies and stops. It does not merge branches. `"default"` matches anything, so it must be last. `"types"` is where TypeScript looks, and it must come first or TypeScript resolves a JavaScript file before it sees the declarations.
 
-**Conditional exports.** An entry can be an object whose keys are *conditions* Node evaluates against the current environment, matched top-to-bottom (order matters):
-
-- `"import"` — used when the package is loaded via `import` / `await import()` (ESM).
-- `"require"` — used when loaded via `require()` (CJS).
-- `"node"`, `"browser"`, `"default"` — platform/fallback conditions; `"default"` matches anything and should come last.
-- `"types"` — where TypeScript should look for declarations (must come first among conditions).
-
-This is how one package serves an ESM build to `import` and a CommonJS build to `require` from the same install — the classic "dual package." It is also the mechanism behind subtle bugs where the `import` and `require` paths load different files with slightly different behaviour.
-
-**Conditions are matched, not merged.** Node walks the condition keys of an `exports` object *in the order they are written* and takes the first one that applies to the current request, then stops — it never blends two branches. That single rule explains most misconfigured packages: if `"default"` sits above `"import"`, the ESM branch is dead code because `"default"` already matched; if `"types"` is not first, TypeScript resolves a JavaScript file before it ever sees the declarations. A request also carries more than one active condition at once — an `import` from Node matches *both* `"import"` and `"node"` — so specificity, not just presence, decides the winner, and the author controls that purely through key order. The table below shows what is active for common load styles.
-
-| How the package is loaded | Active conditions (most to least specific) |
+| How the package is loaded | Active conditions, most specific first |
 | --- | --- |
 | `import 'pkg'` in Node | `node`, `import`, `module-sync`, `default` |
 | `require('pkg')` in Node | `node`, `require`, `default` |
-| bundled for the browser | `browser`, `import`/`require`, `default` |
-| type-checked by TypeScript | `types` (must precede the runtime keys), then the runtime set |
+| bundled for the browser | `browser`, then `import` or `require`, then `default` |
+| type-checked by TypeScript | `types` first, then the runtime set |
 
-**Self-referencing and the resolution's endpoint.** A useful consequence of the `exports` map is that a package can import *itself* by name — `import { thing } from 'mylib'` from inside `mylib` resolves through its own `exports`, so tests and internal files exercise the exact public surface consumers see, not a relative shortcut that skips the map. Whichever branch is chosen, resolution ends the same way for every specifier type: the algorithm produces one absolute path (CommonJS) or one `file:` URL (ESM), and that fully-resolved string — not the original specifier — is the key used for caching. Two different specifiers that resolve to the same real file therefore share one cached instance, which is why a symlinked or path-aliased dependency can accidentally load twice if the two routes normalise to different absolute paths.
+An `import` from Node matches both `"import"` and `"node"`, so the author's key order decides which one wins. `"import": "./esm.js"` and `"require": "./cjs.js"` is the dual package. The two builds can hold separate state. That is the dual package hazard.
 
-**Other resolution features.** `imports` (with keys starting `#`) defines private, internal-only aliases usable within the package (`import x from '#internal/thing'`). The `NODE_PATH` environment variable adds extra global lookup directories but is discouraged. `require.resolve('pkg')` runs the algorithm and returns the resolved path without loading — invaluable for debugging "which file is this actually?".
+**Where it ends.** The result is one absolute path for CommonJS, or one `file:` URL for ESM. That string, not the original specifier, is the cache key. Two specifiers that resolve to the same real file share one instance. Two routes that normalise to different absolute paths load twice.
+
+A package can import itself by name. `import { thing } from 'mylib'` from inside `mylib` goes through its own `exports`, so tests hit the public surface.
+
+**The rest.** The `imports` field, keys starting with `#`, is a private alias usable only inside that package. `NODE_PATH` adds extra lookup directories and is discouraged. `require.resolve('pkg')` runs the algorithm and returns the path without loading the file. `module.paths` is the folder list the walk would use.
 
 ## Code examples
 
@@ -83,6 +84,7 @@ console.log(require.resolve('./utils'));
 // e.g. /app/src/utils/index.js
 console.log(module.paths); // the ordered node_modules dirs Node will search
 ```
+
 
 **2. A dual-package `exports` map.**
 
@@ -105,6 +107,7 @@ json
 }
 ```
 
+
 **3. Encapsulation in action.**
 
 javascript
@@ -115,6 +118,7 @@ import u from 'mylib/utils';        // -> dist/utils.js (listed subpath)
 import x from 'mylib/dist/secret.js';
 // throws ERR_PACKAGE_PATH_NOT_EXPORTED — not listed in "exports"
 ```
+
 
 **4. Internal imports with the `#` prefix.**
 
@@ -129,6 +133,7 @@ json
 }
 ```
 
+
 javascript
 
 ```
@@ -137,53 +142,60 @@ import config from '#config';         // -> ./src/config.js
 import { slug } from '#utils/string'; // -> ./src/utils/string.js
 ```
 
+
 ## Common mistakes & gotchas
 
-- **Relying on extension guessing in ESM.** Works in CJS, fails in ESM — always write the full filename in `import`.
-- **Reaching into a package's internals.** `import 'pkg/lib/x'` breaks when the author adds an `exports` field. Use only documented entry points.
-- **Duplicate copies of a package.** The upward `node_modules` walk can load two versions of the same library (e.g. two React copies), causing "invalid hook" style bugs. Diagnose with `require.resolve` and `npm ls pkg`.
-- **Wrong condition order.** Putting `"default"` before `"import"` in `exports` makes `"default"` always win; conditions match top-down, so specific ones come first and `"default"` last.
-- **Forgetting `"types"` first.** TypeScript needs the `"types"` condition to appear before `"import"`/`"require"` or it won't find declarations.
-- **Assuming `main` still applies with `exports`.** When `exports` is present it takes precedence for module resolution; `main` becomes a fallback for legacy tools only.
-- **Casing on case-insensitive filesystems.** `require('./Util')` may work on macOS/Windows but fail on Linux/CI. Match the real filename exactly.
-- **Abusing `NODE_PATH`.** It hides real dependencies and is non-portable; declare deps in `package.json` instead.
+- **Extension guessing in ESM.** It works in CommonJS and fails in ESM. Write the full filename.
+- **Reaching into internals.** `import 'pkg/lib/x'` breaks the day the author adds `exports`. Use documented entry points.
+- **Two copies of one package.** The walk can load two versions, for example two Reacts, which is the classic invalid-hook bug. Check with `require.resolve` and `npm ls pkg`.
+- **`"default"` before `"import"`.** Conditions match top to bottom, so `"default"` always wins and the ESM branch is dead.
+- **`"types"` not first.** TypeScript never sees the declarations.
+- **Assuming `main` still applies.** When `exports` is present, it wins. `main` is only a fallback for old tools.
+- **Wrong casing.** `require('./Util')` can work on macOS or Windows and fail on Linux. Match the filename.
+- **`NODE_PATH`.** It hides real dependencies and is not portable. Declare dependencies in `package.json`.
 
 ## Best practices
 
-- Use `require.resolve('pkg')` and `npm ls pkg` to confirm exactly which file/version is loaded when debugging.
-- Import packages only through their documented entry points, never deep internal paths.
-- When publishing, define an `exports` field to encapsulate internals and to serve correct ESM/CJS builds via conditions.
-- Order conditions carefully: `"types"` first, then `"import"`/`"require"`, with `"default"` last.
-- Prefer the `#`-prefixed `imports` map for internal aliases over brittle relative-path chains.
-- Write full file extensions in every relative ESM specifier.
-- Keep the dependency tree flat and deduped (lockfile + `npm dedupe`) to avoid duplicate-copy bugs.
+- Debug with `require.resolve('pkg')`, `module.paths`, and `npm ls pkg`.
+- Import only documented entry points.
+- When you publish, set `exports` so internals stay private and `import` and `require` get the right build.
+- Order conditions `"types"` first, then `"import"` and `"require"`, and `"default"` last.
+- Use a `#` alias in `imports` instead of a long `../../` chain.
+- Write the extension on every relative ESM specifier.
+- Keep the tree deduped, with a lockfile and `npm dedupe`, so you do not load two copies.
 
 ## ⭐ Interview lens
 
-> **Q: Walk me through how Node resolves `require('express')`.** It is a bare specifier, so Node searches `node_modules` folders from the requiring file's directory upward: `./node_modules/express`, `../node_modules/express`, and so on to the filesystem root. On the first hit it reads that package's `package.json`, consulting `exports` (else `main`, else `index.js`) to pick the entry file.
+> **Q: Walk me through how Node resolves `require('express')`.**
+> `express` is a bare specifier, a package name with no path. Node does not look at the current directory. It walks `node_modules` folders from the file that called `require`, upward: `./node_modules/express`, then `../node_modules/express`, and so on to the filesystem root. The first hit wins. Node then reads that package's `package.json` and picks the entry from `exports` if it exists, otherwise `main`, otherwise `index.js`. For example, `/app/src/server.js` checks `/app/src/node_modules/express` before `/app/node_modules/express`. The limit is a second copy. A nested package can keep its own `express` in its own `node_modules`, and the walk from that file finds that copy first.
 
-> **Q: How does resolving `'./util'` differ between CJS and ESM?** CJS tries `util`, then `util.js/.json/.node`, then `util/index.js` — it guesses extensions and index files. ESM does none of that; you must write the exact filename with extension. Trap: code that "worked" is really relying on CJS guessing and breaks on the switch to ESM.
+> **Q: How does resolving `'./util'` differ between CJS and ESM?**
+> CommonJS guesses. It tries the exact file `util`, then `util.js`, `util.json`, and `util.node`, then the directory `util` with its `package.json` `main` or `util/index.js`. ESM does none of that. The specifier is a URL, so you write the exact filename, `./util.js`. For example, `require('./util')` succeeds when `util.js` exists, and `import './util'` throws `ERR_MODULE_NOT_FOUND` for the same file. The limit of "it worked in my last project" is that the last project was CommonJS. The guess does not come with you when you switch.
 
-> **Q: What does the `exports` field do that `main` doesn't?** It *encapsulates* the package — only listed subpaths are importable, everything else becomes private (`ERR_PACKAGE_PATH_NOT_EXPORTED`) — and it supports *conditional* resolution (different files for `import` vs `require`, node vs browser). `main` is a single legacy entry point with no encapsulation or conditions.
+> **Q: What does the `exports` field do that `main` doesn't?**
+> `main` is one entry file and nothing else. Anyone can still import any file in the package by path. `exports` replaces that. Only the subpaths you list are importable, and anything else throws `ERR_PACKAGE_PATH_NOT_EXPORTED` even if the file is on disk. Each entry can also be conditional, so `import` and `require`, or Node and the browser, get different files. For example, `"."` can point at `./esm.js` for `import` and `./cjs.js` for `require`, while `./lib/internal.js` becomes private. The limit is key order. Node takes the first matching condition and stops. Put `"default"` above `"import"` and the ESM file is never used.
 
-> **Q: How can one `require` and `import` of the same package load different code?** Via conditional exports: `"exports": { ".": { "import": "./esm.js", "require": "./cjs.js" } }`. Node picks the branch matching how the package was loaded. This is the dual-package pattern (and a source of "dual package hazard" if the two builds hold separate state).
-
-> **Q: You suspect two versions of a library are loaded. How do you confirm?** `require.resolve('lib')` from different files shows the actual paths; `npm ls lib` shows every version in the tree. Duplicates arise because the `node_modules` walk resolves from each file's location, so nested deps can pin their own copy.
-
-> **Q: What is the `#` in `import '#config'`?** A package-internal import defined in the `imports` field of `package.json`. It creates a private alias usable only inside that package — a clean alternative to long `../../` relative chains.
+> **Q: How can one `require` and `import` of the same package load different code?**
+> Conditional exports. The package sets `"exports": { ".": { "import": "./esm.js", "require": "./cjs.js" } }`. Node matches the condition for how the package was loaded and stops. `import 'pkg'` gets `esm.js`. `require('pkg')` gets `cjs.js`. That is the dual package pattern. The limit is state. The two files are two module instances, so a cache, a counter, or a connection opened in one is invisible to the other. That split is the dual package hazard.
 
 ## Cheat-card
 
-- **Three specifier types:** relative/absolute · bare (package) · builtin (`node:`).
-- **CJS relative:** exact → +`.js/.json/.node` → `dir/index.js`. **ESM:** exact filename only.
-- **Bare:** walk `node_modules` upward to root; first hit wins.
-- **Entry pick:** `exports` → `main` → `index.js`.
-- **`exports` field** encapsulates: unlisted paths = `ERR_PACKAGE_PATH_NOT_EXPORTED`.
-- **Conditions** (top-down): `types` → `import`/`require`/`node`/`browser` → `default` last.
-- **`imports` + `#`** = private internal aliases.
-- **Debug:** `require.resolve('x')`, `module.paths`, `npm ls x`.
-- **Subpath patterns:** `"./features/*": "./src/features/*.js"`; `*` is plain string substitution (may contain `/`); the longest prefix wins; a `null` target blocks a subfolder (`ERR_PACKAGE_PATH_NOT_EXPORTED`).
-- **Symlinks:** Node resolves a symlinked module to its real path (cache key and lookup base); pnpm's `.pnpm` layout depends on it; `--preserve-symlinks` keeps the link path and breaks that layout.
+- Three specifier types: relative or absolute, bare package name, builtin (`node:`).
+- CommonJS relative: exact, then `.js`, `.json`, `.node`, then `dir/index.js`. ESM: the exact filename only.
+- Bare: walk `node_modules` upward. First hit wins.
+- Entry: `exports`, else `main`, else `index.js`.
+- `exports` encapsulates. An unlisted path is `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+- Conditions, top to bottom: `types`, then `import` or `require` or `node` or `browser`, then `default` last.
+- `imports` with `#` is a private alias.
+- Debug: `require.resolve('x')`, `module.paths`, `npm ls x`.
+- The cache key is the resolved absolute path or `file:` URL, not the specifier you wrote.
+
+## Good to know
+
+- Q: You suspect two versions of a library are loaded. How do you confirm? `require.resolve('lib')` from different files shows the paths. `npm ls lib` shows every version. Duplicates happen because the walk starts from each file, so a nested dependency can pin its own copy.
+- Q: What is the `#` in `import '#config'`? A private alias from the `imports` field of `package.json`. It works only inside that package, instead of a long relative chain.
+- Subpath patterns, a key with one `*`, were added in v14.13.0 and v12.20.0. Trailers such as `./features/*.js` were added in v16.9.0 and v14.19.0. `*` is plain substitution and may contain `/`. The longest prefix wins. A `null` target throws `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+- `--preserve-symlinks` was added in v6.3.0 and keeps the symlink path for dependencies. `--preserve-symlinks-main` was added in v10.2.0 and does the same for the entry file. pnpm 10.34.6 with `debug` 4.4.3 and `ms` 2.1.3 depends on the default, which realpaths the link and looks up dependencies from that real path.
 
 ---
 
@@ -195,23 +207,23 @@ import { slug } from '#utils/string'; // -> ./src/utils/string.js
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### Subpath patterns in `exports`
 
-A subpath pattern is an `exports` key containing one `*`, such as `"./features/*": "./src/features/*.js"` (added in v14.13.0 and v12.20.0; pattern trailers like `"./features/*.js"` added in v16.9.0 and v14.19.0). It lets a package with dozens of entry points expose a whole folder without listing every file, while still keeping everything outside that folder private. A `null` target (`"./features/internal/*": null`) carves a private hole out of a pattern. Without patterns, authors either list every file by hand or drop `exports` entirely, which makes every internal file importable.
+A subpath pattern is an `exports` key with one `*`, such as `"./features/*": "./src/features/*.js"`. It exposes a whole folder without listing every file, and everything outside that folder stays private. A `null` target, `"./features/internal/*": null`, cuts a private hole out of a broader pattern. Without patterns, an author lists every file or drops `exports` and makes every internal file importable. The version dates are in Good to know.
 
-How it works:
+1. Node takes the specifier after the package name and prefixes `./`. `feat-kit/features/billing` becomes `./features/billing`.
+2. An exact key wins. Otherwise Node picks the pattern with the longest matching prefix before the `*`. `"./features/internal/*"` beats `"./features/*"` for `./features/internal/flags`.
+3. The text the `*` matched is substituted into every `*` on the right. It is plain replacement. The match may contain `/`. Node adds no extension and strips none.
+4. A `null` target, or no matching key, throws `ERR_PACKAGE_PATH_NOT_EXPORTED`, even if the file exists.
+5. If the target file does not exist, the error is `ERR_MODULE_NOT_FOUND` for ESM, or `MODULE_NOT_FOUND` for CommonJS.
 
-1. Node takes the part of the specifier after the package name, prefixed with `./` (`feat-kit/features/billing` gives `./features/billing`).
-2. It looks for an exact key first. If none matches, it compares the subpath with every pattern key and picks the one with the **longest matching prefix** before the `*`, so `"./features/internal/*"` beats `"./features/*"` for `./features/internal/flags`.
-3. The text the `*` matched is substituted into every `*` on the right-hand side. It is plain string replacement: the match may contain `/`, and Node adds no extension and strips none.
-4. If the chosen target is `null`, Node throws `ERR_PACKAGE_PATH_NOT_EXPORTED`. If no key matches at all, it throws the same error, even if the file exists on disk.
-5. Otherwise the target file is loaded; if it does not exist, the error is `ERR_MODULE_NOT_FOUND` (ESM) or `MODULE_NOT_FOUND` (CommonJS).
-
-**Example — patterns, a `null` hole, and the extension trap.** `node_modules/feat-kit/package.json`:
+**Example. Patterns, a `null` hole, and the extension trap.** `node_modules/feat-kit/package.json`:
 
 json
 
@@ -251,7 +263,7 @@ for (const s of specs) {
 }
 ```
 
-Real output (Node v24.19.0; `…` replaces the scratch directory path):
+Real output on Node v24.19.0. The `…` in the fence replaces the scratch directory.
 
 bash
 
@@ -274,11 +286,11 @@ $ node -e "require('feat-kit/features/internal/flags')" 2>&1 | grep -m1 Error | 
 Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: Package subpath './features/internal/flags' is not defined by "exports" in …/node_modules/feat-kit/package.json
 ```
 
-The third line is the trap: because the key's `*` already maps to `*.js`, a consumer who writes the extension gets `billing.js.js`. Decide on one style. Either write keys without extensions (as here) and tell consumers to omit them, or use trailers on both sides (`"./features/*.js": "./src/features/*.js"`), which also restricts the export to `.js` files.
+The third line is the trap. Because the key's `*` already maps onto `*.js`, a consumer who writes the extension loads `billing.js.js`. Pick one style. Keys without extensions, and tell consumers to omit them, or trailers on both sides, `"./features/*.js": "./src/features/*.js"`, which also limits the export to `.js` files.
 
 ### Symlinks and the pnpm layout
 
-pnpm builds `node_modules` out of symlinks. Every package version lives once, at `node_modules/.pnpm/<name>@<version>/node_modules/<name>`, with its own dependencies as symlinked siblings in that same inner `node_modules`. The project's top-level `node_modules` holds only symlinks for the dependencies the project declares. This only works because of one Node rule: **by default the module loader resolves a symlinked module to its real path and uses that real path both as the cache key and as the starting point for the module's own `node_modules` lookups.** Without that rule, a package reached through `node_modules/debug` would look for its dependencies next to the symlink, where pnpm deliberately put nothing.
+pnpm builds `node_modules` out of symlinks. Each package version lives once, at `node_modules/.pnpm/<name>@<version>/node_modules/<name>`, with its own dependencies as sibling symlinks in that inner `node_modules`. The project's top-level `node_modules` holds symlinks only for the dependencies the project declares. This works because Node, by default, resolves a symlinked module to its real path and uses that real path as the cache key and as the start of that module's own `node_modules` walk. Without that, a package reached through `node_modules/debug` would look for dependencies next to the symlink, where pnpm put nothing.
 
 text
 
@@ -295,15 +307,13 @@ app/
             └── ms/              real files
 ```
 
-How it works:
+1. `require('debug')` from `app/index.js` finds `app/node_modules/debug`, a symlink.
+2. Node calls `realpath` and gets `app/node_modules/.pnpm/debug@4.4.3/node_modules/debug`. That real path is the module's `filename` and its `require.cache` key.
+3. Inside `debug`, `require('ms')` walks from the real path and finds the sibling symlink `.pnpm/debug@4.4.3/node_modules/ms`.
+4. `ms` is realpathed to `.pnpm/ms@2.1.3/node_modules/ms`. Every dependent of `ms@2.1.3` shares that path and one module instance.
+5. `--preserve-symlinks` skips step 2 for dependencies. The walk then starts at `app/node_modules/debug/src`, never passes the `.pnpm` sibling folder, and fails.
 
-1. `require('debug')` from `app/index.js` walks up and finds `app/node_modules/debug`, which is a symlink.
-2. Node calls `realpath` on it and gets `app/node_modules/.pnpm/debug@4.4.3/node_modules/debug`. That real path becomes the module's `filename` and its `require.cache` key.
-3. Inside `debug`, `require('ms')` starts the walk from the real path: `…/debug/src/node_modules`, `…/debug/node_modules`, then `.pnpm/debug@4.4.3/node_modules/ms`, the sibling symlink, which is found.
-4. `ms` is again resolved to its real path, `.pnpm/ms@2.1.3/node_modules/ms`. Any other package that depends on `ms@2.1.3` resolves to that same real path, so they share one module instance.
-5. `--preserve-symlinks` (added in v6.3.0) switches step 2 off for dependencies: Node keeps the symlink path as the identifier and walks from there. `--preserve-symlinks-main` (added in v10.2.0) does the same for the entry file. With pnpm, step 3 then walks from `app/node_modules/debug/src`, never passes the `.pnpm` sibling folder, and fails.
-
-**Example — symlink, realpath and the cache key.** A pnpm 10.34.6 project with `"dependencies": { "debug": "4.4.3", "ms": "2.1.3" }`, and `where.cjs`:
+**Example. Symlink, realpath, and the cache key.** A pnpm 10.34.6 project with `debug` 4.4.3 and `ms` 2.1.3, and `where.cjs`:
 
 javascript
 
@@ -321,7 +331,6 @@ const keys = Object.keys(require.cache).filter((k) => k.includes(`${path.sep}ms$
 console.log('require.cache key:', keys.map(rel));
 ```
 
-Real output:
 
 bash
 
@@ -338,19 +347,15 @@ resolve : node_modules/ms/index.js
 require.cache key: [ 'node_modules/ms/index.js' ]
 ```
 
-By default the cache key is the real path inside `.pnpm`. With `--preserve-symlinks` the same file is identified by the symlink path, so a second route to the same files (for example, a workspace package linked from two places) would produce a second module instance.
+By default the cache key is the real path inside `.pnpm`. With `--preserve-symlinks` the same file is identified by the symlink path, so a second route to the same files produces a second module instance.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **Writing the extension twice.** With `"./features/*": "./src/features/*.js"`, the specifier `pkg/features/x.js` loads `x.js.js`. Match the consumer-facing style to the key.
-- **Expecting the most general pattern to win.** Node picks the key with the longest prefix before the `*`, so a `null` entry for a subfolder blocks it even though a broader pattern also matches.
-- **Thinking `null` deletes files.** A `null` target only blocks the specifier; the file is still on disk and still reachable by its absolute path. `exports` controls specifiers, not file access.
-- **Turning on `--preserve-symlinks` in a pnpm project.** pnpm's layout depends on real-path resolution; dependencies of dependencies stop resolving (edge case below).
-- **Comparing paths from `require.resolve` with symlink paths.** Under default settings `require.resolve` returns the real path inside `.pnpm`, not `node_modules/<name>/…`. Code that checks `filename.includes('node_modules/debug/')` misses it.
+- **Expecting the most general pattern to win.** Node picks the longest prefix before the `*`. A `null` entry for a subfolder blocks it even when a broader pattern also matches.
+- **`--preserve-symlinks` in a pnpm project.** The layout depends on real-path resolution. Dependencies of dependencies stop resolving. The edge case below is the failure.
+- **Comparing `require.resolve` with symlink paths.** By default it returns the real path inside `.pnpm`, not `node_modules/<name>/`. A check for `filename.includes('node_modules/debug/')` misses it.
 
 ### Edge case worked through: `--preserve-symlinks` breaks a pnpm install
-
-The project declares only `debug`; `debug` declares `ms`. `run.cjs`:
 
 javascript
 
@@ -367,6 +372,7 @@ try {
   console.log(e.code, '-', e.message.split('\n')[0]);
 }
 ```
+
 
 bash
 
@@ -395,12 +401,12 @@ debug resolves to: node_modules/debug/src/index.js
 MODULE_NOT_FOUND - Cannot find module 'ms'
 ```
 
-With default resolution, `debug`'s real path sits inside `.pnpm/debug@4.4.3/node_modules/`, next to its `ms` symlink, so `require('ms')` succeeds. With `--preserve-symlinks`, `debug` is identified as `node_modules/debug/src/index.js`, its walk checks `node_modules/debug/src/node_modules`, `node_modules/debug/node_modules` and `node_modules/ms`, finds nothing, and fails. (`.pnpm/node_modules/ms` is pnpm's hidden hoisting folder; it is not on that walk either.) The Node docs describe the opposite failure for this flag too: a native addon reached through two symlink paths is loaded twice.
+With default resolution, `debug`'s real path sits inside `.pnpm/debug@4.4.3/node_modules/`, next to its `ms` symlink, so `require('ms')` succeeds. With `--preserve-symlinks`, `debug` is identified as `node_modules/debug/src/index.js`. The walk checks `node_modules/debug/src/node_modules`, `node_modules/debug/node_modules`, and `node_modules/ms`, finds nothing, and fails. `.pnpm/node_modules/ms` is pnpm's hidden hoisting folder, and it is not on that walk either. The Node docs describe the opposite failure for this flag too: a native addon reached through two symlink paths is loaded twice.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “A package exports `"./features/*": "./src/features/*.js"`. What do `pkg/features/a/b` and `pkg/features/a.js` load?”**  
-> A: `*` is plain string substitution and may contain `/`, so `pkg/features/a/b` loads `./src/features/a/b.js`. `pkg/features/a.js` substitutes `a.js` and loads `./src/features/a.js.js`, which fails with `ERR_MODULE_NOT_FOUND`. A file outside `src/features`, or one under a `null`-targeted key, fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`.
+> `*` is plain string substitution and may contain `/`, so `pkg/features/a/b` loads `./src/features/a/b.js`. `pkg/features/a.js` substitutes `a.js` and loads `./src/features/a.js.js`, which fails with `ERR_MODULE_NOT_FOUND`. A file outside `src/features`, or one under a `null` target, fails with `ERR_PACKAGE_PATH_NOT_EXPORTED`. The limit is assuming Node adds the `.js` for you. It does not.
 
 > **Q: “How can pnpm's symlinked `node_modules` work when Node knows nothing about pnpm?”**  
-> A: Node resolves a symlinked module to its real path and then resolves that module's own imports from the real location. pnpm puts each package's dependencies next to its real location inside `.pnpm/<name>@<version>/node_modules`, so the normal walk finds them, and every dependent of the same version shares one real path and one cached instance. `--preserve-symlinks` disables that and breaks the layout.
+> Node resolves a symlinked module to its real path, then resolves that module's own imports from the real location. pnpm puts each package's dependencies next to its real location, inside `.pnpm/<name>@<version>/node_modules`, so the ordinary walk finds them, and every dependent of the same version shares one real path and one cached instance. `--preserve-symlinks` turns that off and the layout breaks. The limit is a path check written against `node_modules/debug/`. The real filename is under `.pnpm`.

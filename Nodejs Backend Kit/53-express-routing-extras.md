@@ -13,20 +13,24 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+Express turns a route string into a regular expression with a library called path-to-regexp, then walks those patterns from top to bottom. Express 5 uses a stricter version of that library, so an old optional marker such as a question mark throws when the app starts, and you write the optional part in braces instead. Parameter callbacks, mounted routers, and two skip commands, one for the rest of the current route and one for the rest of the current router, exist so a large API can share work and still know which part of the URL it is looking at. The trade-off is that each router sees only the parameters it captured itself, unless you opt in to merging them.
+
 ## Why it matters
 
-Lesson 48 ([Routing: params, query, and Routers](48-routing-params-query-and-routers.md)) covers the routing you write every day: `app.get('/users/:id')`, `req.query`, one Router per resource. Real codebases also use the less common parts of the router, and those are the parts Express 5 changed:
+Lesson 48 covers the routing you write every day: `app.get('/users/:id')`, `req.query`, and one Router per resource. Real code also uses the less common parts, and those are the parts Express 5 changed.
 
-- **Path strings from Express 4 now throw at startup.** `'/users/:id?'`, `'/files/*'` and `'/user/:id(\\d+)'` were all legal in Express 4. In Express 5 the same line throws a `PathError` while the app starts, before it serves a single request.
-- **Express 5 strings on Express 4 fail without any error.** If you copy `'/files/*splat'` from an Express 5 example into an Express 4 app, Express 4 accepts it and then answers 404 for the URLs you meant it to match.
-- **Nested routers lose parameters.** A router mounted at `/users/:userId/posts` does not see `:userId` unless it was created with `mergeParams: true`.
-- **Logs and redirects use the wrong URL.** Inside a mounted router, `req.url` has the mount path removed. Code that logs or redirects to `req.url` sends the wrong path.
+- Path strings from Express 4 now throw at startup. `'/users/:id?'`, `'/files/*'`, and `'/user/:id(\\d+)'` were legal in Express 4. In Express 5 the same line throws a `PathError` before the app serves a request.
+- The new strings fail quietly on Express 4. Copy `'/files/*splat'` into an Express 4 app and it accepts the route, then answers 404 for the URLs you meant.
+- A router mounted at `/users/:userId/posts` does not see `:userId` unless it was created with `mergeParams: true`.
+- Inside a mounted router, `req.url` has the mount path removed. Logging or redirecting to `req.url` sends the wrong path.
 
-This lesson covers the rest of the routing API: `app.param` / `router.param`, RegExp routes, optional segments, the Express 5 path syntax and what broke, `mergeParams`, `app.all`, how mount paths are stripped, and `next('route')` against `next('router')`.
+This lesson covers `app.param`, RegExp routes, optional segments, the Express 5 path syntax, `mergeParams`, `app.all`, how mount paths are stripped, and `next('route')` against `next('router')`.
 
 ## The concept, simply
 
-A route path is a small pattern language. Express hands the string to a library called **path-to-regexp**, which compiles it into a regular expression plus a list of parameter names. Express 4.22.3 uses path-to-regexp **0.1.13**, a very old line. Express 5.3.0 uses the separate **router** package (2.2.0), which uses path-to-regexp **8.4.2** (changed in v5):
+A route path is a small pattern language. Express hands the string to path-to-regexp, which compiles it into a regular expression plus a list of parameter names. Express 4.22.3 uses path-to-regexp 0.1.13. Express 5.3.0 uses the separate router package 2.2.0, which uses path-to-regexp 8.4.2.
 
 bash
 
@@ -40,39 +44,35 @@ $ npm ls path-to-regexp
   └── path-to-regexp@0.1.13
 ```
 
-Version 8 has a smaller pattern language than 0.1:
+Version 8 has a smaller pattern language than 0.1.
 
-- `:name` matches one path segment, as before.
-- `*name` (a **named wildcard**) matches one or more whole segments. Its value is an **array** of segments, not a string.
-- `{ … }` (**braces**) mark an optional part: `'/users{/:id}'` matches both `/users` and `/users/7`.
-- The characters `( ) [ ] ? + !` are reserved and throw if they appear unescaped. That removes Express 4's `?` (optional), `+` (repeat), `*` (unnamed wildcard) and `(…)` (inline regex).
+- `:name` still matches one path segment.
+- `*name`, a named wildcard, matches one or more whole segments. Its value is an array of segments, not a string.
+- Braces mark an optional part. `'/users{/:id}'` matches both `/users` and `/users/7`.
+- The characters `( ) [ ] ? + !` are reserved. They throw if they appear unescaped. That removes Express 4's `?` for optional, `+` for repeat, `*` for an unnamed wildcard, and parentheses for an inline regular expression.
 
-If a string pattern is not enough, pass a real `RegExp` object as the path, or an array of paths.
+If a string is not enough, pass a real `RegExp`, or an array of paths.
 
-Three more routing tools sit on top of the patterns:
-
-- **`app.param(name, fn)`** runs `fn` before the route handlers whenever a route with `:name` matches. It typically loads the record for an id.
-- **`mergeParams`** is an option on `express.Router()`. With it, a child router can read the parameters captured by its parent's mount path.
-- **`next('route')` and `next('router')`** are the two exits that are not errors. `next('route')` skips the rest of the current route. `next('router')` leaves the current router.
+Three more tools sit on the patterns. `app.param(name, fn)` runs `fn` before the handlers whenever a route with that `:name` matches. It usually loads the record for an id. `mergeParams` is an option on `express.Router()`. With it, a child router can read parameters the parent's mount path captured. `next('route')` and `next('router')` are the two exits that are not errors. `next('route')` skips the rest of the current route. `next('router')` leaves the current router.
 
 ## How it works
 
-When a request arrives, Express walks the app's stack of layers. For each layer:
+When a request arrives, Express walks the stack of layers.
 
-1. **Match the path.** Each layer holds the regex that path-to-regexp compiled when you called `app.get()`/`app.use()`. A route layer (`app.METHOD`) must match the whole path. A `use` layer (`app.use`, `router.use`) only has to match a prefix that ends on a segment boundary.
-2. **Collect parameters.** Capture groups become `req.params`. In Express 5, `req.params` for a string path is an object with a null prototype. A wildcard gives an array, and an optional group that did not match leaves its key out entirely. In Express 4 the key was present with the value `undefined`.
-3. **Run param callbacks.** Before the first handler of a matched route runs, Express runs each `app.param`/`router.param` callback registered on *this* router for the parameters in that route. The callback receives `(req, res, next, value, name)`. Express records which parameters it has already processed in this request. If a later route matches the same parameter with the same value, the callback does not run again.
-4. **Run the handlers.** `next()` moves to the next handler or layer. `next('route')` skips the remaining handlers of the current route (it works only inside `app.METHOD`/`router.METHOD`/`app.all`). `next('router')` skips everything left in the current router and resumes in the parent. Any other argument is an error.
+1. **Match the path.** Each layer holds the regex compiled when you called `app.get` or `app.use`. A route layer must match the whole path. A `use` layer only has to match a prefix that ends on a segment boundary.
+2. **Collect parameters.** Capture groups become `req.params`. On Express 5, `req.params` for a string path is an object with a null prototype. A wildcard gives an array. An optional group that did not match leaves its key out. On Express 4 the key was present with the value `undefined`.
+3. **Run param callbacks.** Before the first handler of a matched route, Express runs each `app.param` or `router.param` callback on this router for the parameters in that route. The callback receives `(req, res, next, value, name)`. Express remembers which parameters it has already processed in this request. A later route with the same parameter and the same value does not run the callback again.
+4. **Run the handlers.** `next()` moves to the next handler or layer. `next('route')` skips the remaining handlers of the current route. It works only inside `app.METHOD`, `router.METHOD`, or `app.all`. `next('router')` skips the rest of the current router and resumes in the parent. Any other argument is an error.
 5. **Descend into routers.** For a `use` layer that holds a Router, Express strips the matched prefix and calls the router with the shorter URL.
 
-**Mount paths are stripped, then restored.** When `app.use('/api', api)` matches `/api/orgs/acme/users/42?tab=posts`, Express adds the matched prefix to `req.baseUrl` (`'/api'`) and rewrites `req.url` to the rest (`'/orgs/acme/users/42?tab=posts'`). `req.path` is the pathname part of the rewritten `req.url`. A nested mount (`api.use('/orgs/:orgId/users', users)`) does the same again, so inside `users` you see `baseUrl = '/api/orgs/acme/users'` (with the real parameter value in it) and `path = '/42'`. `req.originalUrl` is never rewritten. If the router finishes without responding, Express puts `req.url` and `req.baseUrl` back before it moves on to the next app-level layer (Example 6 shows the `after` line). Routes inside a router are therefore written relative to the mount: `router.get('/:id')` answers `GET /api/users/42` when the router is mounted at `/api/users`.
+**Mount paths are stripped, then restored.** When `app.use('/api', api)` matches `/api/orgs/acme/users/42?tab=posts`, Express sets `req.baseUrl` to `'/api'` and rewrites `req.url` to `'/orgs/acme/users/42?tab=posts'`. `req.path` is the pathname part of that rewritten URL. A nested mount does it again, so inside the users router you see `baseUrl` of `'/api/orgs/acme/users'`, with the real parameter value filled in, and `path` of `'/42'`. `req.originalUrl` is never rewritten. If the router finishes without responding, Express puts `req.url` and `req.baseUrl` back before the next app-level layer. Example 6 shows the `after` line. Routes inside a router are written relative to the mount. `router.get('/:id')` answers `GET /api/users/42` when the router is mounted at `/api/users`.
 
 ![Main app mounting usersRouter at /api/users and ordersRouter at /api/orders, with router.get('/:id') inside usersRouter answering GET /api/users/42](assets/i32_02_bfe22857.svg)
 *Figure: Mounting Routers on a base path. Look at: `app.use('/api/users', usersRouter)` plus `router.get('/:id')` producing `GET /api/users/42`. Express removes the `/api/users` prefix before the router matches `/:id`.*
 
-**Why a child router cannot see the parent's parameters by default.** Each router builds its own `req.params` from its own match. The mount path `'/users/:userId/posts'` is matched by the *parent's* layer, so `userId` is in the parent's params object. When the child router runs, it replaces `req.params` with what *its* route captured. `express.Router({ mergeParams: true })` tells the child to start from the parent's params and add its own. When both use the same name, the child's value wins.
+**Why a child cannot see the parent's parameters by default.** Each router builds `req.params` from its own match. The mount path `'/users/:userId/posts'` is matched by the parent's layer, so `userId` is in the parent's params. When the child runs, it replaces `req.params` with what its route captured. `express.Router({ mergeParams: true })` tells the child to start from the parent's params and add its own. If both use the same name, the child's value wins.
 
-**Why old patterns throw in Express 5.** path-to-regexp 8 tokenises the string and rejects any reserved character it does not expect. The error is a `PathError` (a subclass of `TypeError`) thrown while you register the route. Its message gives the character and its index, for example `Unexpected ? at index 10: /users/:id?`. The replacements are:
+**Why old patterns throw on Express 5.** path-to-regexp 8 rejects a reserved character it does not expect. The error is a `PathError`, a subclass of `TypeError`, thrown while you register the route. The message names the character and the index, for example `Unexpected ? at index 10: /users/:id?`. The replacements are:
 
 | Express 4 string | Express 5 string | Note |
 |---|---|---|
@@ -84,7 +84,7 @@ When a request arrives, Express walks the app's stack of layers. For each layer:
 | `'/ab?cd'`, `'/ab+cd'` | list the literal paths, or use a RegExp | `?` and `+` are reserved |
 | a literal `(`, `)`, `[`, `]`, `?`, `+`, `!` | escape it: `'/price\\(usd\\)'` | backslash in the JS string |
 
-Parameter names can now be any valid JavaScript identifier, or a quoted string such as `:"user-id"`.
+Parameter names can be any valid JavaScript identifier, or a quoted string such as `:"user-id"`.
 
 ## Code examples
 
@@ -476,58 +476,58 @@ The `app.use` middleware is not part of a route, so there is no "rest of the rou
 
 ## Common mistakes & gotchas
 
-- **Porting `:id?`, `*` or `(\\d+)` to Express 5 unchanged.** The app throws `PathError: Unexpected ? at index …` (or `Missing parameter name`) at startup. Rewrite the pattern with braces, a named wildcard or a RegExp (see the table in How it works).
-- **Using Express 5 syntax on Express 4.** `'/files/*splat'` and `'/users{/:id}'` register without an error and then return 404 (Example 3).
-- **Treating `req.params.splat` as a string.** In Express 5 it is an array (`['a', 'b']`). `req.params.splat.startsWith(…)` throws a `TypeError`. Join it first.
+- **Porting `:id?`, `*`, or `(\\d+)` onto Express 5.** The app throws `PathError` at startup, `Unexpected ? at index …` or `Missing parameter name`. Rewrite with braces, a named wildcard, or a RegExp. The table above is the map.
+- **Using Express 5 syntax on Express 4.** `'/files/*splat'` and `'/users{/:id}'` register with no error and then return 404. Example 3 shows it.
+- **Treating `req.params.splat` as a string.** On Express 5 it is an array, such as `['a', 'b']`. Calling `.startsWith` throws. Join it first.
 - **Expecting `/files/*splat` to match `/files`.** A wildcard needs one or more segments. Use `'/files{/*splat}'`.
-- **Checking `'ext' in req.params` or `req.params.ext === undefined` the Express 4 way.** In Express 5 an unmatched optional key is absent. A check written as `req.params.ext ?? default` works in both versions.
-- **Registering `app.param` and expecting it to fire inside mounted routers.** Param callbacks are local to their router (Example 5). Register `router.param` on each router that needs it. In Express 5, `router.param` takes a single string name and throws `TypeError: argument name must be a string` for an array (`app.param` still accepts an array).
-- **Forgetting `mergeParams` on a nested router.** `req.params.userId` is `undefined` inside the child. And with `mergeParams`, a parameter name used by both parent and child keeps only the child's value.
-- **Logging or redirecting with `req.url` inside a router.** It has the mount path removed. Use `req.originalUrl` for the full URL, and `req.baseUrl + req.path` to rebuild the path without the query.
-- **Calling `next('route')` in `app.use` middleware.** It acts like `next()` (Example 9). Use `next('router')` to leave a router, or respond.
+- **Checking an optional key the Express 4 way.** On Express 5 an unmatched optional key is absent, not `undefined`. `req.params.ext ?? default` works on both.
+- **Expecting `app.param` to fire inside mounted routers.** Param callbacks belong to the router they are registered on. Example 5 shows it. On Express 5, `router.param` takes a single string and throws `TypeError: argument name must be a string` for an array. `app.param` still accepts an array.
+- **Forgetting `mergeParams` on a nested router.** `req.params.userId` is `undefined` in the child. With `mergeParams`, a name used by both parent and child keeps only the child's value.
+- **Logging or redirecting with `req.url` inside a router.** The mount path has been removed. Use `req.originalUrl` for the full URL, and `req.baseUrl + req.path` to rebuild the path without the query.
+- **Calling `next('route')` in `app.use` middleware.** It acts like `next()`. Example 9 shows it. Use `next('router')` to leave a router, or respond.
 
 ## Best practices
 
-- **Prefer string paths with named parameters**, and move value checks such as "digits only" into validation (lesson 65) or a param callback. Use a RegExp route only when the shape of the path cannot be written as a string.
-- **Give every wildcard and every nested parameter a descriptive, unique name** (`*filePath`, `:orgId`, `:userId`). Names are what you read in `req.params`, and unique names avoid `mergeParams` clashes.
-- **Load records in `router.param`** so every route under `/:id` receives `req.user` or a 404 from one place, and the database lookup runs once per request.
-- **Set `mergeParams: true` on any router mounted at a path that contains a parameter.**
-- **Use `req.originalUrl` in logs, error messages and "redirect back after login" code**, and `req.baseUrl` when a router needs to build links to its own routes.
-- **When upgrading, search for `?`, `*`, `(` and `+` inside route strings** (lesson 61 has the grep patterns), and let the startup `PathError` find anything you missed. Run the app once before deploying.
+- Prefer string paths with named parameters. Put checks such as "digits only" in validation or in a param callback. Use a RegExp route only when the shape cannot be a string.
+- Give every wildcard and every nested parameter its own name, such as `*filePath`, `:orgId`, and `:userId`. Unique names avoid `mergeParams` clashes.
+- Load the record in `router.param` so every route under `/:id` gets `req.user` or a 404 from one place, and the lookup runs once per request.
+- Set `mergeParams: true` on any router mounted at a path that contains a parameter.
+- Use `req.originalUrl` in logs, errors, and "redirect back after login". Use `req.baseUrl` when a router builds links to its own routes.
+- On an upgrade, search route strings for `?`, `*`, `(`, and `+`. Lesson 61 has the patterns. The startup `PathError` finds what you missed.
 
 ## ⭐ Interview lens
 
 > **Q: “Why does `app.get('/users/:id?')` crash on Express 5, and what replaces it?”**  
-> A: Express 5 uses path-to-regexp 8 (through the router 2.x package), where `?` is a reserved character. Registering the route throws `PathError: Unexpected ? at index 10`. Optional parts are written with braces: `'/users{/:id}'`. When `id` is missing, its key is left out of `req.params`. *Trap:* Express 4 silently accepts the new brace syntax as literal text, so the fix has to match the installed major version.
+> A: Express 5 compiles paths with path-to-regexp 8, through the router 2.x package. In that version `?` is reserved, so `app.get('/users/:id?')` throws `PathError: Unexpected ? at index 10` while the route is being registered, before `listen`. Write the optional piece in braces, including the slash: `'/users{/:id}'`. That matches `/users` and `/users/7`. When `id` is missing, Express 5 leaves the key out of `req.params`. Express 4 kept the key with the value `undefined`. The trap is the other direction. Express 4 accepts the brace syntax as literal text and then 404s, with no error at startup. The spelling has to match the installed major version.
 
 > **Q: “What is the difference between `next('route')` and `next('router')`?”**  
-> A: `next('route')` skips the remaining handlers of the current route and tries the next matching route in the same router. It only means that inside `app.METHOD`/`router.METHOD`/`app.all`. `next('router')` skips everything left in the current router instance and continues with the layer after the router's mount in the parent. Neither is an error. Any other argument to `next` is treated as one.
+> A: `next('route')` skips the remaining handlers of the current route and tries the next route in the same router that matches. It only means that inside `app.get` and the other method helpers, including `app.all`. Outside a route, in `app.use`, it behaves like a plain `next()`. `next('router')` skips everything left in the current router and continues with the layer after that router's mount in the parent. Neither is an error. Any other argument to `next` is an error and jumps to the error handler. For example, a guard inside an admin router can call `next('router')` so a public route registered after the mount can answer the same URL. The limit is calling `next('router')` from app-level middleware. That leaves the app's own router, and Express answers with its final 404.
 
 > **Q: “Inside a router mounted at `/api/users`, what are `req.url`, `req.baseUrl` and `req.originalUrl` for `GET /api/users/42?x=1`?”**  
-> A: `req.url` is `'/42?x=1'` (prefix stripped), `req.path` is `'/42'`, `req.baseUrl` is `'/api/users'` (with real parameter values when the mount path has parameters), and `req.originalUrl` is `'/api/users/42?x=1'`, which never changes. Express restores `url` and `baseUrl` when the request leaves the router.
+> A: Express strips the mount prefix while the request is inside the router, and it restores the values if the router does not respond. For `GET /api/users/42?x=1` mounted at `/api/users`, `req.url` is `'/42?x=1'`, `req.path` is `'/42'`, `req.baseUrl` is `'/api/users'`, and `req.originalUrl` stays `'/api/users/42?x=1'`. When the mount path itself has parameters, `req.baseUrl` contains the real values, not the `:name` pattern. Use `req.originalUrl` for logs and redirects. Use `req.baseUrl + req.path` when you need the path without the query. The limit of `req.url` is that it is the remainder. Redirecting to it drops `/api/users`.
 
 > **Q: “A nested router can't read `req.params.userId`. Why?”**  
-> A: The parent layer captured `userId` while matching the mount path. Each router then sets its own `req.params`. Create the child with `express.Router({ mergeParams: true })` so it starts from the parent's params. A name clash resolves in favour of the child.
-
-> **Q: “How many times does an `app.param('id')` callback run if two routes match `/users/7`?”**  
-> A: Once. Express records that `id` was already processed with the value `'7'` in this request and skips the callback for the second route. It also does not run for routes inside mounted routers, because param callbacks are local to the router they are registered on.
+> A: The parent captured `userId` while matching the mount path. Each router then sets `req.params` from its own match, so the child replaces the object and `userId` is gone. Create the child with `express.Router({ mergeParams: true })`. It starts from the parent's params and adds its own. A name used by both keeps the child's value, so call them `:userId` and `:postId`, not `:id` twice. The option belongs on the child, the router that needs to read the parent, not on the parent. Example 7 shows the same posts route with and without the flag: `userId` is null until you opt in.
 
 ## Cheat-card
 
-- **Versions:** Express 5.3.0 → router 2.2.0 → path-to-regexp 8.4.2. Express 4.22.3 → path-to-regexp 0.1.13.
-- **Named wildcard:** `'/files/*splat'` → `req.params.splat` is an array. `'/files{/*splat}'` also matches `/files`.
-- **Optional:** `'/users{/:id}'`, `'/:file{.:ext}'`. The unmatched key is omitted (Express 4: `undefined`).
-- **Reserved in Express 5 strings:** `( ) [ ] ? + !`. Escape with `\\`. Quoted names: `:"user-id"`.
-- **Old pattern on Express 5:** `PathError` (a `TypeError`) at registration, for example `Unexpected ? at index 10`.
-- **New pattern on Express 4:** accepted, then a silent 404.
-- **RegExp route:** groups go in `req.params['0']` or by group name. Normal object prototype.
-- **`app.param(name, (req, res, next, value, name) => …)`:** once per request per value. Local to its router. `router.param` takes a string only (v5).
-- **`mergeParams: true`:** the child sees the parent's params. The child wins a name clash.
-- **Mount stripping:** `req.url` / `req.path` are relative, `req.baseUrl` is the matched prefix, `req.originalUrl` is the full URL. Restored on exit.
-- **`next('route')`** skips the rest of the route (route handlers only). **`next('router')`** leaves the router.
-- **`app.all(path, fn)`:** every method. `HEAD` falls back to a `GET` route.
+- Express 5.3.0 uses router 2.2.0 and path-to-regexp 8.4.2. Express 4.22.3 uses path-to-regexp 0.1.13.
+- A named wildcard is `'/files/*splat'`. `req.params.splat` is an array. `'/files{/*splat}'` also matches `/files`.
+- Optional parts are `'/users{/:id}'` and `'/:file{.:ext}'`. An unmatched key is omitted. Express 4 used `undefined`.
+- Reserved in Express 5 strings: `( ) [ ] ? + !`. Escape a literal with `\\`. Quoted names look like `:"user-id"`.
+- An old pattern on Express 5 throws `PathError`, a `TypeError`, at registration. Example: `Unexpected ? at index 10`.
+- A new pattern on Express 4 is accepted, then a silent 404.
+- On a RegExp route, groups land in `req.params['0']` or under the group name. The params object keeps a normal prototype.
+- `app.param(name, (req, res, next, value, name) => ...)` runs once per request per value, and only on its own router. On Express 5, `router.param` takes a string only.
+- `mergeParams: true` lets the child see the parent's params. The child wins a name clash.
+- After a mount, `req.url` and `req.path` are relative, `req.baseUrl` is the matched prefix, and `req.originalUrl` is the full URL. Express restores `url` and `baseUrl` on the way out.
+- `next('route')` skips the rest of the route, and only inside a route handler. `next('router')` leaves the router.
+- `app.all(path, fn)` matches every method. A `HEAD` request falls back to a matching `GET` route.
 
----
+## Good to know
+
+- An `app.param('id')` callback runs once if two routes match `/users/7`. Express records that `id` was already processed with the value `'7'` and skips the callback for the second route. It also does not run for routes inside mounted routers, because param callbacks are local to the router they were registered on.
+- `router.param(['id', 'userId'], fn)` throws `TypeError: argument name must be a string` on Express 5. `app.param` still accepts an array of names.
 
 ## Learn More
 

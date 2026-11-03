@@ -13,54 +13,49 @@ tags: [geeky-frontend, nodejs-backend-kit]
 
 ---
 
+## Say it in 30 seconds
+
+A macrotask is one callback from a phase of the event loop, such as a timer, an I/O callback, or `setImmediate`. A microtask is a promise callback, an `await` continuation, or `queueMicrotask`. After every macrotask, Node empties the whole microtask queue, including jobs added during that drain, before it takes the next macrotask.
+
+That is why a promise chain finishes before a timer that was scheduled earlier, and why `await` gives the caller a turn without blocking the thread. The trade-off is starvation. A chain that keeps scheduling another microtask never lets timers or I/O run.
+
+`process.nextTick` is a separate queue that drains even before promises. A phase is one stop on the event loop.
+
 ## Why it matters
 
-Every asynchronous callback in Node lands in one of two categories, and the category decides *when* it runs relative to everything else. **Macrotasks** are the phase-based callbacks — timers, I/O, `setImmediate`, close handlers. **Microtasks** are promise continuations and `queueMicrotask`, with `process.nextTick` as a special even-higher-priority sibling. The rule that governs their interplay is short and absolute: **after every single macrotask, the entire microtask queue is drained before the next macrotask runs.**
-
-This is why `await` feels synchronous-ish but never blocks, why a promise chain always completes before a `setTimeout` that was scheduled earlier, and why a runaway promise chain can starve I/O just like a runaway `nextTick`. It is also the concept that unifies Node with the browser: the microtask/macrotask model is the same in both, which is why understanding it makes you better at *all* JavaScript, not just backend. Interviewers ask output-ordering questions precisely because they cannot be bluffed — either you can trace the queues or you cannot.
+Which queue a callback sits in decides when it runs. Macrotasks are the phase callbacks. Microtasks are promise work, with `nextTick` as a higher-priority sibling. The rule is absolute. After every macrotask, the microtask queues drain completely before the next macrotask. That is also why a runaway promise chain can freeze I/O the same way a runaway `nextTick` can. The same two queues exist in the browser, so the order you learn here is JavaScript, not only Node.
 
 ## The concept, simply
 
-Two kinds of work, two different scheduling rules:
-
-- **Macrotask:** the loop takes *one* per turn. `setTimeout`/`setInterval` (timers phase), I/O callbacks (poll phase), `setImmediate` (check phase), and close callbacks are all macrotasks. Each sits in a phase queue and the loop processes them as it walks the phases.
-- **Microtask:** the loop drains *all* of them — repeatedly, including any newly scheduled during the drain — after each macrotask and at every phase boundary. Promise `.then`/`.catch`/`.finally`, the continuation after an `await`, and `queueMicrotask` are microtasks. `process.nextTick` is a separate, higher-priority queue that drains *before* the promise microtasks.
+- **Macrotask.** The loop takes one per turn. `setTimeout` and `setInterval` are timers. I/O callbacks are poll. `setImmediate` is check. Close handlers are the close phase.
+- **Microtask.** The loop drains all of them, including ones scheduled during the drain, after each macrotask and at every phase boundary. That is `.then`, `.catch`, `.finally`, the continuation after `await`, and `queueMicrotask`. `process.nextTick` has its own queue and drains before promises.
 
 ![Two panels: macrotasks (setTimeout, setImmediate, I/O, close) taken one per turn, versus microtasks (nextTick, promises, queueMicrotask) drained fully between them](assets/i06_01_94834faf.svg)
 
-The loop takes one macrotask, then empties the whole microtask queue, then takes the next macrotask.
-
-Mnemonic: **one macro, then all micros, then one macro, then all micros.** Microtasks are greedy; macrotasks are polite and take turns.
+One macro, then all micros, then one macro, then all micros.
 
 ## How it works
 
-**The drain is exhaustive.** When Node drains microtasks, it does not process a fixed snapshot — it keeps going until the queue is genuinely empty. If microtask A schedules microtask B, and B schedules C, all of them run in the same drain, before the loop is allowed to move on. This is what makes `await` chains resolve in one continuous burst. It is also the starvation risk: an endless chain of promises-that-schedule-promises never lets the loop reach the next macrotask, freezing timers and I/O — exactly the `nextTick` starvation problem, one lane over.
+The drain is exhaustive. If microtask A schedules B, and B schedules C, all three run before the loop may move. That is why an `await` chain resolves in one burst, and why an endless chain freezes timers and I/O.
 
 ![Alternating sequence of macrotask callback then microtask drain, repeated, with a note that microtask recursion can starve the loop](assets/i06_02_6c3fcc09.svg)
 
-Microtasks drain fully after each macrotask; a self-scheduling microtask chain can starve the loop just like recursive nextTick.
+Node keeps two queues in this family. It empties nextTick, then empties promises. If promises queued new nextTicks, it goes back, and it alternates until both are empty. It does not interrupt a promise drain. At the same scheduling point, nextTick beats a promise. Lesson 8 is the full ordering.
 
-**nextTick vs promise, precisely.** Node maintains two distinct queues in the microtask family. The `process.nextTick` queue is drained first and completely; then the V8 Promise microtask queue is drained. If a nextTick callback schedules a promise, and a promise callback schedules a nextTick, Node re-checks: after promises run, if new nextTicks appeared, it drains those too, then re-drains promises — it keeps alternating until both are empty. The net effect you can rely on: **at the same scheduling point, nextTick beats promise.**
+`await x` means: evaluate `x`, then schedule the rest of this function as a promise microtask. Everything before the first `await` is synchronous. At the `await`, the function suspends and the caller continues. The rest resumes as a microtask when the value settles.
 
-**How `await` maps onto this.** An `await x` is sugar for "evaluate `x`, then schedule the rest of this function as a promise microtask". Everything before the first `await` runs synchronously; the moment you hit `await`, the function suspends and control returns to the caller. The continuation resumes as a microtask once the awaited value settles. So an `async` function is partly synchronous (up to the first `await`) and partly a series of microtasks (each resumption after an `await`).
+The loop runs one macrotask callback, drains nextTick and promises, then runs the next macrotask callback. Microtasks are once per callback, not once per phase. Two due timers that each schedule a promise print `A`, `A-promise`, `B`, `B-promise`. They do not print both timers first.
 
-**Where macrotasks fit around all this.** The loop enters a phase, runs one macrotask callback, then drains nextTick + promises fully, then runs the next macrotask callback in that phase, drains again, and so on until the phase queue empties — then advances. So microtasks are not "once per loop" or "once per phase"; they are *once per macrotask callback*. That granularity is the crux of most trick questions.
-
-**The two families at a glance.** The table fixes the distinction that every ordering puzzle turns on — *how many* the loop takes per turn, and *when* it comes back for more.
-
-| Property | Macrotask | Microtask |
+| | Macrotask | Microtask |
 | --- | --- | --- |
-| Examples | `setTimeout`, `setInterval`, `setImmediate`, I/O, close callbacks | `Promise.then/catch/finally`, `await` continuation, `queueMicrotask`, `process.nextTick` (higher-priority sibling) |
-| Lives in | A phase queue (timers, poll, check, close) | The nextTick queue and the V8 microtask queue — neither is a phase |
-| How many run per turn | Exactly one callback, then the loop pauses to drain microtasks | The entire queue, exhaustively, including any scheduled mid-drain |
-| When it next runs | Next time the loop reaches that phase | After every macrotask callback and at every phase boundary |
-| Starvation risk | Low — always yields between callbacks | High — a self-scheduling chain never lets the loop advance |
-
-**A concrete trace that exposes the "once per macrotask" rule.** Suppose two timers are both due, and each timer callback schedules a promise. The loop enters the timers phase, runs timer A, and *before touching timer B* it fully drains the microtask queue — so A's promise runs. Only then does it run timer B, and again drains microtasks, so B's promise runs. The output is `A, A-promise, B, B-promise`, never `A, B, A-promise, B-promise`. If microtasks drained "once per phase" instead, you would see the second, wrong ordering. Reproducing this by hand is the single best way to prove to yourself that the drain happens between the two macrotasks, not after both.
+| Examples | `setTimeout`, `setInterval`, `setImmediate`, I/O, close | `.then`, `.catch`, `.finally`, `await`, `queueMicrotask`. `process.nextTick` is the higher-priority sibling |
+| Lives in | A phase queue | The nextTick queue and V8's microtask queue. Neither is a phase |
+| How many per turn | One callback, then a microtask drain | The whole queue, including work added during the drain |
+| Starvation | Low. It yields between callbacks | High. A self-scheduling chain never lets the loop advance |
 
 ## Code examples
 
-**Example 1 — micro always beats macro.**
+**Example 1. A microtask beats a macrotask.**
 
 javascript
 
@@ -77,7 +72,8 @@ console.log('sync 2');
 //   macro: timeout
 ```
 
-**Example 2 — a chain of promises drains before any timer.**
+
+**Example 2. A promise chain drains before any timer.**
 
 javascript
 
@@ -96,9 +92,9 @@ Promise.resolve()
 //   timeout
 ```
 
-Each `.then` schedules the next as a microtask; the whole chain empties in one drain before the timers phase gets its turn.
+Each `.then` schedules the next microtask. The chain empties in one drain, before timers.
 
-**Example 3 — async/await ordering.**
+**Example 3. async and await ordering.**
 
 javascript
 
@@ -120,7 +116,8 @@ console.log('end');
 //   C         <- resumes as a microtask after sync code finishes
 ```
 
-**Example 4 — the full six-way ordering trap.**
+
+**Example 4. The six-way ordering trap.**
 
 javascript
 
@@ -142,59 +139,57 @@ console.log('7: sync');
 //   2: setTimeout / 3: setImmediate  (macrotasks; order races at top level)
 ```
 
-Sync code (1, 7) first. Then all microtask-family work: nextTick (5) ahead of promises, then the promise queue in FIFO order (4 before 6, because `.then` was scheduled before the `await` continuation). Finally the two macrotasks, whose order is a top-level race.
+Synchronous logs run first. Then nextTick, ahead of promises. Then the promise queue in order: the `.then` was scheduled before the `await` continuation. The two macrotasks race at the top of a file. In an ES module entry the nextTick versus promise pair flips. See Good to know.
 
 ## Common mistakes & gotchas
 
-- **Thinking microtasks run "once per loop iteration".** They drain after *every* macrotask callback and at every phase boundary — far more often.
-- **Assuming `setTimeout(fn, 0)` beats a promise scheduled just before it.** It never does; the microtask queue empties before the loop reaches the timers phase.
-- **Believing `await` blocks.** It suspends the async function and returns control to the caller; the rest resumes later as a microtask.
-- **Creating an unbounded microtask chain** (a promise that always schedules another) — it starves timers and I/O exactly like recursive `nextTick`.
-- **Confusing FIFO within a queue with priority across queues.** Within the promise queue it is FIFO; but nextTick as a queue outranks the whole promise queue.
-- **Forgetting synchronous code beats everything.** Nothing async runs until the current call stack is empty.
-- **Assuming microtasks drain "once per phase".** They drain after *each macrotask callback* — so two due timers interleave with their own microtasks (`A, A-promise, B, B-promise`), not `A, B, A-promise, B-promise`.
-- **Expecting a single big microtask drain to be interruptible by I/O.** It is not — until the queue is empty the loop cannot reach the poll phase, so a long promise chain delays every pending socket read just like blocking code would.
+- **Microtasks are not once per loop iteration.** They drain after every macrotask callback and at every phase boundary.
+- **A `setTimeout` of 0 does not beat a promise scheduled just before it.** The microtask queue empties before timers.
+- **`await` does not block the thread.** It suspends that function and returns to the caller. The rest is a microtask.
+- **An unbounded promise chain starves the loop,** the same way recursive `nextTick` does.
+- **FIFO inside one queue is not priority across queues.** Promises are FIFO with each other. The nextTick queue outranks the whole promise queue.
+- **Synchronous code beats everything.** Nothing async runs until the current stack is empty.
+- **Microtasks do not drain once per phase.** Two due timers interleave with their own microtasks.
+- **A long microtask drain is not interrupted by I/O.** Until the queue is empty, poll cannot run.
 
 ## Best practices
 
-- **Prefer `queueMicrotask` or promises over `process.nextTick`** in application code unless you specifically need to beat the promise queue.
-- **For CPU-bound chunking, use `setImmediate` (a macrotask), not microtasks,** so I/O gets serviced between chunks.
-- **Do not throw inside a microtask without handling it** — an unhandled promise rejection propagates differently and can crash the process on modern Node defaults.
-- **Trace ordering by drawing the two queues** when a bug depends on it, rather than adding `setTimeout(…, 100)` "to be safe".
-- **Keep microtask work small.** Long synchronous work inside a `.then` still blocks the loop just as much as anywhere else.
+- Prefer `queueMicrotask` or promises over `process.nextTick` unless you must run before the promise queue.
+- To split CPU work, use `setImmediate`, a macrotask, so I/O runs between chunks.
+- Handle rejection inside a microtask. An unhandled rejection can crash the process under current Node defaults.
+- If a bug depends on order, draw the two queues. Do not "fix" it with a 100 millisecond timeout.
+- Keep work inside a `.then` short. A long synchronous stretch still blocks the thread.
 
 ## ⭐ Interview lens
 
 > **Q: Define microtask vs macrotask in Node.**  
-> A macrotask is a phase-based callback — `setTimeout`, I/O, `setImmediate`, close handlers — and the loop runs one per turn. A microtask is a promise continuation, `queueMicrotask`, or (higher-priority) `process.nextTick`; the entire microtask queue drains after every macrotask and at each phase boundary.
+> A macrotask is one callback from a phase: a timer, an I/O callback, `setImmediate`, or a close handler. The loop runs one, then stops to drain microtasks. A microtask is a promise continuation, `queueMicrotask`, or, ahead of those, `process.nextTick`. The microtask queues drain completely after every macrotask, including jobs added during the drain. For example, a resolved promise and a `setTimeout` of 0 print the promise first. The limit is a chain that never ends. That drain never returns, so timers and sockets stall.
 
 > **Q: Output?** `setTimeout(() => console.log('t'), 0); Promise.resolve().then(() => console.log('p'));`  
-> `p` then `t`. The microtask queue empties before the loop advances to the timers phase, so the promise wins regardless of scheduling order.
+> `p` then `t`. Scheduling order does not matter. When the current stack ends, Node drains microtasks before it is allowed to enter the timers phase, so the promise runs first. The same promise still wins if you schedule it after the timeout line. The limit is a nextTick scheduled beside them. nextTick prints before `p`, because that queue drains first. And in an ES module entry file, top-level nextTick versus promise order flips.
 
 > **Q: How often do microtasks drain — once per loop, once per phase, or more?**  
-> More: after *every* macrotask callback, plus at each phase transition. That is why a promise chain fully resolves before the next timer, and why a self-scheduling microtask can starve the loop.
+> More than once per phase. They drain after every macrotask callback, and again at phase boundaries. Two timers that are both due do not run back to back if each schedules a promise. You get timer A, A's promise, timer B, B's promise. A promise chain scheduled together resolves fully before the next timer. The limit is starvation. Because newly queued microtasks are part of the same drain, a chain that always schedules another one never reaches poll.
 
 > **Q: Trace this async snippet.** `console.log(1); (async()=>{console.log(2); await null; console.log(4);})(); console.log(3);`  
-> Output: 1, 2, 3, 4. Code runs synchronously to the `await` (1, 2), control returns to the caller (3), then the continuation resumes as a microtask (4).
-
-> **Q: Between a `process.nextTick` and a `Promise.then` scheduled together, which runs first, and why?**  
-> The nextTick callback. Node drains the dedicated nextTick queue completely before draining the Promise microtask queue, so nextTick always wins at the same scheduling point.
-
-> **Q: Can microtasks starve the event loop like `nextTick` can?**  
-> Yes. Because the microtask queue is drained exhaustively — including newly added microtasks — an endless chain of promises-that-schedule-promises never yields to the loop, freezing timers and I/O. The fix is to move periodic work onto `setImmediate`.
+> The output is 1, 2, 3, 4. The call runs synchronously until the first `await`, so 1 and 2 print, then the async function suspends and the caller prints 3. The rest of the async function is a promise microtask, so 4 prints after the stack is empty and before any timer. `await null` still costs a microtask. It does not resume immediately. The limit is everything after the first `await`. A second `await` is another microtask, not a continuation of the same one.
 
 ## Cheat-card
 
-- **Rule:** one macrotask → drain ALL microtasks → next macrotask.
-- **Macrotasks:** `setTimeout`, `setInterval`, `setImmediate`, I/O, close.
-- **Microtasks:** promise `.then`/`await`, `queueMicrotask`; `nextTick` = higher-priority sibling.
-- Priority order: sync → nextTick → promises → macrotasks.
-- Microtasks drain after every macrotask + every phase boundary (not once per loop).
-- `await` = suspend + resume-as-microtask; never blocks.
-- Endless microtask chains starve the loop → use `setImmediate` to yield.
-- **Thenable ticks:** resolving with a native promise costs +2 ticks, with a sync thenable +1; `await nativePromise` costs +0, `await thenable` +1.
-- **`return await p`** in an `async` fn settles 1 tick sooner than `return p` (Node 12+), and it is the only form its own `try/catch` can catch.
-- **ESM entry / after top-level `await`:** promises queued there run before nextTicks queued there; inside macrotask callbacks nextTick still wins.
+- One macrotask, then drain all microtasks, then the next macrotask.
+- Macrotasks: `setTimeout`, `setInterval`, `setImmediate`, I/O, close.
+- Microtasks: promise `.then` and `await`, `queueMicrotask`. nextTick drains first.
+- Order: synchronous code, nextTick, promises, macrotasks. That nextTick-before-promise rule is for synchronous code and macrotask callbacks.
+- `await` suspends one function. It does not block the thread.
+- An endless microtask chain starves the loop. Yield with `setImmediate`.
+
+## Good to know
+
+- Q: Between a `process.nextTick` and a `Promise.then` scheduled together, which runs first? nextTick, when both were scheduled from synchronous code or from a macrotask. Node empties the nextTick queue before the promise queue. It does not interrupt a promise drain.
+- Q: Can microtasks starve the event loop the way `nextTick` can? Yes. The drain includes microtasks added during the drain, so an endless chain never reaches timers or I/O. Hand off to `setImmediate`.
+- Thenable extra ticks versus a plain value, observed: `await` of a native promise is 0. `await` of another thenable is +1. `resolve(thenable)` and returning a thenable from `.then` is +1. `resolve` of a native promise, or returning one from `.then`, is +2. An `async` function `return nativePromise` is +2 versus returning the value. `return await nativePromise` is +1, and it is the form a `try/catch` in that function can catch.
+- `await` of a native promise passes it through, the V8 7.2 change that Node 12 picked up. On Node v10.24.1, `return promise` printed before `return await promise`. Node v12.22.12 already matched the Node 24 order.
+- Example 4 as `.cjs` and `.mjs`: the three microtask lines were stable in 50 of 50 runs of each file. `setImmediate` printed first in 29 of 50 `.cjs` runs and 32 of 50 `.mjs` runs.
 
 ---
 
@@ -208,24 +203,24 @@ Sync code (1, 7) first. Then all microtask-family work: nextTick (5) ahead of pr
 
 ---
 
+---
+
 ## Additional topics
 
 *Added 7 Oct 2026 · examples verified on Node v24.19.0*
 
 ### Thenables cost extra microtask ticks
 
-**What it is.** A *thenable* is any object with a callable `then` method, and native promises are thenables too. When a promise is *resolved with* a thenable (you return one from a `.then` callback, call `resolve(thenable)`, or return one from an `async` function), the spec does not copy the value across directly. It queues a **NewPromiseResolveThenableJob**: one microtask whose only job is to call `thenable.then(resolve, reject)`. If the thenable is a native promise that is already fulfilled, that `then` call queues *another* microtask (the reaction job) to deliver the value. So "the same value, wrapped in a promise" arrives one or two ticks later than the plain value would.
+A thenable is any object with a callable `then`. Native promises are thenables too. When a promise is resolved with a thenable, the spec does not copy the value across. It queues a NewPromiseResolveThenableJob, one microtask whose only job is to call `thenable.then(resolve, reject)`. If that thenable is an already fulfilled native promise, the `then` call queues a second microtask, the reaction job, to deliver the value. So wrapping the same value in a promise delivers it one or two ticks later. Throughput does not care. Ordering does. Two paths that both "resolve with 42" can finish in different orders.
 
-**Why it matters.** It doesn't matter for throughput, because the cost is a couple of microtasks. It matters for **ordering**: two code paths that "both resolve with 42" can finish in different orders depending on whether one of them wrapped the value. It also explains a common interview puzzle: why `async` functions that `return somePromise` finish later than ones that `return await somePromise`.
+Per hop, measured below:
 
-How it works (per hop, measured below):
+1. A plain value fulfills the derived promise immediately and queues its reaction. That is the baseline.
+2. A native promise: tick 1 runs the ResolveThenableJob and calls `p.then`. Tick 2 runs the reaction that settles the outer promise. Plus 2 ticks.
+3. A custom thenable whose `then` calls back synchronously: tick 1 runs the job, `then` resolves immediately, and nothing more is queued. Plus 1 tick.
+4. `await` uses `PromiseResolve`, which returns a native promise as it is, instead of wrapping it. `await nativePromise` costs the same as `await 42`. This is the change V8 shipped in 7.2 and Node 12 picked up. Any other thenable is still wrapped, so `await thenable` costs plus 1 tick.
 
-1. **Plain value:** the derived promise is fulfilled right away, and its reaction is queued. Baseline.
-2. **Native promise:** tick 1 runs the ResolveThenableJob, which calls `p.then(…)`. Because `p` is already fulfilled, tick 2 runs the reaction that finally resolves the outer promise. **+2 ticks.**
-3. **Custom thenable whose `then` calls back synchronously:** tick 1 runs the ResolveThenableJob, the `then` resolves immediately, and nothing more is queued. **+1 tick.**
-4. **`await` is special.** It uses `PromiseResolve`, which hands back a native promise *as is* instead of wrapping it. So `await nativePromise` costs the same as `await 42`. This is the spec change V8 shipped in v7.2 and Node 12 picked up (see v8.dev/blog/fast-async). A non-native thenable still gets wrapped, so `await thenable` costs **+1 tick**.
-
-**Example — counting ticks with an interleaved `.then` ladder.** The ladder logs `tick 1`, `tick 2`, … one per microtask turn. Each case logs where its value arrives.
+**Example. Counting ticks with an interleaved `.then` ladder.**
 
 javascript
 
@@ -254,9 +249,9 @@ p.then(() => ({ then: (ok) => ok('thenable') })).then((v) => console.log(`  ${v}
 //   tick 5
 ```
 
-`return 'plain'` from `.then` arrives alongside tick 2. `return thenable` arrives one tick later, and `return Promise.resolve(…)` two ticks later.
+`return 'plain'` arrives with tick 2. `return thenable` is one tick later. `return Promise.resolve(...)` is two ticks later.
 
-**Example — `await`, `resolve()` and `async` return values side by side.**
+**Example. `await`, `resolve()`, and async return values side by side.**
 
 javascript
 
@@ -293,27 +288,26 @@ new Promise((r) => r(thenable)).then(() => console.log('  resolve(thenable)'));
 //   tick 4
 ```
 
-| Hand-off | Extra ticks vs a plain value (observed) |
+
+| Hand-off | Extra ticks versus a plain value |
 | --- | --- |
 | `await nativePromise` | 0 |
 | `await thenable` | +1 |
-| `resolve(thenable)` / `.then(() => thenable)` | +1 |
-| `resolve(nativePromise)` / `.then(() => nativePromise)` | +2 |
-| `async` function `return nativePromise` (vs `return value`) | +2 |
-| `async` function `return await nativePromise` (vs `return value`) | +1 |
+| `resolve(thenable)` or `.then(() => thenable)` | +1 |
+| `resolve(nativePromise)` or `.then(() => nativePromise)` | +2 |
+| `async` function `return nativePromise` versus `return value` | +2 |
+| `async` function `return await nativePromise` versus `return value` | +1 |
 
 ### Microtask order when the entry file is an ES module
 
-**What changes.** The microtask rules themselves don't change. What changes is the context the top-level code runs in. A CommonJS entry runs as a plain function call. When it returns, Node drains `process.nextTick` first and then the promise queue, which is the "nextTick beats promise" rule above. An ES module entry is evaluated from inside Node's promise-based ESM loader, so its body is *already running inside a microtask drain*. Promise jobs it queues run in that same drain, and Node returns to the nextTick queue only once V8 has emptied the promise queue. Lesson 08 shows the same rule: a nextTick scheduled inside a promise callback runs after the promises queued later. The ESM entry body behaves like one big promise callback.
+The drain rules do not change. The context of top-level code does. A CommonJS entry is a plain function call. When it returns, Node drains nextTick, then promises. An ES module entry is evaluated inside the promise-based loader, so the body is already running inside a microtask drain. Promises it queues run in that drain. Node returns to nextTick only after V8 has emptied the promise queue. The body behaves like one big promise callback.
 
-How it works:
+1. CommonJS: body, nextTick, promises, then the event loop.
+2. ES module: the loader awaits evaluation, the body runs inside a promise job, the rest of the promise queue runs, then nextTick, then the loop.
+3. Code after a top-level `await` resumes as a promise continuation, so its promises still run before its nextTicks, even if the awaited thing was a timer.
+4. Inside a macrotask callback, both module systems agree. nextTick first.
 
-1. **CJS:** body → nextTick queue → promise queue → event loop.
-2. **ESM:** loader awaits evaluation → body (inside a promise job) → rest of the promise queue, including the body's `.then`s and `await` continuations → nextTick queue → event loop.
-3. Code after a top-level `await` resumes as a promise continuation, so it too runs inside a microtask drain. Its promises still run before its nextTicks, even when the awaited thing was a timer.
-4. Inside a macrotask callback (a timer, I/O, `setImmediate`), CJS and ESM behave the same: nextTick first.
-
-**Example — this lesson's Example 4, saved as `.cjs` and as `.mjs`.**
+**Example. This lesson's Example 4, as `.cjs` and as `.mjs`.**
 
 bash
 
@@ -336,9 +330,9 @@ $ node six.mjs
 2: setTimeout
 ```
 
-The three microtask lines were in this order in 50 of 50 runs of each file. The last two lines are the top-level timer race and varied: `setImmediate` printed first in 29 of 50 `.cjs` runs and 32 of 50 `.mjs` runs. So the answer to the "six-way ordering trap" depends on the module system. Give the CJS answer and say that it assumes CJS.
+The three microtask lines did not move across 50 runs of each file. The last two lines are the timer race and did vary. The counts are in Good to know. Give the CommonJS answer, and say that it assumes CommonJS.
 
-**Example — after a top-level `await`, promises still beat nextTick.**
+**Example. After a top-level `await`, promises still beat nextTick.**
 
 javascript
 
@@ -353,18 +347,18 @@ Promise.resolve().then(() => console.log('after TLA: promise'));
 //   after TLA: nextTick
 ```
 
-The timer callback only *resolves* the promise. The module body continues in the microtask drain that follows, so it is inside a promise job when it schedules both callbacks.
+The timer callback only resolves the promise. The module body continues in the microtask drain that follows, so it is inside a promise job when it schedules both callbacks.
 
 ### Common mistakes & gotchas (additional topics)
 
-- **"Returning a promise from `.then` is free."** It costs two extra microtask ticks compared with returning the value. That is usually harmless, but it reorders work against other chains running at the same time.
-- **Assuming `await promise` and `await thenable` are the same.** Native promises pass through `await` unwrapped. Any other thenable (a hand-rolled one, or a promise object from a userland library, which is not a native `Promise`) is wrapped and costs one more tick.
-- **Writing ordering tests that depend on tick counts.** They break when someone refactors `return x` to `return Promise.resolve(x)`. If order matters, chain explicitly.
-- **Quoting "nextTick before promise" without the module system.** It holds for CJS top-level code and inside macrotask callbacks. In an ESM entry body, and after a top-level `await`, promises queued there run first.
+- **Returning a promise from `.then` is not free.** It costs two extra ticks versus returning the value, and it can reorder another chain that is running at the same time.
+- **`await promise` and `await thenable` are not the same.** A native promise passes through. Any other thenable is wrapped and costs one more tick. A promise object from a userland library is not a native `Promise`.
+- **Tests that depend on tick counts break** when someone changes `return x` to `return Promise.resolve(x)`. If order matters, chain it explicitly.
+- **"nextTick before promise" depends on where the code runs.** It holds for CommonJS top-level code and inside macrotask callbacks. In an ES module entry, and after a top-level `await`, promises queued there run first.
 
 ### Edge case worked through: `return await` is one tick *faster* than `return`, and the only one that catches
 
-An `async` function that returns a promise has its result promise *resolved with* that promise, which costs +2 ticks. `return await p` waits for `p` inside the function (`await` costs 0 extra for a native promise) and then returns a plain value, so it costs one tick in total. It also keeps the rejection inside the function's `try`:
+An `async` function that returns a promise has its result resolved with that promise, which costs plus 2 ticks. `return await p` waits inside the function. `await` of a native promise costs no extra tick, and the function then returns a plain value, so the total is one tick. The rejection also stays inside that function's `try`.
 
 javascript
 
@@ -394,12 +388,12 @@ fast().then(() => console.log('  return await promise'));
 //     without await: escaped the try -> boom
 ```
 
-The old advice "don't write `return await`, it adds ticks" was true before the V8 7.2 `await` change. The same file on Node v10.24.1 (V8 6.8, via `npx -y node@10`) printed `return promise` right after `tick 3` and `return await promise` after that, and Node v12.22.12 already matched the v24 output. On Node 24, `return await` is one tick shorter and is the only form whose `try/catch` sees the rejection.
+The old advice "do not write `return await`, it adds ticks" was true before the V8 7.2 change. The version check is in Good to know. On Node 24, `return await` is one tick shorter, and it is the only form whose own `try/catch` sees the rejection.
 
 ### ⭐ Interview lens (additional topics)
 
 > **Q: “Two `.then` chains start together. One returns `42`, the other returns `Promise.resolve(42)`. Which next `.then` runs first, and by how much?”**  
-> A: The plain value, by two microtask ticks. Resolving a promise with a thenable queues a ResolveThenableJob that calls `p.then`, and because `p` is already fulfilled that queues one more reaction job before the outer promise settles. A custom thenable that calls back synchronously costs one tick. `await` of a native promise costs none, because `await` uses `PromiseResolve` and does not wrap it.
+> The plain `42` runs first, by two microtask ticks. Resolving with a thenable queues a ResolveThenableJob that calls `p.then`. Because that native promise is already fulfilled, the call queues one more reaction before the outer promise settles. A custom thenable that calls back synchronously costs one tick, not two. `await` of a native promise costs none, because `PromiseResolve` does not wrap it. The limit is treating every "return 42" as the same shape. Wrapping it in `Promise.resolve` inserts those ticks and can lose a race against another chain.
 
 > **Q: “In an `.mjs` file, does `process.nextTick` still run before `Promise.then` at the top level?”**  
-> A: No. The ESM entry is evaluated inside the loader's promise job, so top-level promise callbacks run in the same drain, before Node gets back to the nextTick queue. In a `.cjs` file, or inside any timer, I/O or `setImmediate` callback in either format, nextTick runs first. *Trap:* claiming nextTick "always" wins.
+> No. The ES module entry runs inside the loader's promise job, so top-level promise callbacks are part of that drain, and Node reaches nextTick only after the promise queue is empty. In a `.cjs` file, and inside any timer, I/O, or `setImmediate` callback in either format, nextTick runs first. The limit is the word "always." It is the wrong word for top-level ESM, and also for any nextTick scheduled from inside a promise callback.
