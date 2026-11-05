@@ -1,0 +1,129 @@
+pattern_ops index, ORDER BY lower(email) | prefix "a" | first page | Execution Time: 180.378 ms | Limit > Gather Merge > Sort > Parallel Bitmap Heap Scan > Bitmap Index Scan
+    Limit  (cost=26811.23..26812.40 rows=10 width=78) (actual time=174.036..180.351 rows=10.00 loops=1)
+      Buffers: shared hit=6166 read=13603 written=1827
+      ->  Gather Merge  (cost=26811.23..40928.37 rows=121212 width=78) (actual time=174.035..180.348 rows=10.00 loops=1)
+            Workers Planned: 2
+            Workers Launched: 2
+            Buffers: shared hit=6166 read=13603 written=1827
+            ->  Sort  (cost=25811.21..25937.47 rows=50505 width=78) (actual time=171.724..171.725 rows=7.67 loops=3)
+                  Sort Key: (lower(email)), id
+                  Sort Method: top-N heapsort  Memory: 27kB
+                  Buffers: shared hit=6166 read=13603 written=1827
+                  Worker 0:  Sort Method: top-N heapsort  Memory: 27kB
+                  Worker 1:  Sort Method: top-N heapsort  Memory: 27kB
+                  ->  Parallel Bitmap Heap Scan on users  (cost=5158.98..24719.81 rows=50505 width=78) (actual time=29.709..152.853 rows=41477.00 loops=3)
+                        Filter: (lower(email) ~~ 'a%'::text)
+                        Heap Blocks: exact=6442
+                        Buffers: shared hit=6136 read=13603 written=1827
+                        Worker 0:  Heap Blocks: exact=5998
+                        Worker 1:  Heap Blocks: exact=6235
+                        ->  Bitmap Index Scan on ix  (cost=0.00..5128.67 rows=118812 width=0) (actual time=24.004..24.004 rows=124431.00 loops=1)
+                              Index Cond: ((lower(email) ~>=~ 'a'::text) AND (lower(email) ~<~ 'b'::text))
+                              Index Searches: 1
+                              Buffers: shared read=1024
+    Planning Time: 0.138 ms
+    Execution Time: 180.378 ms
+
+pattern_ops index, ORDER BY lower(email) | prefix "a" | show more  | Execution Time: 171.297 ms | Limit > Gather Merge > Sort > Parallel Bitmap Heap Scan > Bitmap Index Scan
+    Limit  (cost=26396.46..26397.62 rows=10 width=78) (actual time=165.680..171.253 rows=10.00 loops=1)
+      Buffers: shared hit=1228 read=18541 written=6096
+      ->  Gather Merge  (cost=26396.46..31621.49 rows=44863 width=78) (actual time=165.678..171.249 rows=10.00 loops=1)
+            Workers Planned: 2
+            Workers Launched: 2
+            Buffers: shared hit=1228 read=18541 written=6096
+            ->  Sort  (cost=25396.43..25443.16 rows=18693 width=78) (actual time=163.087..163.088 rows=7.67 loops=3)
+                  Sort Key: (lower(email)), id
+                  Sort Method: top-N heapsort  Memory: 27kB
+                  Buffers: shared hit=1228 read=18541 written=6096
+                  Worker 0:  Sort Method: top-N heapsort  Memory: 27kB
+                  Worker 1:  Sort Method: top-N heapsort  Memory: 27kB
+                  ->  Parallel Bitmap Heap Scan on users  (cost=5139.89..24992.48 rows=18693 width=78) (actual time=19.502..150.588 rows=41473.67 loops=3)
+                        Filter: ((lower(email) ~~ 'a%'::text) AND (ROW(lower(email), id) > ROW('a0004d755aed609c358308aa1d63e18c@mail.com'::text, 1846696)))
+                        Rows Removed by Filter: 3
+                        Heap Blocks: exact=6635
+                        Buffers: shared hit=1198 read=18541 written=6096
+                        Worker 0:  Heap Blocks: exact=5998
+                        Worker 1:  Heap Blocks: exact=6042
+                        ->  Bitmap Index Scan on ix  (cost=0.00..5128.67 rows=118812 width=0) (actual time=17.999..17.999 rows=124431.00 loops=1)
+                              Index Cond: ((lower(email) ~>=~ 'a'::text) AND (lower(email) ~<~ 'b'::text))
+                              Index Searches: 1
+                              Buffers: shared read=1024
+    Planning:
+      Buffers: shared hit=2
+    Planning Time: 0.179 ms
+    Execution Time: 171.297 ms
+
+pattern_ops index, ORDER BY lower(email) | prefix "a1b2" | first page | Execution Time: 0.197 ms | Limit > Sort > Index Scan
+    Limit  (cost=13.40..13.42 rows=10 width=78) (actual time=0.173..0.176 rows=10.00 loops=1)
+      Buffers: shared hit=32
+      ->  Sort  (cost=13.40..13.90 rows=200 width=78) (actual time=0.173..0.174 rows=10.00 loops=1)
+            Sort Key: (lower(email)), id
+            Sort Method: top-N heapsort  Memory: 26kB
+            Buffers: shared hit=32
+            ->  Index Scan using ix on users  (cost=0.55..9.08 rows=200 width=78) (actual time=0.033..0.143 rows=28.00 loops=1)
+                  Index Cond: ((lower(email) ~>=~ 'a1b2'::text) AND (lower(email) ~<~ 'a1b3'::text))
+                  Filter: (lower(email) ~~ 'a1b2%'::text)
+                  Index Searches: 1
+                  Buffers: shared hit=32
+    Planning Time: 0.149 ms
+    Execution Time: 0.197 ms
+
+pattern_ops index, ORDER BY lower(email) | prefix "a1b2" | show more  | Execution Time: 0.117 ms | Limit > Sort > Index Scan
+    Limit  (cost=10.37..10.39 rows=10 width=78) (actual time=0.101..0.103 rows=10.00 loops=1)
+      Buffers: shared hit=32
+      ->  Sort  (cost=10.37..10.55 rows=74 width=78) (actual time=0.100..0.101 rows=10.00 loops=1)
+            Sort Key: (lower(email)), id
+            Sort Method: quicksort  Memory: 27kB
+            Buffers: shared hit=32
+            ->  Index Scan using ix on users  (cost=0.55..8.77 rows=74 width=78) (actual time=0.042..0.091 rows=18.00 loops=1)
+                  Index Cond: ((lower(email) ~>=~ 'a1b2'::text) AND (lower(email) ~<~ 'a1b3'::text))
+                  Filter: ((lower(email) ~~ 'a1b2%'::text) AND (ROW(lower(email), id) > ROW('a1b273990bde554cf7d5bd0bce52c7a4@mail.com'::text, 1942414)))
+                  Rows Removed by Filter: 10
+                  Index Searches: 1
+                  Buffers: shared hit=32
+    Planning Time: 0.128 ms
+    Execution Time: 0.117 ms
+
+C-collation index, ORDER BY ... COLLATE "C" | prefix "a" | first page | Execution Time: 0.043 ms | Limit > Index Scan
+    Limit  (cost=0.55..7.31 rows=10 width=78) (actual time=0.018..0.033 rows=10.00 loops=1)
+      Buffers: shared hit=14
+      ->  Index Scan using ix on users  (cost=0.55..81903.75 rows=121212 width=78) (actual time=0.017..0.032 rows=10.00 loops=1)
+            Index Cond: (((lower(email))::text >= 'a'::text) AND ((lower(email))::text < 'b'::text))
+            Filter: ((lower(email))::text ~~ 'a%'::text)
+            Index Searches: 1
+            Buffers: shared hit=14
+    Planning Time: 0.080 ms
+    Execution Time: 0.043 ms
+
+C-collation index, ORDER BY ... COLLATE "C" | prefix "a" | show more  | Execution Time: 0.059 ms | Limit > Index Scan
+    Limit  (cost=0.55..17.84 rows=10 width=78) (actual time=0.024..0.046 rows=10.00 loops=1)
+      Buffers: shared hit=14
+      ->  Index Scan using ix on users  (cost=0.55..77519.63 rows=44849 width=78) (actual time=0.024..0.044 rows=10.00 loops=1)
+            Index Cond: (((lower(email))::text >= 'a'::text) AND ((lower(email))::text < 'b'::text) AND (ROW((lower(email))::text, id) > ROW('a0004d755aed609c358308aa1d63e18c@mail.com'::text, 1846696)))
+            Filter: ((lower(email))::text ~~ 'a%'::text)
+            Index Searches: 1
+            Buffers: shared hit=14
+    Planning Time: 0.108 ms
+    Execution Time: 0.059 ms
+
+C-collation index, ORDER BY ... COLLATE "C" | prefix "a1b2" | first page | Execution Time: 0.036 ms | Limit > Index Scan
+    Limit  (cost=0.55..0.98 rows=10 width=78) (actual time=0.012..0.027 rows=10.00 loops=1)
+      Buffers: shared hit=14
+      ->  Index Scan using ix on users  (cost=0.55..9.08 rows=200 width=78) (actual time=0.011..0.025 rows=10.00 loops=1)
+            Index Cond: (((lower(email))::text >= 'a1b2'::text) AND ((lower(email))::text < 'a1b3'::text))
+            Filter: ((lower(email))::text ~~ 'a1b2%'::text)
+            Index Searches: 1
+            Buffers: shared hit=14
+    Planning Time: 0.071 ms
+    Execution Time: 0.036 ms
+
+C-collation index, ORDER BY ... COLLATE "C" | prefix "a1b2" | show more  | Execution Time: 0.050 ms | Limit > Index Scan
+    Limit  (cost=0.55..1.66 rows=10 width=78) (actual time=0.017..0.036 rows=10.00 loops=1)
+      Buffers: shared hit=14
+      ->  Index Scan using ix on users  (cost=0.55..8.77 rows=74 width=78) (actual time=0.016..0.035 rows=10.00 loops=1)
+            Index Cond: (((lower(email))::text >= 'a1b2'::text) AND ((lower(email))::text < 'a1b3'::text) AND (ROW((lower(email))::text, id) > ROW('a1b273990bde554cf7d5bd0bce52c7a4@mail.com'::text, 1942414)))
+            Filter: ((lower(email))::text ~~ 'a1b2%'::text)
+            Index Searches: 1
+            Buffers: shared hit=14
+    Planning Time: 0.106 ms
+    Execution Time: 0.050 ms

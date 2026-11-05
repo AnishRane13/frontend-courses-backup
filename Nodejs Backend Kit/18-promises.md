@@ -68,12 +68,12 @@ console.log('5 sync');
 
 The four combinators differ in when they settle and what they do with failure:
 
-| Combinator | Fulfils when | Rejects when | Result shape |
-| --- | --- | --- | --- |
-| `Promise.all` | Every input fulfils | First input rejects (fail-fast) | Array of values |
-| `Promise.allSettled` | All inputs settle | Never | Array of `{status, value|reason}` |
-| `Promise.race` | First input to settle was a fulfilment | First input to settle was a rejection | Single value / reason |
-| `Promise.any` | First input fulfils | Every input rejects | Value / `AggregateError` |
+| Combinator           | Fulfils when                           | Rejects when                          | Result shape             |          |
+| -------------------- | -------------------------------------- | ------------------------------------- | ------------------------ | -------- |
+| `Promise.all`        | Every input fulfils                    | First input rejects (fail-fast)       | Array of values          |          |
+| `Promise.allSettled` | All inputs settle                      | Never                                 | Array of `{status, value | reason}` |
+| `Promise.race`       | First input to settle was a fulfilment | First input to settle was a rejection | Single value / reason    |          |
+| `Promise.any`        | First input fulfils                    | Every input rejects                   | Value / `AggregateError` |          |
 
 All four accept any iterable. Apart from allSettled, they propagate the first relevant settlement and do not cancel the others. There is no cancel operation on a promise, so the siblings run to completion no matter which combinator you used.
 

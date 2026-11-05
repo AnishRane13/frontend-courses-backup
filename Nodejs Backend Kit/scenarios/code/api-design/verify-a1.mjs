@@ -1,0 +1,20 @@
+// A1: claim-first idempotency, replay, parallel pair, reused key, decline vs timeout.
+import assert from 'node:assert/strict';
+import { run } from '../lib/run.mjs';
+const r = run('api-design/01-run-idempotency.mjs');
+assert.equal(r.status, 0, r.stderr);
+const o = r.stdout;
+assert.match(o, /1\. first call, key A\s+201 \{"paymentId":"ch_1"/);
+assert.match(o, /2\. retry after a timeout, key A\s+201 .*"paymentId":"ch_1"/);
+const pair = [...o.matchAll(/3\. two at once, key B \((?:first|second)\)\s+(\d+)/g)].map((m) => m[1]).sort();
+assert.deepEqual(pair, ['201', '409'], 'parallel pair should give one 201 and one 409');
+assert.match(o, /4\. key A again, different amount\s+422/);
+assert.match(o, /5\. key C, card declined\s+402/);
+assert.match(o, /key C status after decline: none/);
+assert.match(o, /6\. key C retried\s+201/);
+assert.match(o, /7\. key D, gateway timeout\s+502/);
+assert.match(o, /key D status after timeout: unknown/);
+assert.match(o, /8\. key D retried\s+409/);
+assert.match(o, /9\. no key\s+400/);
+assert.match(o, /charges made: 4 /);
+console.log('A1 verified: replay, one charge for a parallel pair, decline frees the key, timeout blocks a second charge');
