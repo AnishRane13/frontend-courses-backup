@@ -21,10 +21,12 @@
 - [x] 12-architecture.md: AR1 (Likely), AR2 (Must know)
 - [x] 13-production-debugging.md: PD1 (Must know), PD2 (Likely)
 - [x] 33 scenarios, 19 Must know. 33 of 33 have a "Verified by" script that passed in the last `verify-all.mjs` run.
-- [x] `code/check-bank.mjs` checks every rule: section order, word and number limits, code names in spoken answers, snippet length, banned phrases, pasted output, and "in a local test" claims backed by a passing script.
+- [x] Rewrite for understanding: every topic file now has a "Words you need" glossary after the run-scripts note, and every scenario has a "Before you speak" section before the question. Questions, beats, variations, follow-ups and red flags were rewritten in plain words. Code blocks, Verified and Unverified lines, numbers, sources, IDs, titles and tags were kept byte for byte.
+- [x] `code/check-bank.mjs` checks every rule: section order (now starting with "Before you speak"), the glossary, 4 to 7 "Before you speak" bullets, 2 to 5 sentences per case-variation reply, word and number limits, code names in spoken answers, snippet length, banned phrases, em dashes, pasted output, and "in a local test" claims backed by a passing script.
 
 ## To do
-- Nothing open. To refresh: `cd code && node verify-all.mjs && node check-bank.mjs && node build-index.mjs`.
+- Nothing open. To refresh the checks: `cd code && node verify-all.mjs && node check-bank.mjs`.
+- Do not run `code/build-index.mjs` any more. It regenerates README.md and PROGRESS.md from a template and would overwrite the hand-written practice guide and Watch outs.
 
 ## Unverified (needs infrastructure this machine lacks)
 | File | Scenario | What was not run |
@@ -48,25 +50,25 @@
 | 12-architecture.md | AR2 | needs Debezium and Kafka. |
 | 13-production-debugging.md | PD2 | needs a real load balancer. The exact same-moment race and the 502 the balancer returns were not reproduced; the script proves the close timing and that a request sent on the connection after the close gets no answer. |
 
-## Lesson problems found while verifying
-Each one is called out in the matching scenario's "Common wrong answers and red flags", with the correct version.
-- **Lesson 19:** says `return await` costs an extra microtask. Lesson 09 measured the opposite. (E1, E2)
-- **Lesson 29:** says microtasks drain "between phases". Since Node 11 they drain after each callback, as lesson 09 says. (E1)
-- **Lesson 37:** its line splitter breaks a multibyte character split across chunks. Use a `StringDecoder` or `setEncoding('utf8')`. (ST2)
-- **Lessons 36, 40, 43, 111:** some `'\n'` and `'\r\n'` strings became real line breaks in the scrape, so the code does not run. (ST1, ST2, W2)
-- **Lesson 40:** the timeouts table leaves out the 1 second `keepAliveTimeoutBuffer` on Node 24.19. (PD2)
-- **Lesson 64:** the idempotency code saves the key after the charge, while its interview answer says to persist it before. (A1)
-- **Lessons 66 vs 64:** "email taken" is 422 in lesson 66 and 409 in lesson 64. This bank uses 409. (V2)
-- **Lesson 65:** the cursor is built from a JS `Date` (it loses microseconds and skips rows) and parsed without validation. Its `SORTABLE` map is never used. (P1, P3)
-- **Lessons 74 and 75:** the transfer example locks only one row or none, never checks the balance (74), and reads the balance without checking that the row exists. Opposite transfers can deadlock. (D2)
-- **Lesson 82:** the dummy bcrypt hash is 38 characters, not a valid 60-character hash. (S3)
-- **Lesson 83:** it denylists a `jti` it never issues, never checks `aud`, stores refresh tokens raw, and rotates with a non-atomic find then save. (S1, S2)
+## Watch outs
+Same lesson bugs as before, said in plain English. Each one is also called out in that scenario's red flags.
+- **Lesson 19:** claims `return await` always costs an extra microtask. Lesson 09 measured the opposite. (E1, E2)
+- **Lesson 29:** says microtasks drain "between phases". Since Node 11 they drain after each callback. (E1)
+- **Lesson 37:** its line splitter breaks a character split across chunks. Use a string decoder or set encoding to utf8. (ST2)
+- **Lessons 36, 40, 43, 111:** some newline escapes became real line breaks in the scrape, so the code does not run. (ST1, ST2, W2)
+- **Lesson 40:** the timeouts table leaves out the 1 second keep-alive buffer on Node 24.19. (PD2)
+- **Lesson 64:** the idempotency code saves the key after the charge, while its interview answer says to save it before. (A1)
+- **Lessons 66 vs 64:** "email taken" is 422 in one lesson and 409 in the other. This bank uses 409. (V2)
+- **Lesson 65:** the cursor uses a JS Date (loses microseconds and skips rows) and is parsed without checks. Its sort map is unused. (P1, P3)
+- **Lessons 74 and 75:** the transfer example locks only one row or none, never checks the balance (74), and reads a balance without checking the row exists. Opposite transfers can deadlock. (D2)
+- **Lesson 82:** the dummy bcrypt hash is too short to be valid. (S3)
+- **Lesson 83:** it denylists a token id it never issues, never checks audience, stores refresh tokens raw, and rotates with a non-atomic find then save. (S1, S2)
 - **Lesson 84:** it calls SameSite Lax "the browser default". That is Chrome and Edge behaviour, not every browser. (S1, S4)
-- **Lesson 85:** `password.length` crashes when the password is missing. (S3)
-- **Lesson 100:** shows the broken lock (value `'1'` plus a plain delete), and `getWithLock` retries itself with no limit. (C2)
-- **Lesson 102:** says idle keep-alive sockets make `server.close()` hang. Since Node 19 it closes them. Its `keepAliveTimeout = 5000` advice causes the 502s in PD2. (DP1, PD2)
-- **Lessons 02, 05, 105:** heap sizes of 700 to 768 MiB for a 1 GiB container (960 MiB real limit), and 384 MiB for 512 MiB (576 MiB real limit), leave little or no headroom. (DP2)
-- **Lesson 111:** `cors: { origin: '*' }` contradicts its own gotcha about validating Origin, and it reads the token from the query string. (W2)
+- **Lesson 85:** reading password length crashes when the password is missing. (S3)
+- **Lesson 100:** shows a broken lock (plain value plus plain delete), and the lock helper retries itself with no limit. (C2)
+- **Lesson 102:** says idle keep-alive sockets make server close hang. Since Node 19 it closes them. Its 5 second keep-alive advice causes the 502s in PD2. (DP1, PD2)
+- **Lessons 02, 05, 105:** recommended heap sizes leave little or no headroom under the container limit. (DP2)
+- **Lesson 111:** allows any origin, which contradicts its own Origin gotcha, and it reads the token from the query string. (W2)
 - **Lesson 113:** the circuit breaker lets every concurrent call through in half-open. (AR1)
 - **Lesson 114:** the outbox relay keeps a database transaction open while publishing. (Q2, AR2)
 - **Lesson 115:** says lesson 105 covers Kubernetes Jobs. It does not. (Q1)

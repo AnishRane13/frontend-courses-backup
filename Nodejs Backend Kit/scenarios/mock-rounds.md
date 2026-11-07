@@ -1,11 +1,21 @@
 # Mock interview rounds
 
-Five rounds of six chained questions. Each question follows from the answer a candidate would give to the one before, the way a real interviewer drills down. There are no new answers here: each question points to the scenario to review. Answer out loud, timed, then check yourself against that scenario's spoken answer, beats and follow-ups.
+Five rounds of six chained questions. Each question follows from a good answer to the one before, the way a real interviewer drills down. There are no new answers here: each question points to the scenario to review. Answer out loud, timed, then check yourself against that scenario's spoken answer, beats and follow-ups.
 
-How to use a round:
-1. Read only the interviewer line. Answer in 60 to 90 seconds using the five steps in [00-how-to-answer.md](00-how-to-answer.md).
-2. After each answer, read the next question. It assumes you gave a reasonable answer, so do not peek ahead.
-3. When the round is done, review each listed scenario and note which beats you missed.
+**Before you start a round**
+- Finish the topics it uses first. Each question names the scenario to review.
+- Have a timer and something to cover the page. Answer out loud, not in your head.
+
+**During the round**
+1. Read only the first interviewer line. Cover the rest of the round.
+2. Answer in 60 to 90 seconds, using the five steps in [00-how-to-answer.md](00-how-to-answer.md): clarify, name the problem, give the fix, say the trade-off, say how you would verify it.
+3. Uncover the next question and answer it the same way. Each question assumes you gave a reasonable answer to the one before, the way a real interviewer drills down.
+4. Do not stop to look things up mid-round. If you get stuck, say what you would check and move on, as you would in a real interview.
+
+**After the round**
+1. For each question, open the linked scenario. Compare your answer with its "Say it in 5 beats" and spoken answer.
+2. Note which beats you missed and which trade-off you forgot. Those are what to practise next.
+3. Repeat the same round a few days later. It should feel calmer and shorter.
 
 ---
 

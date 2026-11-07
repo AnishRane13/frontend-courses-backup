@@ -11,7 +11,7 @@ const results = Object.assign({}, ...readdirSync(join(root, 'verify-results')).f
   .map((f) => JSON.parse(readFileSync(join(root, 'verify-results', f), 'utf8'))));
 const BANNED = [/my own tie-in/i, /\btie-in\b/i, /in my project/i, /\bI built\b/, /in my test/i, /\bI tested\b/i, /\bI measured\b/i,
   /\bat my company\b/i, /\bin production I\b/, /Mactores|Water Street|Boeing|Aedeon|Marketing Genie|\bAAF\b|MyDaulat/];
-const SECTIONS = ['Scenario', 'Questions to ask back', 'Spoken answer', 'Say it in 5 beats', 'Case variations',
+const SECTIONS = ['Before you speak', 'Scenario', 'Questions to ask back', 'Spoken answer', 'Say it in 5 beats', 'Case variations',
   'Follow-up questions', 'Common wrong answers and red flags', 'Numbers to quote', 'Code sketch', 'Source'];
 const NUMWORD = /\b(two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|hundred|hundreds|thousand|thousands|million|millions|billion|\d+(\.\d+)?)\b/gi;
 let flags = 0;
@@ -21,11 +21,23 @@ const all = readdirSync(bankDir).filter((f) => f.endsWith('.md')).filter((f) => 
 for (const file of all) {
   const md = readFileSync(join(bankDir, file), 'utf8');
   for (const re of BANNED) for (const m of md.matchAll(new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g'))) flag(file, 'text', `banned phrase "${m[0]}"`);
+  const prose = md.replace(/```[^]*?```/g, '');                       // text outside code blocks
+  if (prose.includes('\u2014')) flag(file, 'text', `em dash found ${prose.split('\u2014').length - 1} time(s)`);
   if (!/^\d\d-/.test(file) || file === '00-how-to-answer.md') continue;
 
   if (!/> \*\*Remember this\*\*\n(> \d\. .+\n){5}(?!> \d)/.test(md)) flag(file, 'top', 'Remember-this card must have exactly 5 numbered lines');
   if (!md.includes(`Run the scripts listed in each Code sketch once before saying "in a local test".`)) flag(file, 'top', 'missing the run-scripts note');
   if (!/^\| # \| Scenario \| Tag \|$/m.test(md)) flag(file, 'top', 'missing index table (#, Scenario, Tag)');
+  const note = md.indexOf('Run the scripts listed in each Code sketch');
+  const gloss = md.indexOf('\n## Words you need\n');
+  const table = md.search(/^\| # \| Scenario \| Tag \|$/m);
+  if (gloss === -1 || !(note < gloss && gloss < table)) flag(file, 'top', 'need "## Words you need" between the run-scripts note and the index table');
+  else {
+    const g = md.slice(gloss, table);
+    const terms = g.split('\n').filter((l) => /^\| (?!Term \||---)/.test(l));
+    if (!/^\| Term \| Plain meaning \|$/m.test(g)) flag(file, 'top', 'glossary header must be "| Term | Plain meaning |"');
+    if (terms.length < 5) flag(file, 'top', `glossary has only ${terms.length} terms`);
+  }
   if (/```text|Execution Time|^\s*(PASS|FAIL)\b/m.test(md)) flag(file, 'text', 'looks like pasted run output');
 
   const parts = md.split(/\n(?=## [A-Z]{1,2}\d\. )/).slice(1);
@@ -37,6 +49,8 @@ for (const file of all) {
     if (JSON.stringify(heads) !== JSON.stringify(SECTIONS)) flag(file, id, `sections out of order or missing: ${heads.join(' | ')}`);
     const sec = (name) => (sc.split(`### ${name}\n`)[1] ?? '').split(/\n### |\n---\n/)[0].trim();
 
+    const bys = sec('Before you speak').split('\n').filter((l) => l.startsWith('- '));
+    if (bys.length < 4 || bys.length > 7) flag(file, id, `Before you speak: ${bys.length} bullets, need 4 to 7`);
     if (!/^"[^]+"$/.test(sec('Scenario'))) flag(file, id, 'Scenario must be a quoted question');
     const qs = sec('Questions to ask back').split('\n').filter((l) => l.startsWith('- '));
     if (qs.length < 3 || qs.length > 4) flag(file, id, `questions to ask back: ${qs.length}, need 3 to 4`);
@@ -59,6 +73,11 @@ for (const file of all) {
     const vars = sec('Case variations').split('\n').filter((l) => l.startsWith('- '));
     if (vars.length < 3 || vars.length > 4) flag(file, id, `case variations: ${vars.length}, need 3 to 4`);
     if (sec('Case variations').split('\n').filter((l) => /^\s+> /.test(l)).length < vars.length) flag(file, id, 'each case variation needs a quoted spoken reply');
+    for (const [i, block] of sec('Case variations').split(/\n(?=- )/).filter((b) => b.startsWith('- ')).entries()) {
+      const reply = block.split('\n').filter((l) => /^\s+> /.test(l)).map((l) => l.replace(/^\s+> ?/, '')).join(' ').trim();
+      const n = reply.split(/(?<=[.!?])\s+(?=[A-Z"])/).filter(Boolean).length;
+      if (n < 2 || n > 5) flag(file, id, `case variation ${i + 1} reply has ${n} sentence(s), need 2 to 5`);
+    }
 
     const fus = sec('Follow-up questions').split('\n').filter((l) => l.startsWith('- '));
     const senior = fus.filter((l) => /^- \*\*Optional: senior\./.test(l));

@@ -1,14 +1,24 @@
 # Node.js Scenario Interview Bank
 
-Scenario-based Node.js backend interview questions with model answers, for developers with about three years of experience. Every spoken answer fits in 60 to 90 seconds. The lessons in this kit are the source of truth, and every claim this machine can test was tested by a script in [code/](code/).
+Scenario questions for Node.js backend interviews, aimed at about three years of experience. Each spoken answer fits in about a minute. The lessons in this kit are the source of truth. Claims this machine can test were checked by a script in [code/](code/).
 
-Start with [00-how-to-answer.md](00-how-to-answer.md). Practise with [mock-rounds.md](mock-rounds.md).
+## How to practise
 
-**Each scenario:** title and tag, scenario, questions to ask back, spoken answer (150 words or fewer, at most two numbers, no code names said aloud), say it in 5 beats, case variations, follow-ups (the hardest marked "Optional: senior"), common wrong answers and red flags, numbers to quote, code sketch (15 lines or fewer per snippet, plus the one script that verifies it), source lessons.
+Work through one scenario at a time, in this order. Understand first, then speak.
 
-**Tags:** **Must know** comes up in almost every mid-level Node backend interview. **Likely** is common.
+1. **Read [00-how-to-answer.md](00-how-to-answer.md) once.** Learn the five steps: clarify, name the problem, give the simple fix, say the trade-off, say how you would verify it.
+2. **Read the topic's "Words you need" table.** Every term used in that file is explained there in one plain sentence. Do not skip a term you cannot explain out loud.
+3. **Read "Before you speak" for the scenario.** It explains what the system does today, why it breaks, why the fix works, and which trade-off to mention. This is where you build the mental model.
+4. **Look at "Say it in 5 beats", then cover everything else.** Say the answer out loud from the five beats, in your own words, in about a minute.
+5. **Compare with the spoken answer.** Note what you missed. The spoken answer is one good version, not a script to memorise word for word.
+6. **Read the case variations and follow-ups.** These are the pushes interviewers usually make next. Answer each one out loud before reading the reply.
+7. **When a topic feels solid, use [mock-rounds.md](mock-rounds.md).** It chains questions across topics, the way a real interview does.
 
-**Before quoting a number:** run the script on that scenario's "Verified by" line once. `cd code && npm install`, then for example `node pagination/verify-p1.mjs`. PostgreSQL 18.4 and MongoDB 8.2.6 start in-process (embedded-postgres, mongodb-memory-server), so no Docker is needed. Examples use Node v24.19.0 and Express 5.3.0. `node verify-all.mjs` runs every verifying script, and `node check-bank.mjs` checks every file against the format rules.
+**Must know** tags show up in almost every mid-level Node backend interview. **Likely** is common. Start with Must know.
+
+**What each topic file gives you:** a five-line "Remember this" card, a "Words you need" glossary, and then for each scenario: a "Before you speak" explanation, the interviewer's question, questions to ask back, a spoken answer you can say in about a minute, five memory beats, harder twists with replies, follow-up questions, wrong answers to avoid, numbers you may quote, a short code sketch with the script that verifies it, and the lesson numbers behind it.
+
+**Before quoting a number:** run the script on that scenario's "Verified by" line once. `cd code && npm install`, then for example `node pagination/verify-p1.mjs`. PostgreSQL 18.4 and MongoDB 8.2.6 start in-process, so no Docker is needed. Examples use Node v24.19.0 and Express 5.3.0. `node verify-all.mjs` runs every verifying script.
 
 **Running count: 33 scenarios, 19 Must know, 33 verified by a passing script.**
 
